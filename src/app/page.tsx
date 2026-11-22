@@ -54,7 +54,7 @@ const INITIAL_STATE: ConsoleState = {
     error: null,
   },
   autoAnswerAi: true,
-  javisUrl: "http://127.0.0.1:7861",
+  jarvisUrl: "http://127.0.0.1:7861",
   activeAudioLine: null,
   lines: Array.from({ length: 5 }, (_, i) => ({
     lineId: i + 1,
@@ -279,7 +279,7 @@ export default function ConsolePage() {
                 <span className="cc-chip tone-in font-mono tabular-nums">{formatPhone(state.trunk.user)}</span>
               </div>
               <p className="mt-1.5 text-xs leading-none cc-muted">
-                ศูนย์บัญชาการรับสายอัตโนมัติ 5 คู่สาย • Javis AI + จดจำประวัติการคุยรายเบอร์
+                ศูนย์บัญชาการรับสายอัตโนมัติ 5 คู่สาย • J.A.R.V.I.S + จดจำประวัติการคุยรายเบอร์
               </p>
             </div>
           </div>
@@ -361,7 +361,7 @@ export default function ConsolePage() {
         <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <KpiTile tone="in" label="คู่สายว่าง" value={idleCount} suffix={`/ ${state.lines.length}`} meter={idleCount} icon={<Phone className="h-4 w-4" />} />
           <KpiTile tone="live" label="กำลังให้บริการ" value={busyCount} meter={busyCount} icon={<PhoneCall className="h-4 w-4" />} />
-          <KpiTile tone="ai" label="Javis AI ดูแล" value={aiCount} meter={aiCount} icon={<Bot className="h-4 w-4" />} />
+          <KpiTile tone="ai" label="J.A.R.V.I.S ดูแล" value={aiCount} meter={aiCount} icon={<Bot className="h-4 w-4" />} />
           <KpiTile tone="held" label="เบอร์ที่มีประวัติ" value={callers.length} icon={<Users className="h-4 w-4" />} />
         </div>
 
@@ -416,7 +416,7 @@ export default function ConsolePage() {
               <ShieldCheck className="h-3.5 w-3.5" />
               <span>SIP UDP :</span>
               <span className="font-mono tabular-nums">{state.trunk.port}</span>
-              <span>• WebRTC Javis Bridge</span>
+              <span>• WebRTC J.A.R.V.I.S Bridge</span>
             </p>
           </section>
 
@@ -495,7 +495,7 @@ function CommandAlertHero({
           <div className="flex flex-wrap items-center gap-2">
             <span className="cc-chip">
               <span className="cc-led cc-led--blink" />
-              <span>{isRinging ? "แจ้งเตือนสายเรียกเข้า" : "Javis AI กำลังสนทนา"}</span>
+              <span>{isRinging ? "แจ้งเตือนสายเรียกเข้า" : "J.A.R.V.I.S กำลังสนทนา"}</span>
             </span>
             <span className="cc-chip tone-idle">
               <span>คู่สาย</span>
@@ -540,7 +540,7 @@ function CommandAlertHero({
             {isRinging && autoAnswerAi && (
               <span className="cc-chip tone-ai">
                 <Bot className="h-3 w-3" />
-                <span>Javis AI จะรับสายอัตโนมัติ</span>
+                <span>J.A.R.V.I.S จะรับสายอัตโนมัติ</span>
               </span>
             )}
           </div>
@@ -600,7 +600,7 @@ function StandbyStrip({ busyCount, autoAnswerAi }: { busyCount: number; autoAnsw
             </div>
             <p className="mt-1.5 text-xs leading-none cc-muted">
               {autoAnswerAi
-                ? "เมื่อมีสายเข้า Javis AI จะรับสายอัตโนมัติ"
+                ? "เมื่อมีสายเข้า J.A.R.V.I.S จะรับสายอัตโนมัติ"
                 : "เมื่อมีสายเข้า ระบบจะส่งเสียงเรียกและแจ้งเตือนให้กดรับสาย"}
             </p>
           </div>
@@ -803,7 +803,7 @@ function CallerMemory({
                     }`}
                   >
                     <span className="font-semibold">
-                      {m.role === "caller" ? "ผู้โทร: " : m.role === "agent" ? "เจ้าหน้าที่: " : "Javis AI: "}
+                      {m.role === "caller" ? "ผู้โทร: " : m.role === "agent" ? "เจ้าหน้าที่: " : "J.A.R.V.I.S: "}
                     </span>
                     <span>{m.text}</span>
                   </div>

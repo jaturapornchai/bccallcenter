@@ -29,3 +29,16 @@ yarn-error.log*
 /data/
 *.log
 *.tsbuildinfo
+
+# J.A.R.V.I.S runtime, models, secrets & sessions
+/jarvis/.env
+/jarvis/.venv/
+/jarvis/models/
+/jarvis/sessions/
+/jarvis/docs/
+/jarvis/__pycache__/
+/jarvis/.ttslab/
+/jarvis/token*.json
+/jarvis/credentials*.json
+/jarvis/*.wav
+!/jarvis/ref_audio.wav

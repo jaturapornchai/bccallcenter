@@ -46,7 +46,7 @@ export function lineTone(line: SipLine): SignalTone {
 
 const TONE_LABEL: Record<SignalTone, string> = {
   in: "มีสายเรียกเข้า",
-  ai: "Javis AI กำลังสนทนา",
+  ai: "J.A.R.V.I.S กำลังสนทนา",
   live: "เจ้าหน้าที่กำลังสนทนา",
   held: "พักสายอยู่",
   idle: "พร้อมรับสาย",

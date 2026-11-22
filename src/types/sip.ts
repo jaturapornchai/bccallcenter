@@ -105,7 +105,7 @@ export interface CallHistoryEntry {
 export interface ConsoleState {
   trunk: TrunkStatus;
   autoAnswerAi: boolean;
-  javisUrl: string;
+  jarvisUrl: string;
   activeAudioLine: number | null;
   lines: SipLine[];
   history: CallHistoryEntry[];

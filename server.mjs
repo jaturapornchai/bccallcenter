@@ -24,7 +24,7 @@ const sip = new SipEngine({
   user: process.env.SIP_USER || "",
   password: process.env.SIP_PASSWORD || "",
   maxLines: Number(process.env.SIP_MAX_LINES || 5),
-  javisUrl: process.env.JAVIS_URL || "http://127.0.0.1:7861",
+  jarvisUrl: process.env.JARVIS_URL || "http://127.0.0.1:7861",
   autoAnswerAi: process.env.AUTO_ANSWER_AI !== "false",
   ollamaBaseUrl: process.env.OLLAMA_BASE_URL || "https://ollama.com",
   ollamaModel: process.env.OLLAMA_MODEL || "deepseek-v4.1-flash",

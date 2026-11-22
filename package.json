@@ -1,12 +1,13 @@
 {
-  "name": "yalecom-sip-console",
+  "name": "bc-call-center",
   "version": "1.0.0",
   "private": true,
   "scripts": {
     "dev": "node server.mjs",
     "build": "next build",
     "start": "NODE_ENV=production node server.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "jarvis": "powershell -ExecutionPolicy Bypass -File scripts/start-jarvis.ps1"
   },
   "dependencies": {
     "lucide-react": "^0.475.0",

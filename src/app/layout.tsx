@@ -22,7 +22,7 @@ const jetbrainsMono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: "ระบบ BC Call Center | ศูนย์บัญชาการรับสายอัตโนมัติ 5 คู่สาย",
-  description: "ระบบ BC Call Center ศูนย์บัญชาการรับสายอัตโนมัติ 5 คู่สาย เชื่อมต่อ Javis AI พร้อมระบบจดจำประวัติการคุยต่อเนื่องและวิเคราะห์คุณภาพหลังวางสาย",
+  description: "ระบบ BC Call Center ศูนย์บัญชาการรับสายอัตโนมัติ 5 คู่สาย เชื่อมต่อ J.A.R.V.I.S พร้อมระบบจดจำประวัติการคุยต่อเนื่องและวิเคราะห์คุณภาพหลังวางสาย",
 };
 
 export default function RootLayout({

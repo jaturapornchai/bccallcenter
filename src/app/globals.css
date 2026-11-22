@@ -68,7 +68,7 @@ body {
     --cc-hole: #050911;
   }
 
-  /* ---------- Signal tones (in = สายเข้า, ai = Javis AI, live = เจ้าหน้าที่คุย, held = พักสาย) ---------- */
+  /* ---------- Signal tones (in = สายเข้า, ai = J.A.R.V.I.S, live = เจ้าหน้าที่คุย, held = พักสาย) ---------- */
   .tone-in   { --tone: #059669; --tone-ink: #065f46; --tone-soft: rgba(16, 185, 129, 0.11); --tone-line: rgba(5, 150, 105, 0.45); --tone-glow: rgba(16, 185, 129, 0.38); --tone-solid: #047857; --tone-on-solid: #ffffff; }
   .tone-ai   { --tone: #7c3aed; --tone-ink: #5b21b6; --tone-soft: rgba(124, 58, 237, 0.09); --tone-line: rgba(124, 58, 237, 0.4); --tone-glow: rgba(124, 58, 237, 0.32); --tone-solid: #6d28d9; --tone-on-solid: #ffffff; }
   .tone-live { --tone: #0284c7; --tone-ink: #075985; --tone-soft: rgba(2, 132, 199, 0.09); --tone-line: rgba(2, 132, 199, 0.4); --tone-glow: rgba(14, 165, 233, 0.3); --tone-solid: #0369a1; --tone-on-solid: #ffffff; }

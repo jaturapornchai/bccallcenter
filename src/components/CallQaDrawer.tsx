@@ -40,7 +40,7 @@ const URGENCY_META: Record<NonNullable<CallAnalysis["urgency"]>, { label: string
 
 const ROLE_META: Record<CallerMessage["role"], { label: string; tone: Tone }> = {
   caller: { label: "ผู้โทร", tone: "idle" },
-  ai: { label: "Javis AI", tone: "ai" },
+  ai: { label: "J.A.R.V.I.S", tone: "ai" },
   agent: { label: "เจ้าหน้าที่", tone: "live" },
 };
 
