@@ -1,0 +1,23 @@
+# LiveKit SIP Bridge Configuration (Inbound-Only + SIP REFER Transfer)
+api_key: lk_bc_callcenter_key
+api_secret: "<replace-with-local-secret>"
+ws_url: ws://livekit:7880
+
+redis:
+  address: redis:6379
+
+# SIP Signaling & RTP Media Ports
+sip_port: 5060
+rtp_port: 10000-20000
+
+# เปิด true เมื่อใช้งานหลัง NAT/Public IP จริง เพื่อให้ SDP Contact/c= ประกาศ Public IP ถูกต้อง
+use_external_ip: true
+
+# Codec Priority สำหรับเสียงภาษาไทยชัดใสในระบบโทรศัพท์ (รองรับทั้ง G.711 8kHz และ Opus)
+codecs:
+  PCMU: true
+  PCMA: true
+  opus: true
+
+logging:
+  level: info

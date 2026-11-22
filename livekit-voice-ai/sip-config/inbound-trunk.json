@@ -1,0 +1,7 @@
+{
+  "trunk": {
+    "name": "BC Call Center Inbound (Yalecom)",
+    "numbers": ["02XXXXXXX"],
+    "krisp_enabled": true
+  }
+}

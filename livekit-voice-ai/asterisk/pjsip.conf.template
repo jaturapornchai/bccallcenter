@@ -1,0 +1,72 @@
+; คัดลอกไฟล์นี้เป็น asterisk/pjsip.conf แล้วใส่ค่าจริง (ห้าม commit pjsip.conf ที่ใส่รหัสผ่านแล้ว)
+; ทำหน้าที่ลงทะเบียน SIP REGISTER กับ Yalecom แล้วส่งสายเข้า (INVITE) ไปที่ livekit-sip:5060
+
+[transport-udp]
+type=transport
+protocol=udp
+bind=0.0.0.0:5060
+; หากอยู่หลัง NAT ให้เปิดคอมเมนต์และใส่ Public IP / Local Subnet ของเครื่อง
+; external_media_address=YOUR_PUBLIC_IP
+; external_signaling_address=YOUR_PUBLIC_IP
+; local_net=192.168.0.0/16
+
+; --- 1. Yalecom SIP Trunk (Register Outbound -> Inbound Only) ---
+[yalecom-reg]
+type=registration
+transport=transport-udp
+outbound_auth=yalecom-auth
+server_uri=sip:YOUR_YALECOM_HOST:5060
+client_uri=sip:YOUR_SIP_USER@YOUR_YALECOM_HOST:5060
+contact_user=YOUR_SIP_USER
+retry_interval=30
+expiration=180
+
+[yalecom-auth]
+type=auth
+auth_type=userpass
+username=YOUR_SIP_USER
+password=YOUR_SIP_PASSWORD
+
+[yalecom-aor]
+type=aor
+contact=sip:YOUR_YALECOM_HOST:5060
+qualify_frequency=30
+
+[yalecom-trunk]
+type=endpoint
+transport=transport-udp
+context=from-yalecom
+disallow=all
+allow=ulaw,alaw
+outbound_auth=yalecom-auth
+aors=yalecom-aor
+from_user=YOUR_SIP_USER
+from_domain=YOUR_YALECOM_HOST
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+allow_transfer=yes
+
+[yalecom-identify]
+type=identify
+endpoint=yalecom-trunk
+; ใส่ IP ของ Yalecom (Main & Failover)
+match=YOUR_YALECOM_MAIN_IP
+match=YOUR_YALECOM_FAILOVER_IP
+
+; --- 2. Internal Link to LiveKit SIP Container ---
+[livekit-sip-aor]
+type=aor
+contact=sip:livekit-sip:5060
+
+[livekit-sip]
+type=endpoint
+transport=transport-udp
+context=from-livekit
+disallow=all
+allow=ulaw,alaw,opus
+aors=livekit-sip-aor
+direct_media=no
+allow_transfer=yes
+dtmf_mode=rfc4733

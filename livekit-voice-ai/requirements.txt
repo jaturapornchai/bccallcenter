@@ -1,0 +1,11 @@
+livekit>=1.0.0
+livekit-agents>=1.0.0
+livekit-plugins-openai>=1.0.0
+livekit-plugins-silero>=1.0.0
+python-dotenv>=1.0.1
+httpx>=0.28.0
+numpy>=1.26.0
+scipy>=1.13.0
+faster-whisper>=1.1.0
+# Optional TTS backends (ติดตั้งเฉพาะตัวที่เลือกใช้):
+# pythaitts>=0.4.0

@@ -42,3 +42,10 @@ yarn-error.log*
 /jarvis/credentials*.json
 /jarvis/*.wav
 !/jarvis/ref_audio.wav
+
+# LiveKit Voice AI local secrets & venv
+/livekit-voice-ai/.env
+/livekit-voice-ai/.venv/
+/livekit-voice-ai/asterisk/pjsip.conf
+/livekit-voice-ai/__pycache__/
+/livekit-voice-ai/**/__pycache__/

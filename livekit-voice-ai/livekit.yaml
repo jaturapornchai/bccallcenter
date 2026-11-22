@@ -1,0 +1,31 @@
+# LiveKit Server Configuration (Self-Hosted)
+# หมายเหตุ: เปลี่ยน keys ด้านล่างเป็นค่าสุ่มที่ปลอดภัยก่อนขึ้น Production (ความยาว secret >= 32 ตัวอักษร)
+
+port: 7880
+bind_addresses:
+  - "0.0.0.0"
+
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  port_range_start: 50000
+  port_range_end: 50100
+  # เปิด true เมื่อรันบน Cloud/VPS ที่มี Public IP จริง; ตั้ง false เมื่อทดสอบใน LAN/Localhost
+  use_external_ip: true
+  enable_loopback_candidate: false
+
+redis:
+  address: redis:6379
+
+keys:
+  # เปลี่ยนให้ตรงกับ LIVEKIT_API_KEY และ LIVEKIT_API_SECRET ใน .env และ sip.yaml
+  lk_bc_callcenter_key: "<replace-with-local-secret>"
+
+room:
+  auto_create: true
+  empty_timeout: 60
+  departure_timeout: 20
+
+logging:
+  level: info
+  pion_level: warn

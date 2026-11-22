@@ -1,0 +1,70 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: lk-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    networks:
+      - voice-net
+
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: lk-server
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "7880:7880/tcp"         # HTTP / WebSocket Signaling
+      - "7881:7881/tcp"         # WebRTC over TCP fallback
+      - "7882:7882/udp"         # WebRTC UDP Mux (single-port)
+      - "50000-50100:50000-50100/udp" # WebRTC ICE/Media range
+    depends_on:
+      - redis
+    networks:
+      - voice-net
+
+  livekit-sip:
+    image: livekit/sip:latest
+    container_name: lk-sip
+    restart: unless-stopped
+    command: --config /etc/sip.yaml
+    volumes:
+      - ./sip.yaml:/etc/sip.yaml:ro
+    ports:
+      # หมายเหตุ: หากใช้ Asterisk Registrar ด้านล่าง ให้เปลี่ยน host port 5060 เป็น 5062:5060
+      # เพื่อไม่ให้ชนพอร์ต 5060 ของ Asterisk หรือของ BC Call Center Node.js เดิม
+      - "${LK_SIP_HOST_PORT:-5062}:5060/udp"
+      - "${LK_SIP_HOST_PORT:-5062}:5060/tcp"
+      - "10000-20000:10000-20000/udp" # RTP Media Range (PCMU/PCMA/Opus)
+    depends_on:
+      - redis
+      - livekit
+    networks:
+      - voice-net
+
+  # Optional: Asterisk PJSIP Registrar Gateway สำหรับ SIP Provider แบบ Register Username/Password (เช่น Yalecom)
+  # เพราะ LiveKit SIP เป็น INVITE-only ไม่ส่ง SIP REGISTER ออกเอง
+  # รันด้วย: docker compose --profile yalecom-register up -d
+  asterisk-registrar:
+    image: andrius/asterisk:latest
+    container_name: lk-asterisk-registrar
+    profiles: ["yalecom-register"]
+    restart: unless-stopped
+    volumes:
+      - ./asterisk/pjsip.conf:/etc/asterisk/pjsip.conf:ro
+      - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "20001-20200:20001-20200/udp"
+    depends_on:
+      - livekit-sip
+    networks:
+      - voice-net
+
+networks:
+  voice-net:
+    driver: bridge

@@ -38,6 +38,7 @@ flowchart LR
 - `jarvis/` — ซอร์สโค้ด **J.A.R.V.I.S Voice Agent** (`voice_agent.py`, `config.py`, `grounding.py`, `openthai_asr.py`, `google_tools.py`, `desktop_agent.py`, `static/`)
 - `src/` — หน้าจอ **ระบบ BC Call Center** (โหมดมืด/สว่าง, Motion Graphic, แผง 5 คู่สาย, ลิ้นชักผล QA และประวัติรายเบอร์)
 - `scripts/start-jarvis.ps1` — สคริปต์รัน J.A.R.V.I.S จากโฟลเดอร์ `jarvis/`
+- `livekit-voice-ai/` — ชุดสถาปัตยกรรม **Full-Duplex LiveKit Server + LiveKit SIP + LiveKit Agents (Python v1.x)** แบบแยกโฟลเดอร์ (Inbound-Only + Asterisk PJSIP Registrar สำหรับ Yalecom + DTMF Fast-Path + SIP REFER Transfer + Thai Normalizer + Streaming TTS) ดูรายละเอียดเพิ่มเติมที่ [livekit-voice-ai/README.md](livekit-voice-ai/README.md)
 
 ---
 
