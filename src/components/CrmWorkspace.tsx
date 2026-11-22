@@ -97,6 +97,9 @@ export function CrmWorkspace({
   const [selectedPhone, setSelectedPhone] = useState<string | null>(initialPhone || crm.customers[0]?.phone || null);
   const [showNewCustomer, setShowNewCustomer] = useState(false);
   const [showNewTicket, setShowNewTicket] = useState(false);
+  const [showAllCustomers, setShowAllCustomers] = useState(false);
+  const [showAllCustTickets, setShowAllCustTickets] = useState(false);
+  const [showAllCustLogs, setShowAllCustLogs] = useState(false);
 
   // New / Edit Customer Form state
   const [editDraft, setEditDraft] = useState<{
@@ -427,8 +430,8 @@ export function CrmWorkspace({
                 ยังไม่มีข้อมูลลูกค้าในระบบ — เมื่อมีสายเข้าหรือกด &quot;เพิ่มลูกค้า&quot; ข้อมูลจะปรากฏที่นี่อัตโนมัติ
               </div>
             ) : (
-              <div className="max-h-[540px] space-y-2 overflow-y-auto pr-1">
-                {filteredCustomers.map((c) => {
+              <div className="space-y-2">
+                {(showAllCustomers ? filteredCustomers : filteredCustomers.slice(0, 6)).map((c) => {
                   const isSelected = !showNewCustomer && activeCustomer?.phone === c.phone;
                   const meta = TIER_META[c.tier] || TIER_META.new;
                   const openCnt = crm.tickets.filter(
@@ -477,6 +480,17 @@ export function CrmWorkspace({
                     </button>
                   );
                 })}
+                {filteredCustomers.length > 6 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllCustomers((v) => !v)}
+                    className="cc-btn h-8 w-full text-xs"
+                  >
+                    {showAllCustomers
+                      ? "ย่อรายการลูกค้า"
+                      : `ดูลูกค้าทั้งหมด (+${filteredCustomers.length - 6} ราย)`}
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -640,8 +654,8 @@ export function CrmWorkspace({
                           ยังไม่มีเคสของลูกค้ารายนี้
                         </div>
                       ) : (
-                        <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
-                          {customerTickets.map((t) => (
+                        <div className="space-y-2">
+                          {(showAllCustTickets ? customerTickets : customerTickets.slice(0, 4)).map((t) => (
                             <div key={t.id} className="rounded-xl border border-[var(--cc-border)] bg-[var(--cc-inset)] p-2.5 text-xs">
                               <div className="flex items-center justify-between gap-2">
                                 <span className="font-mono text-[10.5px] cc-dim">{t.id}</span>
@@ -652,6 +666,15 @@ export function CrmWorkspace({
                               <div className="mt-1 font-semibold cc-text">{t.subject}</div>
                             </div>
                           ))}
+                          {customerTickets.length > 4 && (
+                            <button
+                              type="button"
+                              onClick={() => setShowAllCustTickets((v) => !v)}
+                              className="cc-btn h-8 w-full text-xs"
+                            >
+                              {showAllCustTickets ? "ย่อเคส" : `ดูเคสทั้งหมด (+${customerTickets.length - 4})`}
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
@@ -666,8 +689,8 @@ export function CrmWorkspace({
                           ยังไม่มีบันทึกสายสนทนา
                         </div>
                       ) : (
-                        <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
-                          {customerLogs.map((l) => (
+                        <div className="space-y-2">
+                          {(showAllCustLogs ? customerLogs : customerLogs.slice(0, 4)).map((l) => (
                             <button
                               key={l.sessionId}
                               type="button"
@@ -683,6 +706,15 @@ export function CrmWorkspace({
                               </div>
                             </button>
                           ))}
+                          {customerLogs.length > 4 && (
+                            <button
+                              type="button"
+                              onClick={() => setShowAllCustLogs((v) => !v)}
+                              className="cc-btn h-8 w-full text-xs"
+                            >
+                              {showAllCustLogs ? "ย่อประวัติ" : `ดูประวัติทั้งหมด (+${customerLogs.length - 4} สาย)`}
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>

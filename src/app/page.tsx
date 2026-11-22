@@ -755,6 +755,7 @@ function TabButton({
 }
 
 function CallLogList({ logs, onOpen }: { logs: CallLogEntry[]; onOpen: (sessionId: string) => void }) {
+  const [expanded, setExpanded] = useState(false);
   if (logs.length === 0) {
     return (
       <div className="cc-empty px-4 py-10 text-center text-xs">
@@ -762,9 +763,10 @@ function CallLogList({ logs, onOpen }: { logs: CallLogEntry[]; onOpen: (sessionI
       </div>
     );
   }
+  const visible = expanded ? logs : logs.slice(0, 6);
   return (
-    <div className="cc-scroll max-h-[34rem] space-y-2 overflow-y-auto pr-1">
-      {logs.map((log) => {
+    <div className="space-y-2">
+      {visible.map((log) => {
         const status = callStatusMeta(log.status);
         const sentiment = sentimentMeta(log.analysis?.sentiment);
         const csat = log.analysis?.csatScore;
@@ -810,6 +812,11 @@ function CallLogList({ logs, onOpen }: { logs: CallLogEntry[]; onOpen: (sessionI
           </button>
         );
       })}
+      {logs.length > 6 && (
+        <button type="button" onClick={() => setExpanded((v) => !v)} className="cc-btn h-8 w-full text-xs">
+          {expanded ? "ย่อรายการบันทึก QA" : `ดูทั้งหมด (+${logs.length - 6} รายการ)`}
+        </button>
+      )}
     </div>
   );
 }
@@ -825,6 +832,7 @@ function CallerMemory({
   onSelect: (phone: string) => void;
   onOpenLog: (sessionId: string) => void;
 }) {
+  const [showAllSessions, setShowAllSessions] = useState(false);
   if (callers.length === 0 || !active) {
     return (
       <div className="cc-empty px-4 py-10 text-center text-xs">
@@ -832,6 +840,7 @@ function CallerMemory({
       </div>
     );
   }
+  const visibleSessions = showAllSessions ? active.sessions : active.sessions.slice(0, 2);
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap gap-1.5">
@@ -865,8 +874,8 @@ function CallerMemory({
           </span>
         </div>
 
-        <div className="cc-scroll max-h-80 space-y-3 overflow-y-auto pr-1">
-          {active.sessions.map((sess) => (
+        <div className="space-y-3">
+          {visibleSessions.map((sess) => (
             <div key={sess.id} className="space-y-1.5">
               <div className="flex items-center justify-between gap-2">
                 <span className="inline-flex items-center gap-1 text-[11px] font-medium leading-none cc-dim">
@@ -881,7 +890,7 @@ function CallerMemory({
               {sess.messages.length === 0 ? (
                 <div className="text-[11px] italic cc-dim">ไม่มีข้อความถอดเสียงในรอบนี้</div>
               ) : (
-                sess.messages.map((m, idx) => (
+                sess.messages.slice(-4).map((m, idx) => (
                   <div
                     key={`${sess.id}-${idx}`}
                     className={`px-2.5 py-1.5 text-xs leading-relaxed ${
@@ -897,6 +906,11 @@ function CallerMemory({
               )}
             </div>
           ))}
+          {active.sessions.length > 2 && (
+            <button type="button" onClick={() => setShowAllSessions((v) => !v)} className="cc-btn h-8 w-full text-xs">
+              {showAllSessions ? "ย่อรอบสนทนา" : `ดูรอบสนทนาทั้งหมด (+${active.sessions.length - 2} รอบ)`}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -904,12 +918,14 @@ function CallerMemory({
 }
 
 function HistoryList({ history, onSelect }: { history: CallHistoryEntry[]; onSelect: (phone: string) => void }) {
+  const [expanded, setExpanded] = useState(false);
   if (history.length === 0) {
     return <div className="cc-empty px-4 py-10 text-center text-xs">ยังไม่มีประวัติสายเข้าในรอบนี้</div>;
   }
+  const visible = expanded ? history : history.slice(0, 6);
   return (
-    <div className="cc-scroll max-h-[34rem] space-y-2 overflow-y-auto pr-1">
-      {history.map((item) => {
+    <div className="space-y-2">
+      {visible.map((item) => {
         const status = callStatusMeta(item.status);
         const isMissed = status.tone === "danger";
         return (
@@ -936,6 +952,11 @@ function HistoryList({ history, onSelect }: { history: CallHistoryEntry[]; onSel
           </button>
         );
       })}
+      {history.length > 6 && (
+        <button type="button" onClick={() => setExpanded((v) => !v)} className="cc-btn h-8 w-full text-xs">
+          {expanded ? "ย่อประวัติสายเข้า" : `ดูทั้งหมด (+${history.length - 6} สาย)`}
+        </button>
+      )}
     </div>
   );
 }
