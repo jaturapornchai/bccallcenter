@@ -3,6 +3,7 @@
 import type { CSSProperties, ReactNode } from "react";
 import {
   Bot,
+  Globe,
   Headphones,
   History,
   Mic,
@@ -16,6 +17,7 @@ import {
   Timer,
   UserCheck,
 } from "lucide-react";
+import { SUPPORTED_LANGUAGES, languageShortLabel } from "@/types/sip";
 import type { SipLine } from "@/types/sip";
 
 interface LineCardProps {
@@ -32,6 +34,7 @@ interface LineCardProps {
   onTakeOverAi: (lineId: number) => void;
   onAttachAi: (lineId: number) => void;
   onViewCallerHistory?: (phone: string) => void;
+  onChangeLanguage?: (lineId: number, language: string | null) => void;
 }
 
 /** Visual signal tone of a line — maps to `.tone-*` classes in globals.css */
@@ -205,6 +208,7 @@ export function LineCard({
   onTakeOverAi,
   onAttachAi,
   onViewCallerHistory,
+  onChangeLanguage,
 }: LineCardProps) {
   const tone = lineTone(line);
   const isIdle = line.state === "idle";
@@ -250,6 +254,26 @@ export function LineCard({
                   <span className="tabular-nums">{line.callerTotalCalls}</span>
                 </button>
               )}
+
+              {!isIdle && line.crmTier === "vip" && (
+                <span className="cc-chip tone-ai">VIP</span>
+              )}
+              {!isIdle && line.crmTier === "at_risk" && (
+                <span className="cc-chip tone-danger">ต้องดูแลพิเศษ</span>
+              )}
+              {!isIdle && (line.crmOpenTickets ?? 0) > 0 && (
+                <span className="cc-chip tone-danger">
+                  <span>เคสค้าง</span>
+                  <span className="tabular-nums">{line.crmOpenTickets}</span>
+                </span>
+              )}
+
+              {!isIdle && (
+                <span className={`cc-chip ${line.language ? "tone-live" : "tone-held"}`}>
+                  <Globe className="h-3 w-3" />
+                  <span>{languageShortLabel(line.language)}</span>
+                </span>
+              )}
             </div>
 
             <div className="mt-2 flex flex-wrap items-center gap-2.5">
@@ -262,6 +286,11 @@ export function LineCard({
                   <span className="font-mono text-lg font-semibold leading-none tracking-wide tabular-nums cc-text">
                     {formatPhone(line.remoteNumber)}
                   </span>
+                  {(line.crmName || line.crmCompany) && (
+                    <span className="text-xs font-medium cc-muted">
+                      {[line.crmName, line.crmCompany].filter(Boolean).join(" • ")}
+                    </span>
+                  )}
                   <span className="cc-chip tone-idle font-mono tabular-nums">
                     <Timer className="h-3 w-3" />
                     <span>
@@ -307,6 +336,23 @@ export function LineCard({
 
           {(isConnected || isHeld) && (
             <>
+              {onChangeLanguage && (
+                <select
+                  aria-label="เปลี่ยนภาษากลางสาย"
+                  value={line.language || ""}
+                  onChange={(e) => onChangeLanguage(line.lineId, e.target.value || null)}
+                  className="h-10 rounded-xl border border-[var(--cc-border)] bg-[var(--cc-inset)] px-2.5 text-xs font-medium cc-text outline-none cursor-pointer"
+                  title="เปลี่ยนภาษากลางสาย (J.A.R.V.I.S + บันทึกลง CRM)"
+                >
+                  <option value="">🌐 อัตโนมัติ (ถามภาษา)</option>
+                  {SUPPORTED_LANGUAGES.map((l) => (
+                    <option key={l.code} value={l.code}>
+                      🌐 {l.short}
+                    </option>
+                  ))}
+                </select>
+              )}
+
               {line.aiActive ? (
                 <button type="button" onClick={() => onTakeOverAi(line.lineId)} className="cc-btn cc-btn--tone tone-in">
                   <UserCheck className="h-3.5 w-3.5" />

@@ -17,7 +17,13 @@ from livekit.plugins import silero
 
 from llm import build_callcenter_system_prompt, create_thai_llm
 from stt import ThaiWhisperSTT
-from tools import CallCenterContext, build_call_tools, load_caller_summary, save_call_transcript
+from tools import (
+    CallCenterContext,
+    build_call_tools,
+    load_caller_language,
+    load_caller_summary,
+    save_call_transcript,
+)
 from tts import ThaiStreamingTTS
 
 load_dotenv()
@@ -96,23 +102,34 @@ async def entrypoint(ctx: JobContext) -> None:
     sip_participant = await ctx.wait_for_participant()
     caller_phone = _extract_caller_phone(sip_participant)
     prior_summary = load_caller_summary(caller_phone)
+    saved_language = load_caller_language(caller_phone)
+    is_new_caller = saved_language is None
     logger.info(
-        "Inbound call connected: room=%s participant=%s caller=%s has_history=%s",
+        "Inbound call connected: room=%s participant=%s caller=%s lang=%s has_history=%s",
         ctx.room.name,
         sip_participant.identity,
         caller_phone,
+        saved_language or "auto(new)",
         bool(prior_summary),
     )
 
     lk_api = api.LiveKitAPI()
+    stt_engine = ThaiWhisperSTT(language=saved_language)
     call_ctx = CallCenterContext(
         room_name=ctx.room.name,
         sip_participant_identity=sip_participant.identity,
         caller_phone=caller_phone,
         livekit_api=lk_api,
+        language=saved_language,
+        on_language_change=stt_engine.set_language,
     )
 
-    instructions = build_callcenter_system_prompt(caller_phone, prior_summary)
+    instructions = build_callcenter_system_prompt(
+        caller_phone,
+        prior_summary,
+        preferred_language=saved_language,
+        is_new_caller=is_new_caller,
+    )
     tools = build_call_tools(call_ctx)
 
     agent = Agent(instructions=instructions, tools=tools)
@@ -122,7 +139,7 @@ async def entrypoint(ctx: JobContext) -> None:
             min_speech_duration=float(os.getenv("BARGE_MIN_SPEECH_S", "0.25")),
             min_silence_duration=float(os.getenv("ENDPOINT_MIN_DELAY_S", "0.45")),
         ),
-        stt=ThaiWhisperSTT(),
+        stt=stt_engine,
         llm=create_thai_llm(),
         tts=ThaiStreamingTTS(),
         # True Full-Duplex & Fast Barge-in
@@ -176,10 +193,15 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await session.start(room=ctx.room, agent=agent)
 
-    # ทักทายรับสายเหมือนพนักงาน Call Center มืออาชีพ
-    if prior_summary:
+    # ทักทายรับสายตามภาษาของเบอร์เดิม หรือถามภาษาสำหรับเบอร์ใหม่
+    if is_new_caller:
+        await session.say(
+            "สวัสดีครับ ระบบ บีซี คอลเซ็นเตอร์ เจาร์วิส ยินดีให้บริการครับ สะดวกคุยเป็นภาษาไทย หรือต้องการใช้ภาษาอื่นแจ้งได้เลยนะครับ Hello, BC Call Center, which language would you prefer?",
+            allow_interruptions=True,
+        )
+    elif prior_summary or (saved_language and saved_language != "th"):
         await session.generate_reply(
-            instructions="ทักทายลูกค้าเดิมอย่างอบอุ่น แจ้งชื่อเจาร์วิสจากระบบ บีซี คอลเซ็นเตอร์ และถามต่อเนื่องจากเรื่องที่เคยคุยไว้ก่อนหน้าให้สั้นกระชับ 1–2 ประโยค"
+            instructions=f"ทักทายลูกค้าเดิมเป็นภาษา {saved_language or 'th'} อย่างอบอุ่น แจ้งชื่อ J.A.R.V.I.S จาก BC Call Center และถามต่อเนื่องจากเรื่องเดิมสั้นกระชับ 1–2 ประโยค"
         )
     else:
         await session.say(

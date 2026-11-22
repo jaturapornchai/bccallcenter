@@ -70,7 +70,7 @@ class ThaiWhisperSTT(stt.STT):
         api_base_url: str | None = None,
         api_key: str | None = None,
         api_model: str | None = None,
-        language: str = "th",
+        language: str | None = "th",
     ) -> None:
         super().__init__(
             capabilities=stt.STTCapabilities(streaming=False, interim_results=False)
@@ -84,9 +84,15 @@ class ThaiWhisperSTT(stt.STT):
         self.api_base_url = (api_base_url or os.getenv("STT_API_BASE_URL", "http://127.0.0.1:8001/v1")).rstrip("/")
         self.api_key = api_key or os.getenv("STT_API_KEY", "local-key")
         self.api_model = api_model or os.getenv("STT_API_MODEL", "biodatlab/whisper-th-large-v3-combined")
-        self.language = language
+        self.language: str | None = language  # None = auto-detect ภาษาของลูกค้าอัตโนมัติ
+        self.last_detected_language: str | None = language
         self._model: Any = None
         self._http = httpx.AsyncClient(timeout=20.0)
+
+    def set_language(self, language: str | None) -> None:
+        """สลับภาษาการฟัง STT กลางสาย (None = auto-detect)."""
+        self.language = language or None
+        logger.info("STT language switched to: %s", self.language or "auto")
 
     def _ensure_local_model(self) -> Any:
         if self._model is None:
@@ -97,9 +103,9 @@ class ThaiWhisperSTT(stt.STT):
             self._model = WhisperModel(resolved, device=self.device, compute_type=self.compute_type)
         return self._model
 
-    def _transcribe_local_sync(self, samples: np.ndarray) -> str:
+    def _transcribe_local_sync(self, samples: np.ndarray) -> tuple[str, str | None]:
         model = self._ensure_local_model()
-        segments, _ = model.transcribe(
+        segments, info = model.transcribe(
             samples,
             language=self.language,
             beam_size=1,
@@ -107,13 +113,17 @@ class ThaiWhisperSTT(stt.STT):
             vad_parameters={"min_silence_duration_ms": 250},
             condition_on_previous_text=False,
         )
-        return " ".join(seg.text.strip() for seg in segments if seg.text.strip()).strip()
+        detected = getattr(info, "language", None) or self.language
+        text = " ".join(seg.text.strip() for seg in segments if seg.text.strip()).strip()
+        return text, detected
 
-    async def _transcribe_http(self, samples: np.ndarray, sr: int) -> str:
+    async def _transcribe_http(self, samples: np.ndarray, sr: int) -> tuple[str, str | None]:
         wav_bytes = _float32_to_wav_bytes(samples, sr)
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         files = {"file": ("speech.wav", wav_bytes, "audio/wav")}
-        data = {"model": self.api_model, "language": self.language}
+        data: dict[str, str] = {"model": self.api_model}
+        if self.language:
+            data["language"] = self.language
         res = await self._http.post(
             f"{self.api_base_url}/audio/transcriptions",
             headers=headers,
@@ -122,7 +132,7 @@ class ThaiWhisperSTT(stt.STT):
         )
         res.raise_for_status()
         payload = res.json()
-        return str(payload.get("text", "")).strip()
+        return str(payload.get("text", "")).strip(), payload.get("language") or self.language
 
     async def _recognize_impl(
         self,
@@ -132,22 +142,25 @@ class ThaiWhisperSTT(stt.STT):
         conn_options: APIConnectOptions = APIConnectOptions(),
     ) -> stt.SpeechEvent:
         samples, sr = _audio_buffer_to_16k_float32(buffer)
+        detected: str | None = language or self.language
         if samples.size < 1600:  # < 100ms
             text = ""
         elif self.provider == "openai_compat":
-            text = await self._transcribe_http(samples, sr)
+            text, detected = await self._transcribe_http(samples, sr)
         else:
-            text = await asyncio.to_thread(self._transcribe_local_sync, samples)
+            text, detected = await asyncio.to_thread(self._transcribe_local_sync, samples)
 
         if text.strip(" .!?…") in WHISPER_HALLUCINATIONS:
             text = ""
+        if text and detected:
+            self.last_detected_language = detected
 
         return stt.SpeechEvent(
             type=stt.SpeechEventType.FINAL_TRANSCRIPT,
             alternatives=[
                 stt.SpeechData(
                     text=text,
-                    language=language or self.language,
+                    language=detected or "th",
                     confidence=0.95 if text else 0.0,
                 )
             ],

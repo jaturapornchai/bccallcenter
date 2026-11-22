@@ -38,6 +38,61 @@ def _tickets_path() -> Path:
     return Path(os.getenv("TICKETS_PATH", "../data/tickets.json")).resolve()
 
 
+def _crm_db_path() -> Path:
+    return Path(os.getenv("CRM_DB_PATH", "../data/crm-db.json")).resolve()
+
+
+def load_caller_language(phone: str) -> str | None:
+    """โหลดภาษาประจำของลูกค้าจาก crm-db.json (None หากเป็นเบอร์ใหม่)."""
+    key = normalize_phone(phone)
+    p = _crm_db_path()
+    if not key or not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        cust = (data.get("customers") or {}).get(key)
+        lang = cust.get("preferredLanguage") if isinstance(cust, dict) else None
+        return str(lang) if lang else None
+    except Exception:
+        return None
+
+
+def save_caller_language(phone: str, language: str | None) -> None:
+    """บันทึกภาษาที่ลูกค้าเลือก/เปลี่ยนกลางสายลง crm-db.json เพื่อใช้ต่อเนื่องในสายถัดไป."""
+    key = normalize_phone(phone)
+    if not key:
+        return
+    p = _crm_db_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {"customers": {}, "tickets": []}
+    except Exception:
+        data = {"customers": {}, "tickets": []}
+    customers = data.setdefault("customers", {})
+    now = datetime.now(timezone.utc).isoformat()
+    cust = customers.get(key) or {
+        "phone": key,
+        "name": "",
+        "company": "",
+        "tier": "new",
+        "stage": "lead",
+        "preferredLanguage": None,
+        "tags": [],
+        "notes": "",
+        "avgCsat": None,
+        "csatCount": 0,
+        "lastSentiment": None,
+        "totalCalls": 1,
+        "createdAt": now,
+        "updatedAt": now,
+        "lastCallAt": now,
+    }
+    cust["preferredLanguage"] = language or None
+    cust["updatedAt"] = now
+    customers[key] = cust
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def load_caller_summary(phone: str) -> str | None:
     """โหลดประวัติการคุยเดิมของเบอร์ที่โทรเข้ามาจากไฟล์ call-memory.json ที่ใช้ร่วมกับเว็บ BC Call Center."""
     key = normalize_phone(phone)
@@ -120,6 +175,8 @@ class CallCenterContext:
     sip_participant_identity: str
     caller_phone: str
     livekit_api: api.LiveKitAPI
+    language: str | None = None
+    on_language_change: Any = None
     transcript: list[dict[str, str]] = field(default_factory=list)
     transfer_targets: dict[str, str] = field(default_factory=dict)
 
@@ -225,6 +282,18 @@ def build_call_tools(ctx: CallCenterContext) -> list[Any]:
             return "โอนสายไม่สำเร็จในขณะนี้ กรุณาขอฝากชื่อและเบอร์ติดต่อกลับผ่าน create_callback_ticket แทน"
 
     @function_tool()
+    async def set_conversation_language(language: str) -> str:
+        """ตั้งค่าหรือเปลี่ยนภาษาสนทนากลางสาย (รหัส ISO: th, en, zh, ja, ko, lo, my, vi, km) และบันทึกลง CRM."""
+        code = str(language or "").strip().lower()[:2]
+        if code not in {"th", "en", "zh", "ja", "ko", "lo", "my", "vi", "km"}:
+            return "ไม่รองรับรหัสภาษานี้ กรุณาใช้ th, en, zh, ja, ko, lo, my, vi หรือ km"
+        ctx.language = code
+        save_caller_language(ctx.caller_phone, code)
+        if callable(ctx.on_language_change):
+            ctx.on_language_change(code)
+        return f"สลับภาษาการฟังและการตอบเป็น {code} และบันทึกลง CRM เรียบร้อยแล้ว ให้ตอบลูกค้าเป็นภาษา {code} ต่อทันที"
+
+    @function_tool()
     async def hangup_call() -> str:
         """วางสายโทรศัพท์อัตโนมัติอย่างสุภาพหลังกล่าวลาลูกค้าเรียบร้อยแล้ว."""
         asyncio.create_task(ctx.execute_hangup(delay_sec=1.8))
@@ -234,6 +303,7 @@ def build_call_tools(ctx: CallCenterContext) -> list[Any]:
         lookup_caller_history,
         search_knowledge_base,
         create_callback_ticket,
+        set_conversation_language,
         transfer_to_human,
         hangup_call,
     ]

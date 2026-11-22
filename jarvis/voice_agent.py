@@ -150,17 +150,86 @@ def transcribe(audio):
 _DEFAULT_TRANSCRIBE = transcribe
 
 
+CALL_LANG: dict[str, str | None] = {}  # webrtc_id -> ISO lang code ("th","en","zh","ja","ko","lo","my","vi","km") or None (auto)
+CALL_NEW_CALLER: dict[str, bool] = {}  # webrtc_id -> True when caller is new and language is not yet known
+LANG_NAMES = {
+    "th": "ภาษาไทย (Thai)",
+    "en": "ภาษาอังกฤษ (English)",
+    "zh": "ภาษาจีน (Chinese)",
+    "ja": "ภาษาญี่ปุ่น (Japanese)",
+    "ko": "ภาษาเกาหลี (Korean)",
+    "lo": "ภาษาลาว (Lao)",
+    "my": "ภาษาเมียนมา (Burmese)",
+    "vi": "ภาษาเวียดนาม (Vietnamese)",
+    "km": "ภาษากัมพูชา (Khmer)",
+}
+
+
+def _detect_lang_switch(text: str, current_lang: str | None = None) -> str | None:
+    s = (text or "").strip()
+    if not s:
+        return None
+    low = s.lower()
+    if re.search(r"(ภาษาอังกฤษ|พูดอังกฤษ|คุยอังกฤษ|english|speak english|in english)", low):
+        return "en"
+    if re.search(r"(ภาษาจีน|พูดจีน|คุยจีน|chinese|mandarin|中文|普通话|说中文)", low):
+        return "zh"
+    if re.search(r"(ภาษาญี่ปุ่น|พูดญี่ปุ่น|japanese|日本語)", low):
+        return "ja"
+    if re.search(r"(ภาษาเกาหลี|พูดเกาหลี|korean|한국어)", low):
+        return "ko"
+    if re.search(r"(ภาษาลาว|พูดลาว|คุยลาว|\blao\b|ພາສາລາວ)", low):
+        return "lo"
+    if re.search(r"(ภาษาพม่า|ภาษาเมียนมา|burmese|myanmar|မြန်မာ)", low):
+        return "my"
+    if re.search(r"(ภาษาเวียดนาม|vietnamese|tiếng việt)", low):
+        return "vi"
+    if re.search(r"(ภาษาเขมร|ภาษากัมพูชา|khmer|cambodian|ភាសាខ្មែរ)", low):
+        return "km"
+    if re.search(r"(ภาษาไทย|พูดไทย|คุยไทย|speak thai|in thai|thai language)", low):
+        return "th"
+    if not current_lang:
+        if re.search(r"[\u0E00-\u0E7F]", s):
+            return "th"
+        if re.search(r"[\u3040-\u30FF]", s):
+            return "ja"
+        if re.search(r"[\uAC00-\uD7AF]", s):
+            return "ko"
+        if re.search(r"[\u4E00-\u9FFF]", s):
+            return "zh"
+        if re.search(r"[\u0E80-\u0EFF]", s):
+            return "lo"
+        if re.search(r"[\u1000-\u109F]", s):
+            return "my"
+        if re.search(r"[\u1780-\u17FF]", s):
+            return "km"
+        if re.search(r"[a-zA-Z]{3,}", s):
+            return "en"
+    return None
+
+
 def transcribe_final(audio):
-    """The words of a speech the secretary answers: Typhoon Whisper Turbo on the GPU (ลุงจืด 2026-11-18). The VAD filter
-    is voiced()'s: without it Whisper heard "สวัสดีครับ" in 2 s of silence and in 2 s of hiss, a turn nobody said.
-    ponytail: the GPU model failing (the card is nearly full) costs that one speech the better ears, not the call"""
+    """The words of a speech the secretary answers: Typhoon Whisper Turbo on the GPU (ลุงจืด 2026-11-18).
+    Supports per-caller language and auto-detection for new callers."""
     data = to16k(audio)
     if final_stt is None:
         return stt.transcribe(data)
+    cid = call_id() if "call_id" in globals() else ""
+    req_lang = CALL_LANG.get(cid) if cid in CALL_LANG else "th"
     try:
-        segments, _ = final_stt.transcribe(data, language="th", beam_size=1, vad_filter=True,
-                                           vad_parameters=C.STT_VAD_PARAMS, without_timestamps=True)
-        return "".join(s.text for s in segments).strip()
+        segments, info = final_stt.transcribe(
+            data,
+            language=req_lang,
+            beam_size=1,
+            vad_filter=True,
+            vad_parameters=C.STT_VAD_PARAMS,
+            without_timestamps=True,
+        )
+        text = "".join(s.text for s in segments).strip()
+        if cid and req_lang is None and getattr(info, "language", None) in LANG_NAMES and text:
+            CALL_LANG[cid] = info.language
+            CALL_NEW_CALLER[cid] = False
+        return text
     except Exception:
         log.exception("Typhoon STT failed, OpenThai heard this speech")
         return stt.transcribe(data)
@@ -408,14 +477,16 @@ def level(arr):
 
 def speak(text):
     model, voice = tts
-    norm = normalize_text(_thai_pronounce(_say_numbers(text))).strip()
+    cid = call_id() if "call_id" in globals() else ""
+    lang = CALL_LANG.get(cid) or "th"
+    norm = normalize_text(_thai_pronounce(_say_numbers(text))).strip() if lang == "th" else re.sub(r"[#*_`~|]", " ", text or "").strip()
     if not norm:
         return np.zeros((1, C.TTS_SAMPLE_RATE // 10), np.float32)
     # a lone short word ("ครับ") now and then comes out all silence (OmniVoice: 3 of 20 tries, 2026-11-04): the caller hears
     # nothing and PyAV's resampler fails on the empty frame. Ceiling: 3 tries, then 0.1 s of quiet
     for _ in range(3):
         with TTS_LOCK:
-            wav = model.generate(text=norm, language="th", voice_clone_prompt=voice, speed=C.TTS_SPEED,
+            wav = model.generate(text=norm, language=lang, voice_clone_prompt=voice, speed=C.TTS_SPEED,
                                  generation_config=OmniVoiceGenerationConfig(num_step=C.TTS_STEP, guidance_scale=C.TTS_CFG))[0]
         arr = np.asarray(wav, dtype=np.float32).reshape(-1) if wav is not None else np.zeros(0, np.float32)
         if arr.size:
@@ -1588,6 +1659,27 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
     # date/time only when asked: the boss kept quoting the clock as a web price's "updated at" date and time, and
     # the number guard can't tell (the clock is a source); no clock in the turn = nothing to misquote
     now = asked + clock_note(heard)
+    # Multi-language per-caller tracking & mid-call language switching
+    cid = call_id()
+    switched_lang = _detect_lang_switch(heard, CALL_LANG.get(cid))
+    if cid and switched_lang and CALL_LANG.get(cid) != switched_lang:
+        CALL_LANG[cid] = switched_lang
+        CALL_NEW_CALLER[cid] = False
+        yield AdditionalOutputs({"kind": "lang", "language": switched_lang})
+
+    active_lang = CALL_LANG.get(cid)
+    if active_lang and active_lang != "th":
+        lang_label = LANG_NAMES.get(active_lang, active_lang)
+        now += (
+            f"\n(ระบบภาษา: ลูกค้ากำลังคุยเป็น {lang_label} ให้แปลข้อมูลคำตอบจากฐานความรู้ภาษาไทยและตอบกลับลูกค้าเป็น {lang_label} "
+            f"อย่างเป็นธรรมชาติ สั้นกระชับ 1-2 ประโยค และหากลูกค้าขอเปลี่ยนภาษากลางสายให้สลับตามทันที)"
+        )
+    elif CALL_NEW_CALLER.get(cid) and not active_lang:
+        now += (
+            "\n(ระบบภาษา: เบอร์ลูกค้าใหม่ ยังไม่ทราบภาษา หากลูกค้ายังไม่ระบุภาษาให้ถามสั้นๆ ว่าต้องการคุยภาษาไทยหรือภาษาอื่น "
+            "และเมื่อทราบภาษาแล้วให้แปลคำตอบและตอบเป็นภาษาที่ลูกค้าเลือก)"
+        )
+
     said, screen, turn = ([FILLER_TEXT["hello"]] if hello else []), [], {}  # the history keeps the hello too
     interrupted, answered = False, False
     stop = threading.Event()  # set when the turn is over: beside()'s thread reads no more
@@ -2209,6 +2301,22 @@ def make_app(stream, public=False):
             async for out in stream.output_stream(webrtc_id):
                 yield f"data: {json.dumps(out.args[0], ensure_ascii=False)}\n\n"
         return StreamingResponse(events(), media_type="text/event-stream")
+
+    @app.post("/language")  # set or switch caller language (initial from CRM or mid-call switch)
+    async def post_language(body: dict):
+        call = str(body.get("webrtc_id") or "")
+        lang = body.get("language")
+        is_new = bool(body.get("is_new_caller", False))
+        if not call:
+            return JSONResponse({"error": "webrtc_id is required"}, status_code=400)
+        if lang is None or lang == "" or lang == "auto":
+            CALL_LANG[call] = None
+        elif str(lang) in LANG_NAMES:
+            CALL_LANG[call] = str(lang)
+        else:
+            return JSONResponse({"error": "unsupported language"}, status_code=400)
+        CALL_NEW_CALLER[call] = is_new
+        return {"ok": True, "language": CALL_LANG[call], "is_new_caller": is_new}
 
     @app.post("/chat")  # typed message instead of speech; answered with voice + screen like a spoken turn
     async def post_chat(body: dict):

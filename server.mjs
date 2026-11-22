@@ -131,6 +131,21 @@ app.prepare().then(async () => {
           case "reanalyze":
             await sip.runPostCallAnalysis(String(msg.phone || ""), String(msg.sessionId || ""));
             break;
+          case "crmUpsertCustomer":
+            sip.crmUpsertCustomer(msg.customer || {});
+            break;
+          case "crmCreateTicket":
+            sip.crmCreateTicket(msg.ticket || {});
+            break;
+          case "crmUpdateTicket":
+            sip.crmUpdateTicket(String(msg.id || ""), msg.patch || {});
+            break;
+          case "crmDeleteTicket":
+            sip.crmDeleteTicket(String(msg.id || ""));
+            break;
+          case "setLineLanguage":
+            await sip.setLineLanguage(Number(msg.lineId), msg.language ? String(msg.language) : null);
+            break;
           case "reregister":
             sip.sendRegister();
             break;

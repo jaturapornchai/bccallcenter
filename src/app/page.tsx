@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import {
   Activity,
   Bot,
+  Briefcase,
   ChevronRight,
   Clock3,
   History,
@@ -39,8 +40,10 @@ import {
   lineTone,
 } from "@/components/LineCard";
 import { CallQaDrawer, formatScore, scoreTone, sentimentMeta } from "@/components/CallQaDrawer";
+import { CrmWorkspace } from "@/components/CrmWorkspace";
 import { AudioBridge } from "@/lib/audio-bridge";
-import type { CallHistoryEntry, CallLogEntry, CallerRecord, ConsoleState, SipLine } from "@/types/sip";
+import { languageShortLabel } from "@/types/sip";
+import type { CallHistoryEntry, CallLogEntry, CallerRecord, ConsoleState, CrmState, SipLine } from "@/types/sip";
 
 const INITIAL_STATE: ConsoleState = {
   trunk: {
@@ -75,12 +78,20 @@ const INITIAL_STATE: ConsoleState = {
   history: [],
   callers: [],
   callLogs: [],
+  crm: {
+    customers: [],
+    tickets: [],
+    stats: { totalCustomers: 0, vipOrRisk: 0, openTickets: 0, urgentTickets: 0, avgCsat: null },
+  },
 };
 
 type RightTab = "qa" | "callers" | "history";
+type MainView = "console" | "crm";
 
 export default function ConsolePage() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [activeView, setActiveView] = useState<MainView>("console");
+  const [crmFocusPhone, setCrmFocusPhone] = useState<string | null>(null);
   const [state, setState] = useState<ConsoleState>(INITIAL_STATE);
   const [wsConnected, setWsConnected] = useState(false);
   const [audioReady, setAudioReady] = useState(false);
@@ -285,6 +296,31 @@ export default function ConsolePage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {/* Main Workspace Mode Switcher */}
+            <div className="inline-flex items-center gap-1 rounded-xl border border-[var(--cc-border)] bg-[var(--cc-inset)] p-1">
+              <button
+                type="button"
+                onClick={() => setActiveView("console")}
+                className={`cc-btn h-7 px-3 text-xs ${activeView === "console" ? "cc-btn--tone tone-live" : "border-transparent bg-transparent"}`}
+              >
+                <Radio className="h-3.5 w-3.5" />
+                <span>ศูนย์รับสาย</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveView("crm")}
+                className={`cc-btn h-7 px-3 text-xs ${activeView === "crm" ? "cc-btn--tone tone-ai" : "border-transparent bg-transparent"}`}
+              >
+                <Briefcase className="h-3.5 w-3.5" />
+                <span>ระบบ CRM</span>
+                {(state.crm?.stats.openTickets ?? 0) > 0 && (
+                  <span className="cc-chip tone-danger py-0 text-[10px] tabular-nums">
+                    {state.crm?.stats.openTickets}
+                  </span>
+                )}
+              </button>
+            </div>
+
             <span className="cc-chip tone-idle h-9 rounded-xl px-3 font-mono tabular-nums">
               <Clock3 className="h-3.5 w-3.5" />
               <span suppressHydrationWarning>{clock}</span>
@@ -357,14 +393,6 @@ export default function ConsolePage() {
           <StandbyStrip busyCount={busyCount} autoAnswerAi={state.autoAnswerAi} />
         )}
 
-        {/* KPI telemetry */}
-        <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <KpiTile tone="in" label="คู่สายว่าง" value={idleCount} suffix={`/ ${state.lines.length}`} meter={idleCount} icon={<Phone className="h-4 w-4" />} />
-          <KpiTile tone="live" label="กำลังให้บริการ" value={busyCount} meter={busyCount} icon={<PhoneCall className="h-4 w-4" />} />
-          <KpiTile tone="ai" label="J.A.R.V.I.S ดูแล" value={aiCount} meter={aiCount} icon={<Bot className="h-4 w-4" />} />
-          <KpiTile tone="held" label="เบอร์ที่มีประวัติ" value={callers.length} icon={<Users className="h-4 w-4" />} />
-        </div>
-
         {(toast || micWarning) && (
           <div role="status" className="cc-banner tone-held mb-4 px-4 py-2.5">
             <TriangleAlert className="h-4 w-4 shrink-0" />
@@ -372,80 +400,126 @@ export default function ConsolePage() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-          {/* Left: 5-line switchboard */}
-          <section className="space-y-3 lg:col-span-7">
-            <div className="flex flex-wrap items-center justify-between gap-3 px-1">
-              <h2 className="inline-flex items-center gap-2 text-sm font-semibold leading-none cc-text">
-                <Radio className="h-4 w-4" />
-                <span>แผงรับสาย 5 คู่สาย</span>
-                <span className="cc-chip tone-idle">รับสายเข้าเท่านั้น</span>
-              </h2>
-              <div className="inline-flex flex-wrap items-center gap-1.5" aria-label="สถานะคู่สายทั้งหมด">
-                {state.lines.map((l) => (
-                  <span key={l.lineId} className={`cc-rail tone-${lineTone(l)}`} title={`คู่สาย ${l.lineId}: ${lineStatusLabel(l)}`}>
-                    <span className={`cc-led ${l.state === "ringing_in" ? "cc-led--blink" : ""}`} />
-                    <span className="font-mono tabular-nums">L{l.lineId}</span>
-                  </span>
-                ))}
-              </div>
+        {activeView === "crm" ? (
+          <CrmWorkspace
+            crm={
+              (state.crm as CrmState) || {
+                customers: [],
+                tickets: [],
+                stats: { totalCustomers: 0, vipOrRisk: 0, openTickets: 0, urgentTickets: 0, avgCsat: null },
+              }
+            }
+            callLogs={callLogs}
+            initialPhone={crmFocusPhone}
+            onUpsertCustomer={(customer) => {
+              sendCmd({ type: "crmUpsertCustomer", customer });
+              setToast("บันทึกข้อมูลลูกค้าลง CRM เรียบร้อยแล้ว");
+            }}
+            onCreateTicket={(ticket) => {
+              sendCmd({ type: "crmCreateTicket", ticket });
+              setToast("สร้างเคสติดตามงานใหม่เรียบร้อยแล้ว");
+            }}
+            onUpdateTicket={(id, patch) => sendCmd({ type: "crmUpdateTicket", id, patch })}
+            onDeleteTicket={(id) => sendCmd({ type: "crmDeleteTicket", id })}
+            onOpenQaLog={(_phone, sessionId) => setSelectedLogId(sessionId)}
+          />
+        ) : (
+          <>
+            {/* KPI telemetry */}
+            <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <KpiTile tone="in" label="คู่สายว่าง" value={idleCount} suffix={`/ ${state.lines.length}`} meter={idleCount} icon={<Phone className="h-4 w-4" />} />
+              <KpiTile tone="live" label="กำลังให้บริการ" value={busyCount} meter={busyCount} icon={<PhoneCall className="h-4 w-4" />} />
+              <KpiTile tone="ai" label="J.A.R.V.I.S ดูแล" value={aiCount} meter={aiCount} icon={<Bot className="h-4 w-4" />} />
+              <KpiTile tone="held" label="เคส CRM เปิดค้าง" value={state.crm?.stats.openTickets ?? 0} icon={<Briefcase className="h-4 w-4" />} />
             </div>
 
-            <div className="space-y-3">
-              {state.lines.map((line) => (
-                <LineCard
-                  key={line.lineId}
-                  line={line}
-                  isDark={isDark}
-                  isActiveAudio={state.activeAudioLine === line.lineId}
-                  nowMs={nowMs}
-                  onAnswer={handleAnswer}
-                  onReject={handleReject}
-                  onHangup={(id) => sendCmd({ type: "hangup", lineId: id })}
-                  onMute={(id) => sendCmd({ type: "mute", lineId: id })}
-                  onHold={(id) => sendCmd({ type: "hold", lineId: id })}
-                  onSelectAudio={(id) => sendCmd({ type: "setActiveAudioLine", lineId: id })}
-                  onTakeOverAi={handleTakeOverAi}
-                  onAttachAi={(id) => sendCmd({ type: "attachAi", lineId: id })}
-                  onViewCallerHistory={viewCaller}
-                />
-              ))}
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+              {/* Left: 5-line switchboard */}
+              <section className="space-y-3 lg:col-span-7">
+                <div className="flex flex-wrap items-center justify-between gap-3 px-1">
+                  <h2 className="inline-flex items-center gap-2 text-sm font-semibold leading-none cc-text">
+                    <Radio className="h-4 w-4" />
+                    <span>แผงรับสาย 5 คู่สาย</span>
+                    <span className="cc-chip tone-idle">รับสายเข้าเท่านั้น</span>
+                  </h2>
+                  <div className="inline-flex flex-wrap items-center gap-1.5" aria-label="สถานะคู่สายทั้งหมด">
+                    {state.lines.map((l) => (
+                      <span key={l.lineId} className={`cc-rail tone-${lineTone(l)}`} title={`คู่สาย ${l.lineId}: ${lineStatusLabel(l)}`}>
+                        <span className={`cc-led ${l.state === "ringing_in" ? "cc-led--blink" : ""}`} />
+                        <span className="font-mono tabular-nums">L{l.lineId}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  {state.lines.map((line) => (
+                    <LineCard
+                      key={line.lineId}
+                      line={line}
+                      isDark={isDark}
+                      isActiveAudio={state.activeAudioLine === line.lineId}
+                      nowMs={nowMs}
+                      onAnswer={handleAnswer}
+                      onReject={handleReject}
+                      onHangup={(id) => sendCmd({ type: "hangup", lineId: id })}
+                      onMute={(id) => sendCmd({ type: "mute", lineId: id })}
+                      onHold={(id) => sendCmd({ type: "hold", lineId: id })}
+                      onSelectAudio={(id) => sendCmd({ type: "setActiveAudioLine", lineId: id })}
+                      onTakeOverAi={handleTakeOverAi}
+                      onAttachAi={(id) => sendCmd({ type: "attachAi", lineId: id })}
+                      onViewCallerHistory={(phone) => {
+                        setCrmFocusPhone(phone);
+                        viewCaller(phone);
+                      }}
+                      onChangeLanguage={(lineId, language) => {
+                        sendCmd({ type: "setLineLanguage", lineId, language });
+                        setToast(
+                          language
+                            ? `เปลี่ยนภาษาคู่สาย ${lineId} เป็น ${languageShortLabel(language)} และบันทึกลง CRM แล้ว`
+                            : `ตั้งค่าภาษาคู่สาย ${lineId} เป็นอัตโนมัติแล้ว`
+                        );
+                      }}
+                    />
+                  ))}
+                </div>
+
+                <p className="inline-flex items-center gap-1.5 px-1 text-[11px] leading-none cc-dim">
+                  <ShieldCheck className="h-3.5 w-3.5" />
+                  <span>SIP UDP :</span>
+                  <span className="font-mono tabular-nums">{state.trunk.port}</span>
+                  <span>• WebRTC J.A.R.V.I.S Bridge • CRM Active</span>
+                </p>
+              </section>
+
+              {/* Right: post-call QA, caller memory, recent calls */}
+              <aside className="space-y-4 lg:col-span-5">
+                <div className="cc-panel p-4">
+                  <div className="cc-tabs mb-4" role="tablist">
+                    <TabButton active={rightTab === "qa"} tone="ai" onClick={() => setRightTab("qa")} icon={<Sparkles className="h-3.5 w-3.5" />}>
+                      <span>บันทึก QA</span>
+                      <span className="tabular-nums">({callLogs.length})</span>
+                    </TabButton>
+                    <TabButton active={rightTab === "callers"} tone="live" onClick={() => setRightTab("callers")} icon={<Users className="h-3.5 w-3.5" />}>
+                      <span>รายเบอร์</span>
+                      <span className="tabular-nums">({callers.length})</span>
+                    </TabButton>
+                    <TabButton active={rightTab === "history"} tone="in" onClick={() => setRightTab("history")} icon={<History className="h-3.5 w-3.5" />}>
+                      <span>สายเข้าล่าสุด</span>
+                      <span className="tabular-nums">({state.history.length})</span>
+                    </TabButton>
+                  </div>
+
+                  {rightTab === "qa" && <CallLogList logs={callLogs} onOpen={setSelectedLogId} />}
+                  {rightTab === "callers" && (
+                    <CallerMemory callers={callers} active={activeCallerRecord} onSelect={setSelectedCallerPhone} onOpenLog={setSelectedLogId} />
+                  )}
+                  {rightTab === "history" && <HistoryList history={state.history} onSelect={viewCaller} />}
+                </div>
+              </aside>
             </div>
-
-            <p className="inline-flex items-center gap-1.5 px-1 text-[11px] leading-none cc-dim">
-              <ShieldCheck className="h-3.5 w-3.5" />
-              <span>SIP UDP :</span>
-              <span className="font-mono tabular-nums">{state.trunk.port}</span>
-              <span>• WebRTC J.A.R.V.I.S Bridge</span>
-            </p>
-          </section>
-
-          {/* Right: post-call QA, caller memory, recent calls */}
-          <aside className="space-y-4 lg:col-span-5">
-            <div className="cc-panel p-4">
-              <div className="cc-tabs mb-4" role="tablist">
-                <TabButton active={rightTab === "qa"} tone="ai" onClick={() => setRightTab("qa")} icon={<Sparkles className="h-3.5 w-3.5" />}>
-                  <span>บันทึก QA</span>
-                  <span className="tabular-nums">({callLogs.length})</span>
-                </TabButton>
-                <TabButton active={rightTab === "callers"} tone="live" onClick={() => setRightTab("callers")} icon={<Users className="h-3.5 w-3.5" />}>
-                  <span>รายเบอร์</span>
-                  <span className="tabular-nums">({callers.length})</span>
-                </TabButton>
-                <TabButton active={rightTab === "history"} tone="in" onClick={() => setRightTab("history")} icon={<History className="h-3.5 w-3.5" />}>
-                  <span>สายเข้าล่าสุด</span>
-                  <span className="tabular-nums">({state.history.length})</span>
-                </TabButton>
-              </div>
-
-              {rightTab === "qa" && <CallLogList logs={callLogs} onOpen={setSelectedLogId} />}
-              {rightTab === "callers" && (
-                <CallerMemory callers={callers} active={activeCallerRecord} onSelect={setSelectedCallerPhone} onOpenLog={setSelectedLogId} />
-              )}
-              {rightTab === "history" && <HistoryList history={state.history} onSelect={viewCaller} />}
-            </div>
-          </aside>
-        </div>
+          </>
+        )}
       </div>
 
       {selectedLog && <CallQaDrawer log={selectedLog} onClose={closeDrawer} onReanalyze={handleReanalyze} />}
@@ -516,7 +590,16 @@ function CommandAlertHero({
             </span>
             <AudioEqualizer bars={16} className="h-8" />
           </div>
-          {line.remoteName && <div className="mt-1.5 text-sm leading-none cc-muted">{line.remoteName}</div>}
+          {(line.crmName || line.crmCompany || line.remoteName) && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-sm leading-none cc-muted">
+              <span>{[line.crmName || line.remoteName, line.crmCompany].filter(Boolean).join(" • ")}</span>
+              {line.crmTier === "vip" && <span className="cc-chip tone-ai">VIP</span>}
+              {line.crmTier === "at_risk" && <span className="cc-chip tone-danger">ต้องดูแลพิเศษ</span>}
+              {(line.crmOpenTickets ?? 0) > 0 && (
+                <span className="cc-chip tone-danger">เคสค้าง {line.crmOpenTickets}</span>
+              )}
+            </div>
+          )}
 
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <span className="cc-chip tone-idle font-mono tabular-nums">
@@ -536,6 +619,9 @@ function CommandAlertHero({
               ) : (
                 <span>สายใหม่ ยังไม่มีประวัติ</span>
               )}
+            </span>
+            <span className={`cc-chip ${line.language ? "tone-live" : "tone-held"}`}>
+              <span>🌐 {languageShortLabel(line.language)}</span>
             </span>
             {isRinging && autoAnswerAi && (
               <span className="cc-chip tone-ai">
