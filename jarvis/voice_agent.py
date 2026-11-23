@@ -459,7 +459,7 @@ BC_STT_PROMPT = (
 )
 
 
-def _choose_triple_ear(ear1: str, ear2: str, ear3: str, lang: str | None) -> tuple[str, list[str]]:
+def _choose_triple_ear(ear1: str, ear2: str, ear3: str, lang: str | None, det_lang: str | None = None) -> tuple[str, list[str]]:
     """Select the primary transcript from Triple-Ear ASR (ear1=Whisper GPU, ear2=OpenThai th-TH, ear3=OpenThai th-mix)
     and collect distinct alternate hearings to pass to DeepSeek at 0ms extra latency."""
     cands = [t.strip() for t in (ear1, ear2, ear3)]
@@ -470,6 +470,11 @@ def _choose_triple_ear(ear1: str, ear2: str, ear3: str, lang: str | None) -> tup
         # Prefer ear3 if caller explicitly spoke English / language switch phrase that Whisper missed
         if e3 and _detect_explicit_lang_switch(e3) and not _detect_explicit_lang_switch(e1):
             picked = e3
+        elif det_lang and det_lang != "th" and (e2 or e3):
+            # Thai call + Whisper guessed another language with low confidence (confident non-Thai already
+            # returned via TRIPLE-EAR-MULTI): its text is a garbled foreign hallucination ("Mình tôi này mặn"),
+            # so trust the Thai OpenThai ears instead.
+            picked = e2 or e3
         else:
             picked = e1
     else:
@@ -601,7 +606,7 @@ def transcribe_final(audio):
         )
         return picked
 
-    picked, alts = _choose_triple_ear(ear1, ear2, ear3, req_lang)
+    picked, alts = _choose_triple_ear(ear1, ear2, ear3, req_lang, det_lang)
     if cid:
         LAST_ALT_HEARD[cid] = alts
     dt = time.perf_counter() - t_stt
