@@ -545,12 +545,7 @@ EAR23_CPU_POOL = ThreadPoolExecutor(4)
 TRIPLE_EAR_POOL = EAR23_CPU_POOL  # backward-compatible alias
 _EAR1_GPU_SEM = threading.Semaphore(1)  # CTranslate2 runs 1 GPU job at a time: skip queuing if busy to prevent domino timeouts
 LAST_ALT_HEARD: dict[str, list[str]] = {}  # webrtc_id -> distinct alternate transcripts from secondary ears
-BC_STT_PROMPT = (
-    "โปรแกรมบัญชี BC Ai Account, บีซีเอไอแอคเคาท์, AI, เอไอ, Express, เอ็กซ์เพรส, "
-    "ต้นทุนสินค้า, FIFO, FEFO, LIFO, ถัวเฉลี่ย, แพ็กเกจ Starter สตาร์ทเตอร์, Standard สแตนดาร์ด, "
-    "Professional, Enterprise, โปรโมชัน, ส่วนลด, ภาษีมูลค่าเพิ่ม VAT, ภ.พ.30, ลูกหนี้, เจ้าหนี้, "
-    "ขายสด, ขายเชื่อ, สต็อก, คลังสินค้า, ผู้รับเหมา, ใบกำกับภาษี, ใบเสนอราคา, POS, API, SQL"
-)
+BC_STT_PROMPT = "BC Ai Account, บีซีเอไอแอคเคาท์, FIFO, FEFO, VAT, ใบรับสินค้า, ต้นทุนสินค้า, แพ็กเกจ"
 _STT_STUTTER_3_RE = re.compile(r"([\u0E00-\u0E7F]{3,})\1")
 _STT_STUTTER_2X3_RE = re.compile(r"([\u0E00-\u0E7F]{2,})\1\1")
 
@@ -607,11 +602,11 @@ def transcribe_final(audio):
                 log.info("TRIPLE-EAR: Ear1 GPU busy, using fast CPU Ear2/3")
                 return "", None, 0.0
             try:
-                # Thai call -> Typhoon Whisper Turbo locked to Thai + BC accounting prompt (2.3% CER, zero English hallucinations!)
+                # Thai call -> Typhoon Whisper Turbo locked to Thai + concise domain anchor prompt
                 segments, info = model.transcribe(
                     data,
                     language="th",
-                    beam_size=1 if phone_mode else 2,
+                    beam_size=2,
                     initial_prompt=BC_STT_PROMPT,
                     repetition_penalty=1.15,
                     no_repeat_ngram_size=3,
@@ -744,7 +739,12 @@ def transcribe_final(audio):
         and ear1
         and not (ear3 and (_detect_explicit_lang_switch(ear3) or _detect_script_lang(ear3) == "en"))
     ):
-        if _has_stt_stutter(ear1) and ear2 and len(ear2.strip()) >= 4 and not _has_stt_stutter(ear2):
+        e2_clean = (ear2 or "").strip()
+        e1_garbled = (
+            _has_stt_stutter(ear1)
+            or (len(e2_clean) >= 8 and len(ear1.strip()) >= len(e2_clean) * 2 and not _has_stt_stutter(e2_clean))
+        )
+        if e1_garbled and len(e2_clean) >= 4 and not _has_stt_stutter(e2_clean):
             picked = ear2
             alt_sources = (ear1, ear3)
         else:
@@ -2438,7 +2438,8 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 f"\n(ข้อมูลลูกค้าจากระบบสายเข้า: ลูกค้าใหม่ยังไม่มีชื่อในระบบ.{phone_note} "
                 f"— ตอบคำถามให้สบายใจก่อน ค่อยถามชื่อเล่นแบบไม่บังคับแค่ครั้งเดียวตามจังหวะ)"
             )
-    if cid and (alt_heard := LAST_ALT_HEARD.pop(cid, [])):
+    alt_heard = LAST_ALT_HEARD.pop(cid, []) if cid else []
+    if alt_heard:
         now += f"\n(ระบบฟัง 3 หู — คำจากหูสำรองเผื่อหูหลักเพี้ยน: {' | '.join(alt_heard[:2])})"
 
     active_lang = CALL_LANG.get(cid)
@@ -2537,7 +2538,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                     "max_chars": 2200 if phone_mode else 2600,
                     "include_media": not phone_mode,
                 })]
-                if "lookup_menu" in tools and MENU_CODE_ASK.search(f"{heard} {clean_q0}"):
+                if "lookup_menu" in tools and MENU_CODE_ASK.search(f"{heard} {clean_q0} {' '.join(alt_heard)}"):
                     calls.append(("lookup_menu", {"query": clean_q0, **zone, "limit": 5}))
                 if "search_docs" in tools and not phone_mode:
                     calls.append(("search_docs", {"query": qs[0]}))

@@ -120,6 +120,11 @@ def test_stt_stutter_detector_and_ear2_fallback():
     ):
         assert not stutter(clean), f"expected stutter=False for {clean!r}"
 
+    # Verify garbled Typhoon transcript (len >= 2x clean OpenThai) falls back to OpenThai
+    e1_bad = "ไปรับสินค้าสิทธิ์สิการสิตเองครับ ไอล์รัดสิงานครัว"
+    e2_good = "ใบรับสินค้าเมนูอะไร"
+    assert len(e2_good) >= 8 and len(e1_bad) >= len(e2_good) * 2, "garbled length ratio must trigger e2 fallback"
+
 
 def test_ear1_gpu_busy_fast_fails_without_domino_timeout():
     sem = threading.Semaphore(1)
