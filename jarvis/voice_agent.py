@@ -60,6 +60,7 @@ from omnivoice.models.omnivoice import OmniVoiceGenerationConfig  # noqa: E402
 
 import config as C  # noqa: E402
 import desktop_agent  # noqa: E402
+from elevenlabs_tts import ElevenLabsTTS, SPEAKABLE_RE  # noqa: E402
 import grounding  # noqa: E402
 import google_tools  # noqa: E402
 from openthai_asr import OpenThaiASR  # noqa: E402
@@ -78,7 +79,7 @@ SENTENCE_TAIL = re.compile(r"(?:ครับ|ค่ะ|คะ|[!?])\s*$")
 DANGLING_HEAD = re.compile(r"^(?:แต่|แล้ว|พร้อม|และ|โดย|ส่วน|หรือ|ซึ่ง|จากนั้น|ต่อมา)")
 # what TTS must not read: markdown marks, a table's |---| rule, a list's number, a link's target (ลุงจืด 2026-11-23:
 # strip markdown and table marks before the voice if any slip through), and the Chinese/Japanese the boss slips in
-JUNK = re.compile(r"<think>.*?</think>|\]\([^)\s]*\)|[*#_`~>|\[\]{}]|[-:=]{3,}|^\s*[-•]\s*|^\s*\d+[.)]\s+|[\u3040-\u30ff\u4e00-\u9fff]", re.S | re.M)
+JUNK = re.compile(r"<think>.*?</think>|\]\([^)\s]*\)|[*#_`~>|\[\]{}]|[-:=]{3,}|^\s*[-•]\s*|^\s*\d+[.)]\s+|[\u3000-\u303f\u3040-\u30ff\u4e00-\u9fff\uff00-\uffef]", re.S | re.M)
 # ponytail: keyword route. Things that change daily: these words force a fresh web_search before the brain speaks.
 # a customer's phone read back went to brain.bcsmethai.com as a search (role-play 2026-11-04): such numbers stay
 # out of the BC brain query; local docs still get them. ponytail: names still go; skip the prefetch when needed
@@ -431,7 +432,8 @@ def until_screen(tokens, screen):
 
 
 def clean(text):
-    return re.sub(r"\s+", " ", JUNK.sub("", text)).strip()
+    out = re.sub(r"\s+", " ", JUNK.sub("", text)).strip()
+    return out if SPEAKABLE_RE.search(out) else ""
 
 
 def thai_day(d):
@@ -584,7 +586,18 @@ def _say_numbers(text):
 
 
 def load_tts():
-    """OmniVoice (the Thai fine-tune) plus the reference voice, encoded once instead of on every phrase."""
+    """Prefer ElevenLabs Flash v2.5 Streaming TTS when configured (0 GPU VRAM, ~150ms TTFA);
+    otherwise load local OmniVoice Thai on GPU."""
+    use_el = (C.TTS_PROVIDER == "elevenlabs") or (C.TTS_PROVIDER == "auto" and bool(C.ELEVENLABS_API_KEY))
+    if use_el and C.ELEVENLABS_API_KEY:
+        el = ElevenLabsTTS(
+            api_key=C.ELEVENLABS_API_KEY,
+            voice_id=C.ELEVENLABS_VOICE_ID,
+            model_id=C.ELEVENLABS_MODEL_ID,
+            speed=C.ELEVENLABS_SPEED,
+        )
+        log.info("TTS engine: ElevenLabs Streaming (%s, voice=%s, 0 GPU VRAM)", C.ELEVENLABS_MODEL_ID, C.ELEVENLABS_VOICE_ID)
+        return ("elevenlabs", el)
     kw = dict(device_map="cuda:0" if C.HAS_CUDA else "cpu", dtype=torch.float16 if C.HAS_CUDA else torch.float32)
     try:
         model = OmniVoice.from_pretrained(C.TTS_MODEL, local_files_only=True, **kw)  # no network at start once it is cached
@@ -610,14 +623,31 @@ def level(arr):
     return (arr * uniform_filter1d(gain, win)).astype(np.float32)
 
 
+def _prepare_tts_text(text, lang):
+    if lang == "th":
+        norm = normalize_text(_thai_pronounce(_say_numbers(text))).strip()
+    else:
+        norm = re.sub(r"[#*_`~|]", " ", text or "").strip()
+    return norm if SPEAKABLE_RE.search(norm) else ""
+
+
 def speak(text, lang_override=None):
-    model, voice = tts
     cid = call_id() if "call_id" in globals() else ""
     lang = lang_override or CALL_LANG.get(cid) or "th"
-    norm = normalize_text(_thai_pronounce(_say_numbers(text))).strip() if lang == "th" else re.sub(r"[#*_`~|]", " ", text or "").strip()
+    norm = _prepare_tts_text(text, lang)
     if not norm:
         return np.zeros((1, C.TTS_SAMPLE_RATE // 10), np.float32)
-    # Balanced diffusion steps on phone (10 steps: crisp Thai articulation, ~40% faster than 16 steps).
+    if isinstance(tts, tuple) and tts[0] == "elevenlabs":
+        el: ElevenLabsTTS = tts[1]
+        try:
+            arr = el.synthesize_pcm24k(norm, lang=lang).reshape(-1)
+            if arr.size:
+                return level(arr).reshape(1, -1)
+        except Exception:
+            log.exception("ElevenLabs synthesize failed")
+        return np.zeros((1, C.TTS_SAMPLE_RATE // 10), np.float32)
+    model, voice = tts
+    # Balanced diffusion steps on phone (14 steps: crisp Thai articulation).
     steps = C.SIP_TTS_STEP if ("on_phone" in globals() and on_phone()) else C.TTS_STEP
     for _ in range(3):
         with TTS_LOCK, torch.inference_mode():
@@ -632,6 +662,38 @@ def speak(text, lang_override=None):
             if arr.size:
                 return level(arr).reshape(1, -1)
     return np.zeros((1, C.TTS_SAMPLE_RATE // 10), np.float32)
+
+
+def stream_bot_out(text, lang_override=None, lead=0.0):
+    """Yield audio continuously as it streams from ElevenLabs Flash v2.5 (~120ms chunks, ~150ms TTFA),
+    or fall back to single-buffer OmniVoice bot_out()."""
+    cid = call_id() if "call_id" in globals() else ""
+    lang = lang_override or CALL_LANG.get(cid) or "th"
+    norm = _prepare_tts_text(text, lang)
+    if not norm:
+        return
+    if isinstance(tts, tuple) and tts[0] == "elevenlabs":
+        el: ElevenLabsTTS = tts[1]
+        pad = int(round(max(0.0, lead) * C.TTS_SAMPLE_RATE))
+        first = True
+        try:
+            for chunk in el.stream_pcm24k(norm, lang=lang):
+                out = chunk
+                if first and pad:
+                    out = np.concatenate((np.zeros((1, pad), np.float32), chunk), axis=1)
+                if first:
+                    ev = {"kind": "bot", "text": text, "streaming": True}
+                    if pad:
+                        ev["lead"] = round(pad / C.TTS_SAMPLE_RATE, 2)
+                    yield (C.TTS_SAMPLE_RATE, out), AdditionalOutputs(ev)
+                    first = False
+                else:
+                    yield (C.TTS_SAMPLE_RATE, out)
+            return
+        except Exception:
+            log.exception("ElevenLabs streaming failed for phrase: %s", masked(text))
+            return
+    yield bot_out(text, speak(text, lang_override=lang_override), lead=lead)
 
 
 def bot_out(text, wav, lead=0.0, filler=False):  # carries exact audio duration (s); optional silent preroll prevents WebRTC/speaker clipping word 1
@@ -2005,7 +2067,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             tokens = llm_tokens(plain_turn(messages + [LAST_ROUND]) if last else messages, calls, None if last else specs, choice)
             said_before, mark = len(said), time.perf_counter()  # mark: where each phrase's own time starts
             words, shown, side = beside(tokens, screen, known, sources, turn, stop)
-            for chunk in chunk_sentences(words, min_chars=16 if phone_mode_turn else 20, max_chars=90 if phone_mode_turn else 140):
+            for chunk in chunk_sentences(words, min_chars=36 if phone_mode_turn else 20, max_chars=140):
                 if C.SILENT_MARK in chunk:  # the words were for someone else in the room: no answer at all
                     log.info("not said to the secretary: no answer")
                     turn["silent"] = True
@@ -2051,16 +2113,15 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                     text = candidate
                     turn.pop("ack", None)
                     judged = time.perf_counter()
-                    wav = speak(text)
+                    # speak() trims each phrase to its speech: without a gap the next sentence started 0.08 s after the last
+                    lead = C.SENTENCE_GAP_S if turn.get("voiced") else 0.08
+                    turn["voiced"] = True
+                    said.append(text)
+                    yield from stream_bot_out(text, lead=lead)
                     # which part is slow, per phrase: the boss writing it, the judge, the voice
                     log.info("BOT  (%.2fs | boss %.2f judge %.2f voice %.2f): %s", time.perf_counter() - t0, got - mark,
                              judged - got, time.perf_counter() - judged, masked(text))
                     mark = time.perf_counter()
-                    # speak() trims each phrase to its speech: without a gap the next sentence started 0.08 s after the last
-                    lead = C.SENTENCE_GAP_S if turn.get("voiced") else 0.18
-                    turn["voiced"] = True
-                    said.append(text)
-                    yield bot_out(text, wav, lead=lead)
             if turn.get("silent"):
                 break
             yield from showing(shown, side)  # the rest of the screen, each line as it passes
@@ -2334,6 +2395,8 @@ class BargeInReplyOnPause(ReplyOnPause):
             return
         if state.stream.size == self._checked_stream_len:
             return
+        if state.responding and not self.cut:
+            return
         self._checked_stream_len = state.stream.size
         try:  # an STT/GPU error raised here ended listening for the rest of the call
             speech = voiced((state.sampling_rate, state.stream))
@@ -2370,7 +2433,14 @@ class BargeInReplyOnPause(ReplyOnPause):
             card = out[1].args[0]
             if isinstance(card, dict) and card.get("kind") == "bot":  # every spoken phrase carries its text
                 start = max(time.monotonic(), self.playing[-1][1] if self.playing else 0)
-                self.playing = (*self.playing[-5:], (start, start + out[0][1].shape[-1] / out[0][0], card["text"], bool(card.get("filler"))))
+                dur = out[0][1].shape[-1] / out[0][0]
+                self.playing = (*self.playing[-5:], (start, start + dur, card["text"], bool(card.get("filler"))))
+        elif isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], int) and isinstance(out[1], np.ndarray):
+            # Continuation chunk of a streaming TTS phrase: extend the latest playing window end time
+            if self.playing:
+                s, e, txt, is_f = self.playing[-1]
+                dur = out[1].shape[-1] / max(out[0], 1)
+                self.playing = (*self.playing[:-1], (s, max(e, time.monotonic()) + dur, txt, is_f))
         return out
 
     def clear_queue(self):

@@ -12,6 +12,14 @@ if os.path.exists(_env := os.path.join(BASE_DIR, ".env")):
             if _k and not _k.startswith("#"):
                 os.environ.setdefault(_k, _v)
 
+# Also load root ../.env.local as fallback for shared keys (e.g. ELEVENLABS_API_KEY)
+_root_env = os.path.join(os.path.dirname(BASE_DIR), ".env.local")
+if os.path.exists(_root_env):
+    with open(_root_env, encoding="utf-8") as _f:
+        for _k, _, _v in (_l.strip().partition("=") for _l in _f):
+            if _k and not _k.startswith("#"):
+                os.environ.setdefault(_k, _v)
+
 # --- Device: CUDA if a GPU is visible, else CPU (set FORCE_CPU=1 to test CPU mode) ---
 HAS_CUDA = ctranslate2.get_cuda_device_count() > 0 and os.environ.get("FORCE_CPU") != "1"
 DEVICE = "cuda" if HAS_CUDA else "cpu"
@@ -240,17 +248,22 @@ REF_SEED_PATH = os.path.join(BASE_DIR, "models", "voice_seeds", "data", "seeds",
 REF_TEXT = "สวัสดีครับทุกคน วันนี้ผมมีอะไรน่าสนใจมาแนะนำเยอะมาก ตามมาดูกันเลยครับ"
 REF_VOICE = "th-TH-NiwatNeural"  # edge-tts fallback voice used by generate_ref.py when REF_SEED_PATH is absent
 TTS_MODEL = os.environ.get("TTS_MODEL", "hotdogs/omnivoice-thai")
+TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "auto").strip().lower()  # "auto" (ElevenLabs if key present, else OmniVoice) | "elevenlabs" | "omnivoice"
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "H9eYlNHpm1vah6PPgYAk").strip()  # Ekkarat Thai male
+ELEVENLABS_MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_v4_turbo").strip()
+ELEVENLABS_SPEED = float(os.environ.get("ELEVENLABS_SPEED", "0.96"))
 TTS_STEP = 16  # diffusion steps, the setting of the samples ลุงจืด picked from
-SIP_TTS_STEP = int(os.environ.get("SIP_TTS_STEP", "10"))  # balanced clarity (no slurring) & speed on phone calls
+SIP_TTS_STEP = int(os.environ.get("SIP_TTS_STEP", "14"))  # crisp Thai articulation when falling back to OmniVoice
 TTS_CFG = 2.0  # guidance scale
 # ลุงจืด 2026-11-17 "ต้องการให้ ตอบเร็วๆ แต่ครบถ้วน ฟังสบายๆ" and "อยากได้เสียง แบบ Ekkarat": 0.9 is Ekkarat's pace. Measured
 # on the same three texts without the gaps: this voice at 1.0 took 27.4 s, the ElevenLabs Ekkarat samples 29.9 s (0.92),
 # F5-TTS-THAI at 0.9 30.9 s; F5-TTS-THAI at 1.0 was "พูดเร็วหรือรัวเกินไป" and this voice at 1.0 is faster than that.
-TTS_SPEED = 0.9
+TTS_SPEED = 0.88
 # the loudness every phrase is brought to, as rms (0.16 is -16 dBFS). ลุงจืด 2026-11-17 "ตอนนี้เสียงไม่ค่อยดัง": the voice gave
 # -23 to -17 dBFS, a different level each phrase. ponytail: a chosen level, not picked by ear; raise it if it is still quiet
 TTS_RMS = 0.16
-SENTENCE_GAP_S = 0.35  # silence before each sentence after the first of a reply. ponytail: a chosen value, not measured; tune it by ear
+SENTENCE_GAP_S = 0.22  # silence before each sentence after the first of a reply. ponytail: a chosen value, not measured; tune it by ear
 TTS_SAMPLE_RATE = 24000
 
 # --- Turn-taking (LiveKit-style endpointing on top of FastRTC's Silero VAD) ---
