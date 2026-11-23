@@ -388,7 +388,7 @@ def _detect_explicit_lang_switch(text: str) -> str | None:
         return "ja"
     if re.search(r"(ภาษาเกาหลี|พูดเกาหลี|คุยเกาหลี|speak\s+(?:in\s+)?korean|in korean|한국어로|한국말)", low):
         return "ko"
-    if re.search(r"(ภาษาลาว|พูดลาว|คุยลาว|เว้าลาว|speak\s+(?:in\s+)?lao|in lao|ພາສາລາວ|ເວົ້າລາວ)", low):
+    if re.search(r"(ภาษาลาว|พูดลาว|คุยลาว|เว้าลาว|เว้าภาษาลาว|บาสาลาว|บาสาดาว|speak\s+(?:in\s+)?lao|in lao|ພາສາລາວ|ເວົ້າລາວ|ສະບາຍດີ)", low):
         return "lo"
     if re.search(r"(ภาษาพม่า|ภาษาเมียนมา|speak burmese|myanmar language|မြန်မာ)", low):
         return "my"
@@ -541,18 +541,9 @@ def transcribe_final(audio):
             log.exception("Ear2/3 (OpenThai B=2) failed")
             return "", ""
 
-    # When call is already in a non-Thai language (en/zh/ja/ko/lo), rely directly on Multilingual Whisper (still auto-detecting so caller can switch back to Thai anytime!)
-    if req_lang and req_lang != "th" and final_stt is not None:
-        e1, det_lang, det_prob = _run_ear1()
-        if cid:
-            LAST_ALT_HEARD[cid] = []
-            if det_lang in LANG_NAMES:
-                CALL_LAST_STT_LANG[cid] = (det_lang, det_prob)
-        dt = time.perf_counter() - t_stt
-        if e1:
-            log.info("MULTI-STT (%.2fs | req=%s det=%s %.0f%%): %s", dt, req_lang, det_lang or "-", det_prob * 100, masked(e1))
-        return e1
-
+    # Always run Ear 1 (GPU Multilingual Whisper) and Ear 2/3 (CPU OpenThai th-TH + th-mix) IN PARALLEL
+    # even during non-Thai calls! Why: if a caller in a ZH/JA/EN call speaks Thai ("ช่วยพูดภาษาเกาหลี" / "เว้าภาษาลาวได้บ่"),
+    # CPU OpenThai catches the Thai/Lao switch command accurately instead of Whisper hallucinating Chinese/English!
     f_gpu = TRIPLE_EAR_POOL.submit(_run_ear1)
     f_cpu = TRIPLE_EAR_POOL.submit(_run_ears23)
 
@@ -568,25 +559,38 @@ def transcribe_final(audio):
     if cid and det_lang in LANG_NAMES:
         CALL_LAST_STT_LANG[cid] = (det_lang, det_prob)
 
-    # If Multilingual Whisper confidently heard non-Thai (Lao/English/Chinese/Japanese/Korean),
-    # trust Ear1 100% and NEVER mix in OpenThai Thai-transliterated garbage!
+    # Check if CPU OpenThai caught an explicit Thai/Lao language-switch request (e.g. "ช่วยพูดภาษาเกาหลี", "ภาษาลาว")
+    # that Whisper missed or misheard as a foreign word / hallucination ("Thank you." / "吹鋪得大夠力")
+    cpu_switch_text = ear3 if _detect_explicit_lang_switch(ear3) else (ear2 if _detect_explicit_lang_switch(ear2) else "")
+    if cpu_switch_text and not _detect_explicit_lang_switch(ear1):
+        # Prefer OpenThai explicit language switch when Whisper didn't detect one (or low confidence)
+        if det_prob < 0.85 or _detect_explicit_lang_switch(cpu_switch_text) != req_lang:
+            if cid:
+                LAST_ALT_HEARD[cid] = [ear1] if ear1 else []
+            dt = time.perf_counter() - t_stt
+            log.info(
+                "TRIPLE-EAR-SWITCH (%.2fs | req=%s det=%s %.0f%%) picked=%s | e1=%s",
+                dt, req_lang or "-", det_lang or "-", det_prob * 100, masked(cpu_switch_text), masked(ear1 or "-"),
+            )
+            return cpu_switch_text
+
+    # When in a non-Thai call and Whisper confidently heard non-Thai (or current language), trust Ear 1 100%
     script_e1 = _detect_script_lang(ear1)
     is_non_thai = bool(
         ear1
         and (
             (det_lang in (CORE_MULTI_LANGS - {"th"}) and det_prob >= 0.45)
-            or (script_e1 in (CORE_MULTI_LANGS - {"th"}))
+            or (script_e1 in (CORE_MULTI_LANGS - {"th"}) and det_prob >= 0.40)
         )
     )
     if is_non_thai:
         picked = ear1
-        alts = []
         if cid:
             LAST_ALT_HEARD[cid] = []
         dt = time.perf_counter() - t_stt
         log.info(
-            "TRIPLE-EAR-MULTI (%.2fs | det=%s %.0f%% script=%s) picked=%s",
-            dt, det_lang or "-", det_prob * 100, script_e1 or "-", masked(picked),
+            "TRIPLE-EAR-MULTI (%.2fs | req=%s det=%s %.0f%% script=%s) picked=%s",
+            dt, req_lang or "-", det_lang or "-", det_prob * 100, script_e1 or "-", masked(picked),
         )
         return picked
 
@@ -596,8 +600,8 @@ def transcribe_final(audio):
     dt = time.perf_counter() - t_stt
     if picked:
         log.info(
-            "TRIPLE-EAR (%.2fs | det=%s %.0f%%) picked=%s | e1=%s | e2=%s | e3=%s",
-            dt, det_lang or "-", det_prob * 100, masked(picked), masked(ear1 or "-"), masked(ear2 or "-"), masked(ear3 or "-"),
+            "TRIPLE-EAR (%.2fs | req=%s det=%s %.0f%%) picked=%s | e1=%s | e2=%s | e3=%s",
+            dt, req_lang or "-", det_lang or "-", det_prob * 100, masked(picked), masked(ear1 or "-"), masked(ear2 or "-"), masked(ear3 or "-"),
         )
     return picked
 
@@ -2151,16 +2155,17 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
         script_lang = _detect_script_lang(heard)
         stt_det_lang, stt_det_prob = CALL_LAST_STT_LANG.get(cid, (None, 0.0))
         spoken = script_lang or (stt_det_lang if stt_det_lang in CORE_MULTI_LANGS and stt_det_prob >= 0.65 else None)
-        # Strong foreign utterance (>= 2 words or >= 4 non-space chars + confident Whisper/script) -> switch immediately!
+        # Require real Whisper confidence (>= 0.65) before auto-switching languages on script alone,
+        # preventing low-prob mishearings (e.g. 35% prob "เบอบาสาดาวเดี๋ยว" or 37% hallucinated "Thank you.") from flipping languages!
         is_strong_lang_turn = bool(
             spoken
             and spoken in CORE_MULTI_LANGS
+            and stt_det_prob >= 0.65
             and (
-                (spoken == "en" and len(re.findall(r"[A-Za-z]{2,}", heard)) >= 2)
-                or (spoken in ("zh", "ja", "ko", "lo") and len(re.sub(r"\s+", "", heard)) >= 3)
-                or (spoken == "th" and len(re.findall(r"[\u0E00-\u0E7F]", heard)) >= 4)
+                (spoken == "en" and len(re.findall(r"[A-Za-z]{2,}", heard)) >= 3)
+                or (spoken in ("zh", "ja", "ko", "lo") and len(re.sub(r"\s+", "", heard)) >= 4)
+                or (spoken == "th" and len(re.findall(r"[\u0E00-\u0E7F]", heard)) >= 6)
             )
-            and (script_lang == spoken or stt_det_prob >= 0.65)
         )
 
         if pending:
@@ -2262,8 +2267,9 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
     if active_lang and active_lang != "th":
         lang_label = LANG_NAMES.get(active_lang, active_lang)
         now += (
-            f"\n(ระบบภาษา: ลูกค้ากำลังคุยเป็น {lang_label} ให้แปลข้อมูลคำตอบจากฐานความรู้ภาษาไทยและตอบกลับลูกค้าเป็น {lang_label} "
-            f"อย่างเป็นธรรมชาติ สั้นกระชับ 1-2 ประโยค)"
+            f"\n(ระบบภาษา [สำคัญมาก — ทับกติกาเขียนภาษาไทยด้านบน]: ลูกค้ากำลังคุยเป็น {lang_label} "
+            f"ระบบเสียงของคุณรองรับการพูดเป็น {lang_label} ได้จริง 100% ห้ามพูดว่าพูดได้แค่ภาษาไทยหรือแปลไม่ได้เด็ดขาด! "
+            f"ให้แปลข้อมูลคำตอบจากฐานความรู้ภาษาไทยและตอบกลับเป็นอักษรและภาษา {lang_label} แท้ๆ อย่างเป็นธรรมชาติ สั้นกระชับ 1-2 ประโยค)"
         )
     elif CALL_NEW_CALLER.get(cid) and active_lang == "th":
         now += (
