@@ -12,12 +12,13 @@ if os.path.exists(_env := os.path.join(BASE_DIR, ".env")):
             if _k and not _k.startswith("#"):
                 os.environ.setdefault(_k, _v)
 
-# Also load root ../.env.local as fallback for shared keys (e.g. ELEVENLABS_API_KEY)
+# Also load ONLY shared AI/TTS keys from root ../.env.local (never pull Next.js PORT=3000!)
+_SHARED_ROOT_KEYS = {"ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "ELEVENLABS_MODEL_ID", "TTS_PROVIDER", "DEEPSEEK_API_KEY"}
 _root_env = os.path.join(os.path.dirname(BASE_DIR), ".env.local")
 if os.path.exists(_root_env):
     with open(_root_env, encoding="utf-8") as _f:
         for _k, _, _v in (_l.strip().partition("=") for _l in _f):
-            if _k and not _k.startswith("#"):
+            if _k in _SHARED_ROOT_KEYS and _v:
                 os.environ.setdefault(_k, _v)
 
 # --- Device: CUDA if a GPU is visible, else CPU (set FORCE_CPU=1 to test CPU mode) ---
