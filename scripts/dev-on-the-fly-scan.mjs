@@ -100,6 +100,31 @@ function jarvisLogLines(fromMs, toMs) {
   return picked;
 }
 
+/** State of every line on the running server, or null when it cannot be asked (down, or not answering in 3 s). */
+function liveLineStates() {
+  return new Promise((resolve) => {
+    let socket = null;
+    const finish = (states) => {
+      clearTimeout(timer);
+      socket?.close();
+      resolve(states);
+    };
+    const timer = setTimeout(() => finish(null), 3000);
+    try {
+      socket = new WebSocket("ws://127.0.0.1:3000/ws/sip"); // the port restart-services.ps1 restarts
+    } catch {
+      return finish(null);
+    }
+    socket.onerror = () => finish(null);
+    socket.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === "state") finish((message.data?.lines || []).map((line) => line.state));
+      } catch {}
+    };
+  });
+}
+
 const args = process.argv.slice(2);
 const flagIdx = (name) => args.indexOf(name);
 
@@ -133,6 +158,14 @@ if (flagIdx("--jarvis-log") >= 0) {
 
 // Mode 1: Check whether any call is currently active (safety gate before auto-deploy restart)
 if (args.includes("--check-idle")) {
+  // The running server knows its lines. The call memory is the fallback only: a session opened just as the server
+  // was restarted is never closed there and kept every restart blocked for 35 minutes.
+  const lineStates = await liveLineStates();
+  if (lineStates) {
+    const activeCalls = lineStates.filter((state) => state !== "idle").length;
+    console.log(JSON.stringify({ idle: activeCalls === 0, activeCalls }, null, 2));
+    process.exit(0);
+  }
   const mem = loadJson(MEMORY_PATH, { callers: {} });
   const now = Date.now();
   let activeCount = 0;
