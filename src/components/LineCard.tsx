@@ -2,7 +2,9 @@
 
 import type { CSSProperties, ReactNode } from "react";
 import {
+  AlertTriangle,
   Bot,
+  Flame,
   Globe,
   Headphones,
   History,
@@ -14,6 +16,8 @@ import {
   PhoneIncoming,
   PhoneOff,
   Play,
+  Smile,
+  Sparkles,
   Timer,
   UserCheck,
 } from "lucide-react";
@@ -257,6 +261,21 @@ export function LineCard({
                   <span>ลูกค้าเก่า • ครั้งที่</span>
                   <span className="tabular-nums">{line.callerTotalCalls}</span>
                 </button>
+              )}
+
+              {!isIdle && line.liveSignal && (
+                <span className={`cc-chip tone-${line.liveSignal.tone}`} title="สัญญาณอารมณ์ & โอกาสปิดการขายแบบเรียลไทม์">
+                  {line.liveSignal.sentiment === "frustrated" ? (
+                    <AlertTriangle className="h-3 w-3" />
+                  ) : line.liveSignal.buyingIntent === "high" ? (
+                    <Flame className="h-3 w-3" />
+                  ) : line.liveSignal.sentiment === "positive" ? (
+                    <Smile className="h-3 w-3" />
+                  ) : (
+                    <Sparkles className="h-3 w-3" />
+                  )}
+                  <span>{line.liveSignal.label}</span>
+                </span>
               )}
 
               {!isIdle && line.crmTier === "vip" && (

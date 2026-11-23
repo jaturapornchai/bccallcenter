@@ -11,6 +11,7 @@ import {
   verifyGoogleIdToken,
   verifySessionFromCookieHeader,
 } from "./lib/auth.mjs";
+import { getRecordingPath } from "./lib/call-recorder.mjs";
 import { SipEngine } from "./lib/sip-engine.mjs";
 
 const envPath = path.resolve(process.cwd(), ".env.local");
@@ -127,6 +128,209 @@ app.prepare().then(async () => {
     if (urlPath === "/api/auth/logout" && req.method === "POST") {
       const cookie = buildClearSessionCookie(isRequestHttps(req));
       return sendJson(res, 200, { ok: true }, { "Set-Cookie": cookie });
+    }
+
+    // --- Admin-Only Call Recording Playback (with HTTP Range for Transcript Sync Seek) ---
+    if (urlPath.startsWith("/api/recordings/") && req.method === "GET") {
+      const session = verifySessionFromCookieHeader(req.headers.cookie);
+      if (!session?.isAdmin) {
+        return sendJson(res, 403, { ok: false, error: "สงวนสิทธิ์ไฟล์บันทึกเสียงเฉพาะผู้ดูแลระบบ" });
+      }
+      const sessionId = decodeURIComponent(urlPath.slice("/api/recordings/".length));
+      const filePath = getRecordingPath(sessionId);
+      if (!filePath || !fs.existsSync(filePath)) {
+        return sendJson(res, 404, { ok: false, error: "ไม่พบไฟล์บันทึกเสียงของสายนี้" });
+      }
+      const stat = fs.statSync(filePath);
+      const total = stat.size;
+      const range = req.headers.range;
+      if (range) {
+        const m = /^bytes=(\d+)-(\d*)$/.exec(String(range));
+        const start = m ? Math.min(Number(m[1]), total - 1) : 0;
+        const end = m && m[2] ? Math.min(Number(m[2]), total - 1) : total - 1;
+        res.writeHead(206, {
+          "Content-Range": `bytes ${start}-${end}/${total}`,
+          "Accept-Ranges": "bytes",
+          "Content-Length": end - start + 1,
+          "Content-Type": "audio/wav",
+          "Cache-Control": "private, max-age=300",
+        });
+        fs.createReadStream(filePath, { start, end }).pipe(res);
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Length": total,
+        "Accept-Ranges": "bytes",
+        "Content-Type": "audio/wav",
+        "Cache-Control": "private, max-age=300",
+      });
+      fs.createReadStream(filePath).pipe(res);
+      return;
+    }
+
+    // --- 1-Click Teach AI (Admin-Verified FAQ -> J.A.R.V.I.S QA Cache) ---
+    if (urlPath === "/api/teach") {
+      const session = verifySessionFromCookieHeader(req.headers.cookie);
+      if (req.method === "GET") {
+        try {
+          const r = await fetch(`${sip.jarvisUrl}/teach`, { signal: AbortSignal.timeout(4000) });
+          const data = await r.json();
+          return sendJson(res, r.status, data);
+        } catch {
+          return sendJson(res, 200, { ok: false, entries: [] });
+        }
+      }
+      if (!session?.isAdmin) {
+        return sendJson(res, 403, { ok: false, error: "ต้องเข้าสู่ระบบผู้ดูแลก่อนสอนหรือลบคำตอบ AI" });
+      }
+      if (req.method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          const r = await fetch(`${sip.jarvisUrl}/teach`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              question: String(body.question || "").trim(),
+              answer: String(body.answer || "").trim(),
+              lang: String(body.lang || "th").trim() || "th",
+            }),
+            signal: AbortSignal.timeout(5000),
+          });
+          const data = await r.json();
+          return sendJson(res, r.status, data);
+        } catch (err) {
+          return sendJson(res, 502, { ok: false, error: err.message });
+        }
+      }
+      if (req.method === "DELETE") {
+        try {
+          const body = await readJsonBody(req);
+          const r = await fetch(`${sip.jarvisUrl}/teach`, {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ key: String(body.key || "").trim() }),
+            signal: AbortSignal.timeout(5000),
+          });
+          const data = await r.json();
+          return sendJson(res, r.status, data);
+        } catch (err) {
+          return sendJson(res, 502, { ok: false, error: err.message });
+        }
+      }
+    }
+
+    // --- Analytics & Cache ROI Endpoint (Safe Aggregate Data, No PII) ---
+    if (urlPath === "/api/analytics" && req.method === "GET") {
+      const allLogs = sip.memory.listCallLogs(300);
+      const crmState = sip.crm.publicState();
+      const now = new Date();
+      const todayKey = now.toISOString().slice(0, 10);
+
+      // Build 7-day trend buckets
+      const dailyMap = new Map();
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(now.getTime() - i * 86400_000);
+        const key = d.toISOString().slice(0, 10);
+        dailyMap.set(key, { date: key, calls: 0, answered: 0, highIntent: 0 });
+      }
+
+      let todayCalls = 0;
+      let totalDurSec = 0;
+      let durCount = 0;
+      let csatSum = 0;
+      let csatN = 0;
+      let aiQSum = 0;
+      let aiQN = 0;
+      let resolvedCount = 0;
+      let analyzedCount = 0;
+      let highIntentCount = 0;
+      let recordedCount = 0;
+      const sentiments = { positive: 0, neutral: 0, negative: 0, urgent: 0 };
+      const topicCounts = new Map();
+      const moduleCounts = new Map();
+
+      for (const log of allLogs) {
+        const dayKey = String(log.startedAt || "").slice(0, 10);
+        if (dayKey === todayKey) todayCalls++;
+        if (log.hasRecording) recordedCount++;
+        if (log.durationSec > 0) {
+          totalDurSec += log.durationSec;
+          durCount++;
+        }
+        const bucket = dailyMap.get(dayKey);
+        if (bucket) {
+          bucket.calls++;
+          if (log.status === "answered" || log.durationSec > 0) bucket.answered++;
+        }
+        const a = log.analysis;
+        if (a && !a.error) {
+          analyzedCount++;
+          if (typeof a.csatScore === "number") { csatSum += a.csatScore; csatN++; }
+          if (typeof a.aiQualityScore === "number") { aiQSum += a.aiQualityScore; aiQN++; }
+          if (a.resolved) resolvedCount++;
+          if (a.buyingIntent === "high") {
+            highIntentCount++;
+            if (bucket) bucket.highIntent++;
+          }
+          if (a.sentiment && sentiments[a.sentiment] !== undefined) {
+            sentiments[a.sentiment]++;
+          }
+          if (a.topic) {
+            const t = String(a.topic).trim().slice(0, 48);
+            if (t) topicCounts.set(t, (topicCounts.get(t) || 0) + 1);
+          }
+          if (Array.isArray(a.interestedModules)) {
+            for (const mod of a.interestedModules) {
+              const m = String(mod || "").trim().slice(0, 40);
+              if (m) moduleCounts.set(m, (moduleCounts.get(m) || 0) + 1);
+            }
+          }
+        }
+      }
+
+      let cacheStats = null;
+      let taughtCount = 0;
+      try {
+        const cr = await fetch(`${sip.jarvisUrl}/cache/stats`, { signal: AbortSignal.timeout(3000) });
+        if (cr.ok) {
+          cacheStats = await cr.json();
+          taughtCount = Number(cacheStats?.qa?.taught_entries || 0);
+        }
+      } catch {}
+
+      const topTopics = Array.from(topicCounts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([topic, count]) => ({ topic, count }));
+
+      const topModules = Array.from(moduleCounts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([name, count]) => ({ name, count }));
+
+      return sendJson(res, 200, {
+        ok: true,
+        generatedAt: now.toISOString(),
+        summary: {
+          totalCalls: allLogs.length,
+          todayCalls,
+          avgDurationSec: durCount ? Math.round(totalDurSec / durCount) : 0,
+          recordedCalls: recordedCount,
+          analyzedCalls: analyzedCount,
+          avgCsat: csatN ? Math.round((csatSum / csatN) * 10) / 10 : null,
+          avgAiQuality: aiQN ? Math.round((aiQSum / aiQN) * 10) / 10 : null,
+          resolvedRatePct: analyzedCount ? Math.round((resolvedCount / analyzedCount) * 100) : null,
+          highIntentLeads: highIntentCount,
+          totalCustomers: crmState.stats.totalCustomers,
+          openTickets: crmState.stats.openTickets,
+          taughtFaqs: taughtCount,
+        },
+        dailyTrend: Array.from(dailyMap.values()),
+        sentiments,
+        topTopics,
+        topModules,
+        cache: cacheStats,
+      });
     }
 
     return handle(req, res);

@@ -79,7 +79,8 @@ class QACache:
                 now = time.time()
                 self._entries = {
                     k: v for k, v in data.items()
-                    if isinstance(v, dict) and v.get("sentences") and now - float(v.get("saved_at", 0)) < self.ttl_s
+                    if isinstance(v, dict) and v.get("sentences")
+                    and (v.get("taught") or now - float(v.get("saved_at", 0)) < self.ttl_s)
                 }
         except Exception:
             log.warning("QA cache load failed, starting fresh")
@@ -102,14 +103,49 @@ class QACache:
                 pass
 
     def lookup(self, question: str, lang: str = "th", phone_mode: bool = True) -> dict | None:
-        if not is_cacheable_question(question):
+        raw = (question or "").strip()
+        if not raw:
             return None
-        norm = normalize_question(question)
+        norm = normalize_question(raw)
+        if len(norm) < 4:
+            return None
+        allow_auto = is_cacheable_question(raw)
         bucket = f"{lang or 'th'}|{'phone' if phone_mode else 'web'}"
-        exact_key = f"{bucket}|{norm}"
+        taught_bucket = f"{lang or 'th'}|taught"
         now = time.time()
 
         with self._lock:
+            # 1. Check Admin-Taught FAQ first (exact then fuzzy >= 0.80)
+            t_hit = self._entries.get(f"{taught_bucket}|{norm}")
+            if t_hit:
+                t_hit["hits"] = int(t_hit.get("hits", 0)) + 1
+                t_hit["last_hit_at"] = now
+                self.hits += 1
+                return dict(t_hit)
+
+            best_t_score = 0.0
+            best_t_entry = None
+            for k, entry in self._entries.items():
+                if not k.startswith(taught_bucket + "|"):
+                    continue
+                cand_norm = entry.get("norm", "")
+                if not cand_norm:
+                    continue
+                ratio = difflib.SequenceMatcher(None, norm, cand_norm).ratio()
+                if ratio > best_t_score:
+                    best_t_score = ratio
+                    best_t_entry = entry
+            if best_t_entry is not None and best_t_score >= 0.80:
+                best_t_entry["hits"] = int(best_t_entry.get("hits", 0)) + 1
+                best_t_entry["last_hit_at"] = now
+                self.hits += 1
+                return dict(best_t_entry)
+
+            if not allow_auto:
+                return None
+
+            # 2. Auto-cached general FAQ (exact then fuzzy >= 0.88)
+            exact_key = f"{bucket}|{norm}"
             hit = self._entries.get(exact_key)
             if hit and now - float(hit.get("saved_at", 0)) < self.ttl_s:
                 hit["hits"] = int(hit.get("hits", 0)) + 1
@@ -117,7 +153,6 @@ class QACache:
                 self.hits += 1
                 return dict(hit)
 
-            # High-precision fuzzy match within same language & mode bucket (>= 0.88 similarity)
             best_score = 0.0
             best_entry = None
             for k, entry in self._entries.items():
@@ -141,6 +176,65 @@ class QACache:
 
             self.misses += 1
             return None
+
+    def teach(self, question: str, answer: str, lang: str = "th") -> dict:
+        """Admin-verified 1-click FAQ teaching: persists permanently (never evicted by auto-cache)."""
+        q = (question or "").strip()[:240]
+        a = (answer or "").strip()[:800]
+        if len(q) < 3 or len(a) < 3:
+            raise ValueError("กรุณาระบุคำถามและคำตอบอย่างน้อย 3 ตัวอักษร")
+        norm = normalize_question(q)
+        if len(norm) < 3:
+            raise ValueError("คำถามสั้นเกินไป")
+        # Split answer into 1-3 crisp spoken sentences
+        raw_parts = [p.strip() for p in re.split(r"[\r\n]+|(?<=[.!?])\s+", a) if p.strip()]
+        sentences = raw_parts[:4] if raw_parts else [a]
+        bucket = f"{lang or 'th'}|taught"
+        key = f"{bucket}|{norm}"
+        now = time.time()
+        entry = {
+            "key": key,
+            "question": q,
+            "norm": norm,
+            "lang": lang or "th",
+            "mode": "taught",
+            "taught": True,
+            "sentences": sentences,
+            "saved_at": now,
+            "last_hit_at": now,
+            "hits": 0,
+        }
+        with self._lock:
+            self._entries[key] = entry
+            self._save()
+        return dict(entry)
+
+    def delete_entry(self, key: str) -> bool:
+        with self._lock:
+            if key in self._entries:
+                del self._entries[key]
+                self._save()
+                return True
+        return False
+
+    def list_entries(self, taught_only: bool = False) -> list[dict]:
+        with self._lock:
+            items = []
+            for k, v in self._entries.items():
+                if taught_only and not v.get("taught"):
+                    continue
+                items.append({
+                    "key": k,
+                    "question": v.get("question", ""),
+                    "answer": " ".join(v.get("sentences") or []),
+                    "lang": v.get("lang", "th"),
+                    "mode": v.get("mode", "phone"),
+                    "taught": bool(v.get("taught", False)),
+                    "hits": int(v.get("hits", 0)),
+                    "saved_at": float(v.get("saved_at", 0)),
+                })
+            items.sort(key=lambda x: (not x["taught"], -x["saved_at"]))
+            return items[:120]
 
     def store(self, question: str, sentences: list[str], lang: str = "th", phone_mode: bool = True, caller_name: str = "") -> bool:
         if not is_cacheable_question(question):
@@ -170,21 +264,23 @@ class QACache:
                 "last_hit_at": now,
                 "hits": 0,
             }
-            # Evict least-recently-used entries if exceeding max_entries
+            # Evict least-recently-used auto entries (never evict admin-taught entries)
             if len(self._entries) > self.max_entries:
                 ordered = sorted(
-                    self._entries.items(),
+                    ((k, v) for k, v in self._entries.items() if not v.get("taught")),
                     key=lambda kv: float(kv[1].get("last_hit_at", kv[1].get("saved_at", 0))),
                 )
-                for old_k, _ in ordered[: len(self._entries) - self.max_entries]:
+                for old_k, _ in ordered[: max(0, len(self._entries) - self.max_entries)]:
                     self._entries.pop(old_k, None)
             self._save()
         return True
 
     def stats(self) -> dict:
         with self._lock:
+            taught_count = sum(1 for v in self._entries.values() if v.get("taught"))
             return {
                 "entries": len(self._entries),
+                "taught_entries": taught_count,
                 "hits": self.hits,
                 "misses": self.misses,
             }

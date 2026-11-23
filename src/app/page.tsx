@@ -4,11 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Activity,
+  BarChart3,
   Bot,
   Briefcase,
   ChevronRight,
   Clock3,
   ExternalLink,
+  Flame,
   History,
   Lock,
   Moon,
@@ -41,6 +43,7 @@ import {
   lineStatusLabel,
   lineTone,
 } from "@/components/LineCard";
+import { AnalyticsWorkspace } from "@/components/AnalyticsWorkspace";
 import { AuthControls } from "@/components/AuthControls";
 import type { AuthState } from "@/components/AuthControls";
 import { CallQaDrawer, formatScore, scoreTone, sentimentMeta } from "@/components/CallQaDrawer";
@@ -90,7 +93,7 @@ const INITIAL_STATE: ConsoleState = {
 };
 
 type RightTab = "qa" | "callers" | "history";
-type MainView = "console" | "crm";
+type MainView = "console" | "crm" | "analytics";
 
 export default function ConsolePage() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
@@ -488,6 +491,14 @@ export default function ConsolePage() {
                   </span>
                 )}
               </button>
+              <button
+                type="button"
+                onClick={() => setActiveView("analytics")}
+                className={`cc-btn h-7 px-3 text-xs ${activeView === "analytics" ? "cc-btn--tone tone-in" : "border-transparent bg-transparent"}`}
+              >
+                <BarChart3 className="h-3.5 w-3.5" />
+                <span>สถิติ &amp; ROI</span>
+              </button>
             </div>
 
             <span className={`cc-chip h-9 rounded-xl px-3 font-mono tabular-nums ${wsConnected ? "tone-in" : "tone-held"}`} title="สถานะเชื่อมต่อเรียลไทม์ (WebSocket)">
@@ -603,7 +614,9 @@ export default function ConsolePage() {
           </div>
         )}
 
-        {activeView === "crm" ? (
+        {activeView === "analytics" ? (
+          <AnalyticsWorkspace readOnly={isReadOnly} onNotify={(m) => setToast(m)} />
+        ) : activeView === "crm" ? (
           <CrmWorkspace
             crm={
               (state.crm as CrmState) || {
@@ -831,6 +844,18 @@ function CommandAlertHero({
                 <span>รอคิวอีก</span>
                 <span className="tabular-nums">{queuedCount}</span>
                 <span>สาย</span>
+              </span>
+            )}
+            {line.liveSignal && (
+              <span className={`cc-chip tone-${line.liveSignal.tone}`}>
+                {line.liveSignal.sentiment === "frustrated" ? (
+                  <TriangleAlert className="h-3 w-3" />
+                ) : line.liveSignal.buyingIntent === "high" ? (
+                  <Flame className="h-3 w-3" />
+                ) : (
+                  <Sparkles className="h-3 w-3" />
+                )}
+                <span>{line.liveSignal.label}</span>
               </span>
             )}
           </div>

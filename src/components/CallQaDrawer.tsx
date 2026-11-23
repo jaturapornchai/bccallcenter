@@ -1,23 +1,30 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import {
   AlertTriangle,
+  BookOpenCheck,
   Bot,
+  Check,
   CheckCircle2,
   ClipboardList,
   Clock3,
+  Copy,
+  Flame,
   Headset,
   HeartPulse,
   Lightbulb,
   ListChecks,
+  Lock,
   MessageSquareText,
+  Play,
   RefreshCw,
   Smile,
   Sparkles,
   Tag,
   UserRound,
+  Volume2,
   X,
 } from "lucide-react";
 import type { CallAnalysis, CallLogEntry, CallerMessage } from "@/types/sip";
@@ -95,9 +102,42 @@ function Section({ icon, title, children }: { icon: ReactNode; title: string; ch
   );
 }
 
+const BUYING_META: Record<"high" | "medium" | "low", { label: string; tone: Tone }> = {
+  high: { label: "สนใจซื้อสูง", tone: "in" },
+  medium: { label: "กำลังพิจารณา", tone: "held" },
+  low: { label: "สอบถามทั่วไป", tone: "idle" },
+};
+
+function buildDefaultFollowUpMessage(analysis: CallAnalysis): string {
+  if (analysis.followUpMessage && analysis.followUpMessage.trim()) {
+    return analysis.followUpMessage.trim();
+  }
+  const mods = (analysis.interestedModules || []).filter(Boolean);
+  const lines = [
+    "สวัสดีครับ จากทีมระบบ BC Call Center (BC Ai Account) ครับ",
+    analysis.topic ? `ขอสรุปเรื่องที่เราคุยกันวันนี้เกี่ยวกับ "${analysis.topic}" นะครับ` : "ขอบคุณที่โทรมาพูดคุยกับเราวันนี้นะครับ",
+    analysis.summary ? analysis.summary : "",
+    mods.length > 0 ? `โมดูลที่แนะนำเพิ่มเติม: ${mods.join(", ")}` : "",
+    "หากสนใจทดลองใช้งานหรืออยากสอบถามรายละเอียดเพิ่มเติม ทักกลับมาได้เลยนะครับ ยินดีดูแลเต็มที่ครับ",
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
 function AnalysisBody({ analysis }: { analysis: CallAnalysis }) {
+  const [copied, setCopied] = useState(false);
   const sentiment = sentimentMeta(analysis.sentiment);
   const urgency = analysis.urgency ? URGENCY_META[analysis.urgency] : null;
+  const buying = analysis.buyingIntent ? BUYING_META[analysis.buyingIntent] : null;
+  const followUpText = useMemo(() => buildDefaultFollowUpMessage(analysis), [analysis]);
+
+  const handleCopyFollowUp = async () => {
+    try {
+      await navigator.clipboard.writeText(followUpText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2200);
+    } catch {}
+  };
+
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -105,7 +145,7 @@ function AnalysisBody({ analysis }: { analysis: CallAnalysis }) {
         <ScoreGauge label="คุณภาพการตอบของ AI" score={analysis.aiQualityScore} icon={<Bot className="h-3.5 w-3.5" />} />
       </div>
 
-      <Section icon={<HeartPulse className="h-3.5 w-3.5" />} title="อารมณ์และความรู้สึกลูกค้า">
+      <Section icon={<HeartPulse className="h-3.5 w-3.5" />} title="อารมณ์ & โอกาสปิดการขาย">
         <div className="flex flex-wrap items-center gap-2">
           {sentiment ? (
             <span className={`cc-chip tone-${sentiment.tone}`}>
@@ -116,13 +156,46 @@ function AnalysisBody({ analysis }: { analysis: CallAnalysis }) {
             <span className="cc-chip tone-idle">ไม่ระบุ</span>
           )}
           {analysis.emotionLabel && <span className="cc-chip tone-idle">{analysis.emotionLabel}</span>}
+          {buying && (
+            <span className={`cc-chip tone-${buying.tone}`}>
+              <Flame className="h-3 w-3" />
+              <span>{buying.label}</span>
+            </span>
+          )}
         </div>
         {analysis.emotionTrend && <p className="mt-2 text-xs leading-relaxed cc-text">แนวโน้ม: {analysis.emotionTrend}</p>}
+        {Array.isArray(analysis.interestedModules) && analysis.interestedModules.length > 0 && (
+          <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] cc-dim">โมดูลที่สนใจ:</span>
+            {analysis.interestedModules.map((mod) => (
+              <span key={mod} className="cc-chip tone-ai">
+                {mod}
+              </span>
+            ))}
+          </div>
+        )}
       </Section>
 
       <Section icon={<Tag className="h-3.5 w-3.5" />} title="หัวข้อและสรุปการสนทนา">
         {analysis.topic && <div className="text-sm font-semibold leading-snug cc-text">{analysis.topic}</div>}
         <p className="mt-1.5 whitespace-pre-line text-xs leading-relaxed cc-muted">{analysis.summary || "ไม่มีสรุป"}</p>
+      </Section>
+
+      {/* Auto Follow-up Message Card (1-Click Copy, No external API needed) */}
+      <Section icon={<MessageSquareText className="h-3.5 w-3.5" />} title="ข้อความสรุปหลังวางสาย (คัดลอกส่งลูกค้าได้ทันที)">
+        <div className="rounded-lg border border-[var(--cc-border)] bg-[var(--cc-surface)] p-3 text-xs leading-relaxed whitespace-pre-line cc-text">
+          {followUpText}
+        </div>
+        <div className="mt-2.5 flex justify-end">
+          <button
+            type="button"
+            onClick={() => void handleCopyFollowUp()}
+            className={`cc-btn cc-btn--tone h-8 px-3 text-xs ${copied ? "tone-in" : "tone-live"}`}
+          >
+            {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+            <span>{copied ? "คัดลอกข้อความแล้ว!" : "คัดลอกข้อความส่งลูกค้า"}</span>
+          </button>
+        </div>
       </Section>
 
       <Section icon={<ListChecks className="h-3.5 w-3.5" />} title="สถานะการแก้ไขปัญหา">
@@ -213,23 +286,76 @@ function AnalysisState({ log }: { log: CallLogEntry }) {
   );
 }
 
-function Transcript({ messages }: { messages: CallerMessage[] }) {
+function Transcript({
+  messages,
+  callStartedAt,
+  hasAudio,
+  currentAudioSec,
+  readOnly,
+  onSeekAudio,
+  onTeachClick,
+}: {
+  messages: CallerMessage[];
+  callStartedAt: string;
+  hasAudio: boolean;
+  currentAudioSec: number;
+  readOnly: boolean;
+  onSeekAudio: (sec: number) => void;
+  onTeachClick: (question: string) => void;
+}) {
   if (messages.length === 0) {
     return <div className="cc-empty px-4 py-6 text-center text-xs">ไม่มีข้อความถอดเสียงในสายนี้</div>;
   }
+  const startMs = new Date(callStartedAt).getTime();
+  const offsets = messages.map((m) => {
+    const ms = new Date(m.at).getTime();
+    return Number.isFinite(startMs) && Number.isFinite(ms) ? Math.max(0, Math.round((ms - startMs) / 1000)) : 0;
+  });
+
   return (
     <div className="space-y-2">
       {messages.map((m, idx) => {
         const meta = ROLE_META[m.role] ?? ROLE_META.caller;
         const isCaller = m.role === "caller";
+        const sec = offsets[idx];
+        const nextSec = idx + 1 < offsets.length ? offsets[idx + 1] : sec + 8;
+        const isActive = hasAudio && currentAudioSec > 0 && currentAudioSec >= sec && currentAudioSec < nextSec;
         return (
           <div key={`${m.at}-${idx}`} className={`flex ${isCaller ? "justify-start" : "justify-end"}`}>
-            <div className={`max-w-[85%] px-3 py-2 text-xs leading-relaxed ${isCaller ? "cc-bubble" : `cc-quote tone-${meta.tone}`}`}>
-              <div className="mb-1 inline-flex items-center gap-1.5 text-[11px] font-semibold leading-none">
-                {m.role === "ai" ? <Bot className="h-3 w-3" /> : m.role === "agent" ? <Headset className="h-3 w-3" /> : <UserRound className="h-3 w-3" />}
-                <span>{meta.label}</span>
-                <span className="font-normal tabular-nums opacity-70">
-                  {new Date(m.at).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+            <div
+              className={`max-w-[88%] px-3 py-2 text-xs leading-relaxed transition ${isCaller ? "cc-bubble" : `cc-quote tone-${meta.tone}`} ${isActive ? "ring-2 ring-sky-400/70" : ""}`}
+            >
+              <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold leading-none">
+                <span className="inline-flex items-center gap-1.5">
+                  {m.role === "ai" ? <Bot className="h-3 w-3" /> : m.role === "agent" ? <Headset className="h-3 w-3" /> : <UserRound className="h-3 w-3" />}
+                  <span>{meta.label}</span>
+                  <span className="font-normal tabular-nums opacity-70">
+                    {new Date(m.at).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                  </span>
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  {hasAudio && (
+                    <button
+                      type="button"
+                      onClick={() => onSeekAudio(sec)}
+                      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono tabular-nums opacity-80 hover:bg-black/10 hover:opacity-100"
+                      title={`ข้ามเสียงไปที่ ${formatSeconds(sec)}`}
+                    >
+                      <Play className="h-2.5 w-2.5" />
+                      <span>{formatSeconds(sec)}</span>
+                    </button>
+                  )}
+                  {isCaller && !readOnly && m.text.trim().length >= 3 && (
+                    <button
+                      type="button"
+                      onClick={() => onTeachClick(m.text)}
+                      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-emerald-500 hover:bg-emerald-500/10"
+                      title="สอนคำตอบที่ถูกต้องให้ J.A.R.V.I.S สำหรับคำถามนี้"
+                    >
+                      <BookOpenCheck className="h-2.5 w-2.5" />
+                      <span>สอน AI</span>
+                    </button>
+                  )}
                 </span>
               </div>
               <div className="whitespace-pre-line">{m.text}</div>
@@ -252,6 +378,15 @@ export function CallQaDrawer({
   onReanalyze: (phone: string, sessionId: string) => void;
   readOnly?: boolean;
 }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [audioSec, setAudioSec] = useState(0);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [teachOpen, setTeachOpen] = useState(false);
+  const [teachQ, setTeachQ] = useState("");
+  const [teachA, setTeachA] = useState("");
+  const [teachStatus, setTeachStatus] = useState<string | null>(null);
+  const [teachSaving, setTeachSaving] = useState(false);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -262,6 +397,54 @@ export function CallQaDrawer({
 
   const status = callStatusMeta(log.status);
   const analyzing = log.analysisStatus === "analyzing";
+  const canPlayRecording = Boolean(log.hasRecording && !readOnly);
+
+  const handleSeek = (sec: number) => {
+    const el = audioRef.current;
+    if (!el) return;
+    el.currentTime = Math.max(0, sec);
+    void el.play().catch(() => {});
+  };
+
+  const handleSpeedChange = (rate: number) => {
+    setPlaybackRate(rate);
+    if (audioRef.current) audioRef.current.playbackRate = rate;
+  };
+
+  const handleOpenTeach = (question: string) => {
+    setTeachQ(question.trim());
+    setTeachA("");
+    setTeachStatus(null);
+    setTeachOpen(true);
+  };
+
+  const handleSubmitTeach = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (teachQ.trim().length < 3 || teachA.trim().length < 3) {
+      setTeachStatus("กรุณากรอกคำถามและคำตอบอย่างน้อย 3 ตัวอักษร");
+      return;
+    }
+    setTeachSaving(true);
+    setTeachStatus(null);
+    try {
+      const res = await fetch("/api/teach", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: teachQ.trim(), answer: teachA.trim(), lang: "th" }),
+      });
+      const j = await res.json();
+      if (!res.ok || !j.ok) {
+        setTeachStatus(`ไม่สำเร็จ: ${j.error || "เกิดข้อผิดพลาด"}`);
+      } else {
+        setTeachStatus("สอน J.A.R.V.I.S เรียบร้อยแล้ว! สายถัดไปที่ถามเรื่องนี้จะตอบได้ทันที");
+        setTeachA("");
+      }
+    } catch {
+      setTeachStatus("ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์เพื่อบันทึกคำตอบได้");
+    } finally {
+      setTeachSaving(false);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label={`บันทึกสายและผลวิเคราะห์ QA ของ ${formatPhone(log.phone)}`}>
@@ -294,6 +477,86 @@ export function CallQaDrawer({
         </header>
 
         <div className="cc-scroll flex-1 space-y-4 overflow-y-auto px-5 py-4">
+          {/* Dual-Channel Call Recording Player (Admin-only) */}
+          {log.hasRecording && (
+            <section className="cc-inset p-3.5">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold leading-none cc-text">
+                  <Volume2 className="h-3.5 w-3.5" />
+                  <span>เสียงบันทึกการสนทนา (ซ้าย: ผู้โทร / ขวา: AI)</span>
+                </span>
+                {canPlayRecording && (
+                  <div className="inline-flex items-center gap-1">
+                    {[1, 1.25, 1.5].map((r) => (
+                      <button
+                        key={r}
+                        type="button"
+                        onClick={() => handleSpeedChange(r)}
+                        className={`cc-btn h-6 px-2 text-[10px] font-mono ${playbackRate === r ? "cc-btn--tone tone-live" : ""}`}
+                      >
+                        {r}x
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {canPlayRecording ? (
+                <>
+                  <audio
+                    ref={audioRef}
+                    controls
+                    preload="metadata"
+                    src={`/api/recordings/${encodeURIComponent(log.sessionId)}`}
+                    onTimeUpdate={(e) => setAudioSec(e.currentTarget.currentTime)}
+                    className="h-9 w-full"
+                  />
+                  <p className="mt-1.5 text-[11px] cc-dim">คลิกปุ่มเวลาในบทสนทนาข้างล่างเพื่อข้ามเสียงไปยังช่วงนั้นทันที</p>
+                </>
+              ) : (
+                <div className="inline-flex items-center gap-1.5 text-xs cc-muted">
+                  <Lock className="h-3.5 w-3.5" />
+                  <span>ไฟล์บันทึกเสียงสงวนสิทธิ์เฉพาะผู้ดูแลระบบที่เข้าสู่ระบบแล้ว</span>
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* 1-Click Teach AI Panel */}
+          {teachOpen && !readOnly && (
+            <form onSubmit={(e) => void handleSubmitTeach(e)} className="cc-inset tone-in space-y-2.5 p-3.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold cc-text">
+                  <BookOpenCheck className="h-3.5 w-3.5" />
+                  <span>สอนคำตอบนี้ให้ J.A.R.V.I.S เพิ่ม</span>
+                </span>
+                <button type="button" onClick={() => setTeachOpen(false)} className="cc-btn h-6 w-6 px-0">
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+              <input
+                type="text"
+                value={teachQ}
+                onChange={(e) => setTeachQ(e.target.value)}
+                placeholder="คำถามของลูกค้า..."
+                className="w-full rounded-lg border border-[var(--cc-border)] bg-[var(--cc-surface)] px-3 py-1.5 text-xs cc-text outline-none focus:border-emerald-500"
+              />
+              <textarea
+                rows={2}
+                value={teachA}
+                onChange={(e) => setTeachA(e.target.value)}
+                placeholder="พิมพ์คำตอบที่ถูกต้องแบบภาษาพูดสั้นๆ 1-2 ประโยค..."
+                className="w-full rounded-lg border border-[var(--cc-border)] bg-[var(--cc-surface)] px-3 py-1.5 text-xs cc-text outline-none focus:border-emerald-500"
+              />
+              {teachStatus && <p className="text-[11px] font-medium cc-text">{teachStatus}</p>}
+              <div className="flex justify-end">
+                <button type="submit" disabled={teachSaving} className="cc-btn cc-btn--tone tone-in h-8 px-3 text-xs">
+                  <BookOpenCheck className="h-3.5 w-3.5" />
+                  <span>{teachSaving ? "กำลังบันทึก..." : "บันทึกสอน AI ทันที"}</span>
+                </button>
+              </div>
+            </form>
+          )}
+
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="inline-flex items-center gap-1.5 text-sm font-semibold leading-none cc-text">
               <Sparkles className="h-4 w-4" />
@@ -315,12 +578,28 @@ export function CallQaDrawer({
           <AnalysisState log={log} />
 
           <div>
-            <h3 className="mb-2.5 inline-flex items-center gap-1.5 text-sm font-semibold leading-none cc-text">
-              <MessageSquareText className="h-4 w-4" />
-              <span>บทสนทนาทั้งหมด</span>
-              <span className="cc-chip tone-idle tabular-nums">{log.messages.length} ข้อความ</span>
-            </h3>
-            <Transcript messages={log.messages} />
+            <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+              <h3 className="inline-flex items-center gap-1.5 text-sm font-semibold leading-none cc-text">
+                <MessageSquareText className="h-4 w-4" />
+                <span>บทสนทนาทั้งหมด</span>
+                <span className="cc-chip tone-idle tabular-nums">{log.messages.length} ข้อความ</span>
+              </h3>
+              {!readOnly && !teachOpen && (
+                <button type="button" onClick={() => handleOpenTeach("")} className="cc-btn h-7 px-2.5 text-[11px]">
+                  <BookOpenCheck className="h-3 w-3" />
+                  <span>สอน AI เพิ่ม</span>
+                </button>
+              )}
+            </div>
+            <Transcript
+              messages={log.messages}
+              callStartedAt={log.startedAt}
+              hasAudio={canPlayRecording}
+              currentAudioSec={audioSec}
+              readOnly={readOnly}
+              onSeekAudio={handleSeek}
+              onTeachClick={handleOpenTeach}
+            />
           </div>
         </div>
       </aside>

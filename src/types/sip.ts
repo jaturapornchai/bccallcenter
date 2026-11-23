@@ -6,6 +6,14 @@ export type LineState =
   | "connected"
   | "held";
 
+export interface LiveCallSignal {
+  sentiment: "positive" | "neutral" | "frustrated";
+  buyingIntent: "high" | "medium" | "none";
+  label: string;
+  tone: "in" | "held" | "danger" | "idle";
+  updatedAt: string;
+}
+
 export interface SipLine {
   lineId: number;
   state: LineState;
@@ -21,6 +29,7 @@ export interface SipLine {
   aiPartial?: string;
   aiStatus?: string;
   liveMessages?: CallerMessage[];
+  liveSignal?: LiveCallSignal | null;
   callerTotalCalls?: number;
   callerHasHistory?: boolean;
   sessionId?: string | null;
@@ -122,7 +131,10 @@ export interface CallAnalysis {
   resolutionSteps?: string;
   needsHumanFollowUp?: boolean;
   urgency?: "low" | "medium" | "high";
+  buyingIntent?: "high" | "medium" | "low";
+  interestedModules?: string[];
   followUpAction?: string;
+  followUpMessage?: string;
   aiCoachingTip?: string;
   error?: string;
 }
@@ -135,6 +147,8 @@ export interface CallerSession {
   status?: string;
   direction: "inbound" | "outbound";
   messages: CallerMessage[];
+  hasRecording?: boolean;
+  recordingDurationSec?: number;
   analysisStatus?: "idle" | "analyzing" | "done" | "error";
   analysis?: CallAnalysis | null;
 }
@@ -157,6 +171,8 @@ export interface CallLogEntry {
   status: string;
   direction: "inbound" | "outbound";
   messages: CallerMessage[];
+  hasRecording?: boolean;
+  recordingDurationSec?: number;
   analysisStatus: "idle" | "analyzing" | "done" | "error";
   analysis: CallAnalysis | null;
 }

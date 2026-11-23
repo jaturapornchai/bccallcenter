@@ -122,8 +122,18 @@ def load_stt():
 
 
 def load_final_stt():
-    """None without a GPU: on the CPU Typhoon took 5.2 s for 5.3 s of speech (measured 2026-11-18); OpenThai hears then."""
-    return WhisperModel(C.FINAL_STT_MODEL_DIR, device="cuda", compute_type=C.FINAL_STT_COMPUTE_TYPE) if C.HAS_CUDA else None
+    """Load Multilingual Whisper Large-v3-Turbo (CT2) on GPU for accurate Thai/Lao/English/Chinese/Japanese/Korean STT.
+    Falls back to local FINAL_STT_MODEL_DIR if the HF model is unavailable."""
+    if not C.HAS_CUDA:
+        return None
+    try:
+        return WhisperModel(C.FINAL_STT_MODEL, device="cuda", compute_type=C.FINAL_STT_COMPUTE_TYPE, local_files_only=True)
+    except Exception:
+        try:
+            return WhisperModel(C.FINAL_STT_MODEL, device="cuda", compute_type=C.FINAL_STT_COMPUTE_TYPE)
+        except Exception:
+            log.warning("Fallback to local FINAL_STT_MODEL_DIR: %s", C.FINAL_STT_MODEL_DIR)
+            return WhisperModel(C.FINAL_STT_MODEL_DIR, device="cuda", compute_type=C.FINAL_STT_COMPUTE_TYPE)
 
 
 _HP_SOS_16K = butter(4, 80.0, btype="highpass", fs=16000, output="sos")
@@ -361,19 +371,24 @@ MULTILANG_FAST_CHAT = re.compile(
 )
 
 
+CORE_MULTI_LANGS = {"th", "lo", "en", "zh", "ja", "ko"}
+CALL_LAST_STT_LANG: dict[str, tuple[str, float]] = {}  # webrtc_id -> (detected_lang, probability) from Whisper
+
+
 def _detect_explicit_lang_switch(text: str) -> str | None:
     low = (text or "").strip().lower()
     if not low:
         return None
-    if re.search(r"(ภาษาอังกฤษ|พูดอังกฤษ|คุยอังกฤษ|speak english|in english|switch to english|english please)", low):
+    # Explicit English requests (including "can't understand thai" / "don't speak thai")
+    if re.search(r"(ภาษาอังกฤษ|พูดอังกฤษ|คุยอังกฤษ|speak\s+(?:in\s+)?english|in english|switch to english|english please|can'?t understand thai|don'?t (?:speak|understand) thai)", low):
         return "en"
-    if re.search(r"(ภาษาจีน|พูดจีน|คุยจีน|speak chinese|in chinese|mandarin|说中文|切换.*中文|用中文)", low):
+    if re.search(r"(ภาษาจีน|พูดจีน|คุยจีน|speak\s+(?:in\s+)?chinese|in chinese|mandarin|说中文|讲中文|切换.*中文|用中文|普通话)", low):
         return "zh"
-    if re.search(r"(ภาษาญี่ปุ่น|พูดญี่ปุ่น|speak japanese|in japanese|日本語で)", low):
+    if re.search(r"(ภาษาญี่ปุ่น|พูดญี่ปุ่น|คุยญี่ปุ่น|speak\s+(?:in\s+)?japanese|in japanese|日本語で|にほんご)", low):
         return "ja"
-    if re.search(r"(ภาษาเกาหลี|พูดเกาหลี|speak korean|in korean|한국어로)", low):
+    if re.search(r"(ภาษาเกาหลี|พูดเกาหลี|คุยเกาหลี|speak\s+(?:in\s+)?korean|in korean|한국어로|한국말)", low):
         return "ko"
-    if re.search(r"(ภาษาลาว|พูดลาว|คุยลาว|speak lao|ພາສາລາວ)", low):
+    if re.search(r"(ภาษาลาว|พูดลาว|คุยลาว|เว้าลาว|speak\s+(?:in\s+)?lao|in lao|ພາສາລາວ|ເວົ້າລາວ)", low):
         return "lo"
     if re.search(r"(ภาษาพม่า|ภาษาเมียนมา|speak burmese|myanmar language|မြန်မာ)", low):
         return "my"
@@ -381,7 +396,8 @@ def _detect_explicit_lang_switch(text: str) -> str | None:
         return "vi"
     if re.search(r"(ภาษาเขมร|ภาษากัมพูชา|speak khmer|ភាសាខ្មែរ)", low):
         return "km"
-    if re.search(r"(ภาษาไทย|พูดไทย|คุยไทย|speak thai|in thai|thai language)", low):
+    # Match Thai switch only if NOT negated ("can't understand thai" already handled above)
+    if re.search(r"(ภาษาไทย|พูดไทย|คุยไทย|speak\s+(?:in\s+)?thai|in thai|switch to thai)", low) and not re.search(r"(?:can'?t|don'?t|not)\s+\w*\s*thai", low):
         return "th"
     return None
 
@@ -390,21 +406,31 @@ def _detect_script_lang(text: str) -> str | None:
     s = (text or "").strip()
     if not s:
         return None
-    if re.search(r"[\u0E00-\u0E7F]{2,}", s):
-        return "th"
-    if re.search(r"[\u3040-\u30FF]", s):
+    # Count characters by script to avoid false matches on mixed technical terms (e.g. "BC Ai Account")
+    n_th = len(re.findall(r"[\u0E00-\u0E7F]", s))
+    n_lo = len(re.findall(r"[\u0E80-\u0EFF]", s))
+    n_ja = len(re.findall(r"[\u3040-\u30FF]", s))
+    n_ko = len(re.findall(r"[\uAC00-\uD7AF]", s))
+    n_zh = len(re.findall(r"[\u4E00-\u9FFF]", s))
+    n_my = len(re.findall(r"[\u1000-\u109F]", s))
+    n_km = len(re.findall(r"[\u1780-\u17FF]", s))
+    latin_words = re.findall(r"[a-zA-Z]{2,}", s)
+
+    if n_ja >= 2:
         return "ja"
-    if re.search(r"[\uAC00-\uD7AF]", s):
+    if n_ko >= 2:
         return "ko"
-    if re.search(r"[\u4E00-\u9FFF]{2,}", s):
+    if n_zh >= 2 and n_ja == 0:
         return "zh"
-    if re.search(r"[\u0E80-\u0EFF]{2,}", s):
+    if n_lo >= 2 and n_lo >= n_th:
         return "lo"
-    if re.search(r"[\u1000-\u109F]{2,}", s):
+    if n_my >= 2:
         return "my"
-    if re.search(r"[\u1780-\u17FF]{2,}", s):
+    if n_km >= 2:
         return "km"
-    if len(re.findall(r"[a-zA-Z]{2,}", s)) >= 2 and not re.search(r"[\u0E00-\u0E7F]", s):
+    if n_th >= 2 and n_th >= len(latin_words) * 2:
+        return "th"
+    if len(latin_words) >= 2 and n_th == 0:
         return "en"
     return None
 
@@ -454,10 +480,9 @@ def _choose_triple_ear(ear1: str, ear2: str, ear3: str, lang: str | None) -> tup
 
 
 def transcribe_final(audio):
-    """Triple-Ear Parallel ASR (inspired by MarketBrain):
-    - Ear 1 (GPU CUDA): Typhoon Whisper Turbo + BC domain initial_prompt (lowest CER ~2.3%)
-    - Ear 2 (CPU ONNX th-TH) + Ear 3 (CPU ONNX th-mix): Batched B=2 OpenThai 2.0 ASR in one encoder pass (~180ms)
-    Runs GPU + CPU in parallel with a 1.2s phone deadline on Ear 1 so GPU load never stalls a live call."""
+    """Multilingual Triple-Ear Parallel ASR (th / lo / en / zh / ja / ko):
+    - Ear 1 (GPU CUDA): Multilingual Whisper Large-v3-Turbo with true auto language detection (never forces foreign speech into Thai!)
+    - Ear 2 (CPU ONNX th-TH) + Ear 3 (CPU ONNX th-mix): Batched B=2 OpenThai 2.0 ASR (~180ms) used only when speech is Thai."""
     data = to16k(audio)
     if data.size < 400:
         return ""
@@ -468,21 +493,43 @@ def transcribe_final(audio):
 
     def _run_ear1():
         if final_stt is None:
-            return "", None
+            return "", None, 0.0
         try:
+            # Always let Multilingual Whisper auto-detect language (language=None, no Thai-only prompt bias)
+            # so Thai/Lao/English/Chinese/Japanese/Korean speech is transcribed in its true native script!
             segments, info = final_stt.transcribe(
                 data,
-                language=req_lang,
+                language=None,
                 beam_size=1 if phone_mode else 2,
-                initial_prompt=BC_STT_PROMPT if (req_lang in (None, "th")) else None,
+                initial_prompt=None,
                 vad_filter=True,
                 vad_parameters=C.STT_VAD_PARAMS,
                 without_timestamps=True,
+                condition_on_previous_text=False,
             )
-            return "".join(s.text for s in segments).strip(), getattr(info, "language", None)
+            txt = "".join(s.text for s in segments).strip()
+            det_lang = getattr(info, "language", None)
+            det_prob = float(getattr(info, "language_probability", 0.0) or 0.0)
+            # If Whisper guessed an unsupported rare language on very short audio, re-decode with current call language
+            if det_lang and det_lang not in LANG_NAMES:
+                fallback_lang = req_lang if req_lang in LANG_NAMES else "th"
+                seg2, _ = final_stt.transcribe(
+                    data,
+                    language=fallback_lang,
+                    beam_size=1,
+                    initial_prompt=BC_STT_PROMPT if fallback_lang == "th" else None,
+                    vad_filter=True,
+                    vad_parameters=C.STT_VAD_PARAMS,
+                    without_timestamps=True,
+                    condition_on_previous_text=False,
+                )
+                txt2 = "".join(s.text for s in seg2).strip()
+                if txt2:
+                    return txt2, fallback_lang, 0.60
+            return txt, det_lang, det_prob
         except Exception:
-            log.exception("Ear1 (Typhoon Whisper) failed")
-            return "", None
+            log.exception("Ear1 (Multilingual Whisper) failed")
+            return "", None, 0.0
 
     def _run_ears23():
         try:
@@ -494,28 +541,54 @@ def transcribe_final(audio):
             log.exception("Ear2/3 (OpenThai B=2) failed")
             return "", ""
 
-    # Non-Thai calls rely primarily on Whisper (Ear 1); Thai/auto calls run all 3 ears in parallel!
+    # When call is already in a non-Thai language (en/zh/ja/ko/lo), rely directly on Multilingual Whisper (still auto-detecting so caller can switch back to Thai anytime!)
     if req_lang and req_lang != "th" and final_stt is not None:
-        e1, det_lang = _run_ear1()
+        e1, det_lang, det_prob = _run_ear1()
         if cid:
             LAST_ALT_HEARD[cid] = []
+            if det_lang in LANG_NAMES:
+                CALL_LAST_STT_LANG[cid] = (det_lang, det_prob)
+        dt = time.perf_counter() - t_stt
+        if e1:
+            log.info("MULTI-STT (%.2fs | req=%s det=%s %.0f%%): %s", dt, req_lang, det_lang or "-", det_prob * 100, masked(e1))
         return e1
 
     f_gpu = TRIPLE_EAR_POOL.submit(_run_ear1)
     f_cpu = TRIPLE_EAR_POOL.submit(_run_ears23)
 
     ear2, ear3 = f_cpu.result()
-    ear1, det_lang = "", None
-    deadline = 1.2 if phone_mode else 3.0
+    ear1, det_lang, det_prob = "", None, 0.0
+    deadline = 1.6 if phone_mode else 3.0
     rem = max(0.05, deadline - (time.perf_counter() - t_stt))
     try:
-        ear1, det_lang = f_gpu.result(timeout=rem)
+        ear1, det_lang, det_prob = f_gpu.result(timeout=rem)
     except Exception:
         log.info("TRIPLE-EAR: Ear1 GPU >%.1fs deadline, using fast CPU Ear2/3", deadline)
 
-    if cid and req_lang is None and det_lang in LANG_NAMES and (ear1 or ear2 or ear3):
-        CALL_LANG[cid] = det_lang
-        CALL_NEW_CALLER[cid] = False
+    if cid and det_lang in LANG_NAMES:
+        CALL_LAST_STT_LANG[cid] = (det_lang, det_prob)
+
+    # If Multilingual Whisper confidently heard non-Thai (Lao/English/Chinese/Japanese/Korean),
+    # trust Ear1 100% and NEVER mix in OpenThai Thai-transliterated garbage!
+    script_e1 = _detect_script_lang(ear1)
+    is_non_thai = bool(
+        ear1
+        and (
+            (det_lang in (CORE_MULTI_LANGS - {"th"}) and det_prob >= 0.45)
+            or (script_e1 in (CORE_MULTI_LANGS - {"th"}))
+        )
+    )
+    if is_non_thai:
+        picked = ear1
+        alts = []
+        if cid:
+            LAST_ALT_HEARD[cid] = []
+        dt = time.perf_counter() - t_stt
+        log.info(
+            "TRIPLE-EAR-MULTI (%.2fs | det=%s %.0f%% script=%s) picked=%s",
+            dt, det_lang or "-", det_prob * 100, script_e1 or "-", masked(picked),
+        )
+        return picked
 
     picked, alts = _choose_triple_ear(ear1, ear2, ear3, req_lang)
     if cid:
@@ -523,8 +596,8 @@ def transcribe_final(audio):
     dt = time.perf_counter() - t_stt
     if picked:
         log.info(
-            "TRIPLE-EAR (%.2fs) picked=%s | e1=%s | e2=%s | e3=%s",
-            dt, masked(picked), masked(ear1 or "-"), masked(ear2 or "-"), masked(ear3 or "-"),
+            "TRIPLE-EAR (%.2fs | det=%s %.0f%%) picked=%s | e1=%s | e2=%s | e3=%s",
+            dt, det_lang or "-", det_prob * 100, masked(picked), masked(ear1 or "-"), masked(ear2 or "-"), masked(ear3 or "-"),
         )
     return picked
 
@@ -794,7 +867,22 @@ def _prepare_tts_text(text, lang):
     return norm if SPEAKABLE_RE.search(norm) else ""
 
 
-def speak(text, lang_override=None):
+_EMPATHY_RE = re.compile(r"(?:ขออภัย|เสียใจ|เข้าใจเลย|ลำบาก|ติดปัญหา|ยุ่งยาก|กังวล|หงุดหงิด|ช้า|พัง|เออเรอร์|error|sorry|problem|issue)", re.I)
+_UPBEAT_RE = re.compile(r"(?:โอ้โห|เยี่ยมเลย|ยินดีที่ได้|ดีใจที่ได้|สุดยอด|ได้เลยครับ|สบายเลย|ตื่นเต้น|คุ้มมาก|great|awesome|welcome)", re.I)
+
+
+def _detect_reply_emotion(heard: str, text: str) -> str:
+    """Pick ElevenLabs voice emotion tone ('empathy' | 'upbeat' | 'friendly') from caller + reply text."""
+    h = heard or ""
+    t = text or ""
+    if _EMPATHY_RE.search(h) or _EMPATHY_RE.search(t):
+        return "empathy"
+    if _UPBEAT_RE.search(t):
+        return "upbeat"
+    return "friendly"
+
+
+def speak(text, lang_override=None, emotion="friendly"):
     cid = call_id() if "call_id" in globals() else ""
     lang = lang_override or CALL_LANG.get(cid) or "th"
     norm = _prepare_tts_text(text, lang)
@@ -803,7 +891,7 @@ def speak(text, lang_override=None):
     if isinstance(tts, tuple) and tts[0] == "elevenlabs":
         el: ElevenLabsTTS = tts[1]
         try:
-            arr = el.synthesize_pcm24k(norm, lang=lang).reshape(-1)
+            arr = el.synthesize_pcm24k(norm, lang=lang, emotion=emotion).reshape(-1)
             if arr.size:
                 return level(arr).reshape(1, -1)
         except Exception:
@@ -827,7 +915,7 @@ def speak(text, lang_override=None):
     return np.zeros((1, C.TTS_SAMPLE_RATE // 10), np.float32)
 
 
-def stream_bot_out(text, lang_override=None, lead=0.0):
+def stream_bot_out(text, lang_override=None, lead=0.0, emotion="friendly"):
     """Yield one seamless, level-normalized, edge-faded audio buffer per sentence so FastRTC's resampler
     and the 20ms RTP pacer never suffer chunk-boundary clicks or mid-word underruns."""
     cid = call_id() if "call_id" in globals() else ""
@@ -835,7 +923,7 @@ def stream_bot_out(text, lang_override=None, lead=0.0):
     norm = _prepare_tts_text(text, lang)
     if not norm:
         return
-    yield bot_out(text, speak(text, lang_override=lang_override), lead=lead)
+    yield bot_out(text, speak(text, lang_override=lang_override, emotion=emotion), lead=lead)
 
 
 def bot_out(text, wav, lead=0.0, filler=False):  # carries exact audio duration (s); optional silent preroll prevents WebRTC/speaker clipping word 1
@@ -2060,29 +2148,42 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
     if cid and heard and not hello:
         pending = PENDING_LANG_CONFIRM.get(cid)
         explicit = _detect_explicit_lang_switch(heard)
-        spoken = _detect_script_lang(heard)
+        script_lang = _detect_script_lang(heard)
+        stt_det_lang, stt_det_prob = CALL_LAST_STT_LANG.get(cid, (None, 0.0))
+        spoken = script_lang or (stt_det_lang if stt_det_lang in CORE_MULTI_LANGS and stt_det_prob >= 0.65 else None)
+        # Strong foreign utterance (>= 2 words or >= 4 non-space chars + confident Whisper/script) -> switch immediately!
+        is_strong_lang_turn = bool(
+            spoken
+            and spoken in CORE_MULTI_LANGS
+            and (
+                (spoken == "en" and len(re.findall(r"[A-Za-z]{2,}", heard)) >= 2)
+                or (spoken in ("zh", "ja", "ko", "lo") and len(re.sub(r"\s+", "", heard)) >= 3)
+                or (spoken == "th" and len(re.findall(r"[\u0E00-\u0E7F]", heard)) >= 4)
+            )
+            and (script_lang == spoken or stt_det_prob >= 0.65)
+        )
 
         if pending:
-            if _is_lang_confirm_yes(heard) or explicit == pending:
+            if _is_lang_confirm_yes(heard) or explicit == pending or spoken == pending:
                 PENDING_LANG_CONFIRM.pop(cid, None)
                 CALL_LANG[cid] = pending
                 CALL_NEW_CALLER[cid] = False
-                yield AdditionalOutputs({"kind": "user", "text": heard})
                 yield AdditionalOutputs({"kind": "lang", "language": pending})
-                ack = LANG_SWITCHED_ACK.get(pending, LANG_SWITCHED_ACK["en"])
-                yield bot_out(ack, _filler_or_speak(f"lang_ack_{pending}", ack, pending), lead=0.08)
-                yield AdditionalOutputs({"kind": "done"})
-                return
+                if len(heard.strip()) <= 24 and not (spoken == pending and is_strong_lang_turn):
+                    yield AdditionalOutputs({"kind": "user", "text": heard})
+                    ack = LANG_SWITCHED_ACK.get(pending, LANG_SWITCHED_ACK["en"])
+                    yield bot_out(ack, _filler_or_speak(f"lang_ack_{pending}", ack, pending), lead=0.08)
+                    yield AdditionalOutputs({"kind": "done"})
+                    return
             elif _is_lang_confirm_no(heard):
                 PENDING_LANG_CONFIRM.pop(cid, None)
                 now += f"\n(ระบบภาษา: ลูกค้าปฏิเสธการเปลี่ยนภาษา ให้คุยภาษาเดิม {LANG_NAMES.get(cur_lang or 'th', 'ภาษาไทย')} ต่อตามปกติ)"
         elif explicit and explicit != cur_lang:
+            PENDING_LANG_CONFIRM.pop(cid, None)
             CALL_LANG[cid] = explicit
             CALL_NEW_CALLER[cid] = False
             yield AdditionalOutputs({"kind": "lang", "language": explicit})
-            # If the caller only asked to switch language (short phrase), reply immediately at 0ms.
-            # If they also asked a real question in the same sentence, switch language and continue answering it!
-            if len(heard.strip()) <= 32:
+            if len(heard.strip()) <= 36:
                 yield AdditionalOutputs({"kind": "user", "text": heard})
                 ack = LANG_SWITCHED_ACK.get(explicit, LANG_SWITCHED_ACK["en"])
                 yield bot_out(ack, _filler_or_speak(f"lang_ack_{explicit}", ack, explicit), lead=0.08)
@@ -2093,13 +2194,20 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             CALL_NEW_CALLER[cid] = False
             yield AdditionalOutputs({"kind": "lang", "language": spoken})
         elif cur_lang and spoken and spoken != cur_lang:
-            # Heard a different language -> ask confirmation immediately in that detected language!
-            PENDING_LANG_CONFIRM[cid] = spoken
-            yield AdditionalOutputs({"kind": "user", "text": heard})
-            q_text = LANG_CONFIRM_PROMPTS.get(spoken, LANG_CONFIRM_PROMPTS["en"])
-            yield bot_out(q_text, _filler_or_speak(f"lang_confirm_{spoken}", q_text, spoken), lead=0.08)
-            yield AdditionalOutputs({"kind": "done"})
-            return
+            if is_strong_lang_turn:
+                # Caller clearly spoke a full phrase in Thai/Lao/English/Chinese/Japanese/Korean -> auto-switch seamlessly!
+                PENDING_LANG_CONFIRM.pop(cid, None)
+                CALL_LANG[cid] = spoken
+                CALL_NEW_CALLER[cid] = False
+                yield AdditionalOutputs({"kind": "lang", "language": spoken})
+                log.info("AUTO-LANG-SWITCH (%s): %s -> %s (prob=%.0f%%)", cid, cur_lang, spoken, stt_det_prob * 100)
+            else:
+                PENDING_LANG_CONFIRM[cid] = spoken
+                yield AdditionalOutputs({"kind": "user", "text": heard})
+                q_text = LANG_CONFIRM_PROMPTS.get(spoken, LANG_CONFIRM_PROMPTS["en"])
+                yield bot_out(q_text, _filler_or_speak(f"lang_confirm_{spoken}", q_text, spoken), lead=0.08)
+                yield AdditionalOutputs({"kind": "done"})
+                return
 
     if cid and heard and not hello:
         prev_bot_msg = history[-1]["content"] if history and history[-1].get("role") == "assistant" else ""
@@ -2351,7 +2459,8 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                     lead = C.SENTENCE_GAP_S if turn.get("voiced") else 0.08
                     turn["voiced"] = True
                     said.append(text)
-                    yield from stream_bot_out(text, lead=lead)
+                    emo = _detect_reply_emotion(heard, text) if on_phone() else "friendly"
+                    yield from stream_bot_out(text, lead=lead, emotion=emo)
                     # which part is slow, per phrase: the boss writing it, the judge, the voice
                     log.info("BOT  (%.2fs | boss %.2f judge %.2f voice %.2f): %s", time.perf_counter() - t0, got - mark,
                              judged - got, time.perf_counter() - judged, masked(text))
@@ -2472,7 +2581,7 @@ def greet(*_, public=False):
         if c_name:
             if cur_lang == "en":
                 greeting = f"Hello {c_name}, this is Jarvis from BC Call Center. Great to talk with you again! How can I help you today?"
-                yield bot_out(greeting, speak(greeting, lang_override="en"), lead=0.14)
+                yield bot_out(greeting, speak(greeting, lang_override="en", emotion="upbeat"), lead=0.14)
                 yield AdditionalOutputs({"kind": "done"})
                 return
             if cur_lang == "th":
@@ -2481,7 +2590,7 @@ def greet(*_, public=False):
                     greeting = f"สวัสดีครับ{addressed} เจาร์วิสครับ คราวก่อนเราคุยเรื่อง{last_topic}กันไว้ วันนี้คุยต่อเรื่องเดิมหรือมีเรื่องไหนให้ช่วยดูครับ"
                 else:
                     greeting = f"สวัสดีครับ{addressed} เจาร์วิสครับ ดีใจที่ได้คุยกันอีกนะครับ วันนี้มีเรื่องไหนให้ผมช่วยดูดีครับ"
-                yield bot_out(greeting, speak(greeting, lang_override="th"), lead=0.14)
+                yield bot_out(greeting, speak(greeting, lang_override="th", emotion="upbeat"), lead=0.14)
                 yield AdditionalOutputs({"kind": "done"})
                 return
         if cur_lang == "th":
@@ -2618,7 +2727,9 @@ class BargeInReplyOnPause(ReplyOnPause):
                     state.responding = False
             if live:
                 new, live["text"] = txt != live["text"], txt
-                if new:
+                # Only display OpenThai live partial on screen when caller is speaking Thai (avoid showing Thai transliteration during EN/ZH/JA/KO/LO turns)
+                cur_call_lang = CALL_LANG.get(call_id()) or "th"
+                if new and cur_call_lang == "th":
                     self.send_message_sync(json.dumps({"type": "partial", "data": txt}, ensure_ascii=False))
         except Exception:
             pass
@@ -2935,6 +3046,30 @@ def make_app(stream, public=False):
     def cache_stats():
         tts_stats = tts[1].stats() if isinstance(tts, tuple) and tts[0] == "elevenlabs" else {"enabled": False}
         return {"tts": tts_stats, "qa": QA_CACHE.stats()}
+
+    @app.get("/teach")  # list admin-taught & cached FAQ entries
+    def list_taught(taught_only: bool = False):
+        return {"ok": True, "entries": QA_CACHE.list_entries(taught_only=taught_only)}
+
+    @app.post("/teach")  # 1-click admin FAQ teaching: persists permanently in QA cache
+    async def post_teach(body: dict):
+        try:
+            q = str(body.get("question") or "").strip()
+            a = str(body.get("answer") or "").strip()
+            lang = str(body.get("lang") or "th").strip() or "th"
+            entry = QA_CACHE.teach(q, a, lang=lang)
+            log.info("ADMIN-TAUGHT FAQ (%s): %s -> %d sentences", lang, masked(q), len(entry.get("sentences") or []))
+            return {"ok": True, "entry": entry}
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    @app.delete("/teach")  # remove a taught or cached FAQ entry by key
+    async def delete_taught(body: dict):
+        key = str(body.get("key") or "").strip()
+        if not key:
+            return JSONResponse({"ok": False, "error": "key is required"}, status_code=400)
+        deleted = QA_CACHE.delete_entry(key)
+        return {"ok": deleted}
 
     @app.get("/outputs")  # subtitles, status, info cards, panel (Server-Sent Events)
     async def outputs(webrtc_id: str):

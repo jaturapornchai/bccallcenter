@@ -67,10 +67,19 @@ class ElevenLabsTTS:
     def enabled(self) -> bool:
         return bool(self.api_key)
 
-    def _cache_path(self, text: str, lang: str | None) -> str | None:
+    def _resolve_emotion(self, emotion: str | None) -> tuple[float, float, float]:
+        """Map conversational emotion -> (stability, style, speed) while preserving default cache keys."""
+        emo = (emotion or "friendly").strip().lower()
+        if emo == "empathy":
+            return (0.48, 0.34, max(0.86, round(self.speed - 0.04, 2)))
+        if emo == "upbeat":
+            return (0.30, 0.58, min(1.02, round(self.speed + 0.02, 2)))
+        return (self.stability, self.style, self.speed)
+
+    def _cache_path(self, text: str, lang: str | None, stability: float, style: float, speed: float) -> str | None:
         if not self.cache_dir:
             return None
-        key_src = f"{self.model_id}|{self.voice_id}|{self.speed:.2f}|{self.stability:.2f}|{self.style:.2f}|{lang or 'auto'}|{text}"
+        key_src = f"{self.model_id}|{self.voice_id}|{speed:.2f}|{stability:.2f}|{style:.2f}|{lang or 'auto'}|{text}"
         digest = hashlib.sha256(key_src.encode("utf-8")).hexdigest()[:24]
         return os.path.join(self.cache_dir, f"{digest}.pcm")
 
@@ -139,16 +148,16 @@ class ElevenLabsTTS:
         except OSError:
             pass
 
-    def _payload(self, text: str, lang: str | None = None) -> dict:
+    def _payload(self, text: str, lang: str | None = None, stability: float | None = None, style: float | None = None, speed: float | None = None) -> dict:
         body: dict = {
             "text": text,
             "model_id": self.model_id,
             "voice_settings": {
-                "stability": self.stability,
+                "stability": self.stability if stability is None else stability,
                 "similarity_boost": self.similarity_boost,
-                "style": self.style,
+                "style": self.style if style is None else style,
                 "use_speaker_boost": True,
-                "speed": self.speed,
+                "speed": self.speed if speed is None else speed,
             },
         }
         if lang and len(lang) == 2:
@@ -164,17 +173,18 @@ class ElevenLabsTTS:
                 arr = np.frombuffer(piece, dtype="<i2").astype(np.float32) / 32768.0
                 yield arr.reshape(1, -1)
 
-    def stream_pcm24k(self, text: str, lang: str | None = None) -> Iterator[np.ndarray]:
+    def stream_pcm24k(self, text: str, lang: str | None = None, emotion: str = "friendly") -> Iterator[np.ndarray]:
         """Yield (1, N) float32 24 kHz chunks from local disk cache (<1ms, 0 credits) or live ElevenLabs stream."""
         cleaned = (text or "").strip()
         if not self.enabled or not cleaned or not SPEAKABLE_RE.search(cleaned):
             return
-        cpath = self._cache_path(cleaned, lang)
+        stability, style, speed = self._resolve_emotion(emotion)
+        cpath = self._cache_path(cleaned, lang, stability, style, speed)
         cached = self._read_cache(cpath)
         if cached is not None:
             self.cache_hits += 1
             self.chars_saved += len(cleaned)
-            log.info("TTS-CACHE HIT (0 credits, saved %d chars total): %s", self.chars_saved, cleaned[:60])
+            log.info("TTS-CACHE HIT [%s] (0 credits, saved %d chars total): %s", emotion, self.chars_saved, cleaned[:60])
             yield from self._yield_pcm_chunks(cached)
             return
 
@@ -184,7 +194,7 @@ class ElevenLabsTTS:
         full_pcm = bytearray()
         completed = False
         try:
-            with self._client.stream("POST", url, json=self._payload(cleaned, lang)) as resp:
+            with self._client.stream("POST", url, json=self._payload(cleaned, lang, stability, style, speed)) as resp:
                 if resp.status_code != 200:
                     err_body = resp.read().decode("utf-8", errors="replace")[:240]
                     raise RuntimeError(f"ElevenLabs HTTP {resp.status_code}: {err_body}")
@@ -210,9 +220,9 @@ class ElevenLabsTTS:
             if completed and full_pcm:
                 self._write_cache(cpath, bytes(full_pcm))
 
-    def synthesize_pcm24k(self, text: str, lang: str | None = None) -> np.ndarray:
+    def synthesize_pcm24k(self, text: str, lang: str | None = None, emotion: str = "friendly") -> np.ndarray:
         """Synthesize a complete phrase cleanly with 5ms edge fades (eliminates chunk-boundary clicks/stutters)."""
-        parts = list(self.stream_pcm24k(text, lang=lang))
+        parts = list(self.stream_pcm24k(text, lang=lang, emotion=emotion))
         if not parts:
             return np.zeros((1, SAMPLE_RATE // 10), np.float32)
         arr = np.concatenate(parts, axis=1).reshape(-1)
