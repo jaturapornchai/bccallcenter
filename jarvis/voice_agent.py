@@ -281,7 +281,7 @@ def _is_lang_confirm_no(text: str) -> bool:
 TRIPLE_EAR_POOL = ThreadPoolExecutor(3)
 LAST_ALT_HEARD: dict[str, list[str]] = {}  # webrtc_id -> distinct alternate transcripts from secondary ears
 BC_STT_PROMPT = (
-    "โปรแกรมบัญชี BC Ai Account, บีซีเอไอแอคเคาท์, ต้นทุนสินค้า, FIFO, ถัวเฉลี่ย, "
+    "โปรแกรมบัญชี BC Ai Account, บีซีเอไอแอคเคาท์, Express, เอ็กซ์เพรส, ต้นทุนสินค้า, FIFO, ถัวเฉลี่ย, "
     "ภาษีมูลค่าเพิ่ม VAT, ภ.พ.30, ลูกหนี้, เจ้าหนี้, ขายสด, ขายเชื่อ, สต็อก, คลังสินค้า, "
     "ผู้รับเหมา, ใบกำกับภาษี, ใบเสนอราคา, POS, API, SQL"
 )
@@ -689,34 +689,13 @@ def speak(text, lang_override=None):
 
 
 def stream_bot_out(text, lang_override=None, lead=0.0):
-    """Yield audio continuously as it streams from ElevenLabs Flash v2.5 (~120ms chunks, ~150ms TTFA),
-    or fall back to single-buffer OmniVoice bot_out()."""
+    """Yield one seamless, level-normalized, edge-faded audio buffer per sentence so FastRTC's resampler
+    and the 20ms RTP pacer never suffer chunk-boundary clicks or mid-word underruns."""
     cid = call_id() if "call_id" in globals() else ""
     lang = lang_override or CALL_LANG.get(cid) or "th"
     norm = _prepare_tts_text(text, lang)
     if not norm:
         return
-    if isinstance(tts, tuple) and tts[0] == "elevenlabs":
-        el: ElevenLabsTTS = tts[1]
-        pad = int(round(max(0.0, lead) * C.TTS_SAMPLE_RATE))
-        first = True
-        try:
-            for chunk in el.stream_pcm24k(norm, lang=lang):
-                out = chunk
-                if first and pad:
-                    out = np.concatenate((np.zeros((1, pad), np.float32), chunk), axis=1)
-                if first:
-                    ev = {"kind": "bot", "text": text, "streaming": True}
-                    if pad:
-                        ev["lead"] = round(pad / C.TTS_SAMPLE_RATE, 2)
-                    yield (C.TTS_SAMPLE_RATE, out), AdditionalOutputs(ev)
-                    first = False
-                else:
-                    yield (C.TTS_SAMPLE_RATE, out)
-            return
-        except Exception:
-            log.exception("ElevenLabs streaming failed for phrase: %s", masked(text))
-            return
     yield bot_out(text, speak(text, lang_override=lang_override), lead=lead)
 
 
@@ -905,7 +884,7 @@ STATUS = {"web_search": "กำลังค้นหาในอินเทอ�
           "calc": "กำลังคำนวณ", "general_knowledge": "กำลังถามความรู้ทั่วไป"}
 FILLER_TEXT = {
     "hello": "สวัสดีครับ",
-    "phone_intro": "ระบบบีซีคอลเซ็นเตอร์ เจาร์วิส ยินดีให้บริการครับ สนใจให้แนะนำโปรแกรมบีซีเอไอแอคเคาท์ หรือสอบถามวิธีใช้งานตรงไหน คุยได้ทุกภาษาเลยนะครับ",
+    "phone_intro": "เจาร์วิสจากบีซีคอลเซ็นเตอร์ครับ สบายๆ เลยนะครับ อยากให้ช่วยแนะนำโปรแกรมบีซีเอไอแอคเคาท์ หรือถามวิธีใช้งานตรงไหน คุยได้ทุกภาษาเลยครับ",
     "wait_th_1": "รอสักครู่นะครับ ขอเช็กข้อมูลให้ครับ",
     "wait_th_2": "ครับผม รอสักครู่นะครับ",
     "wait_th_3": "ขอเวลาเช็กข้อมูลสักครู่นะครับ",

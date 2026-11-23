@@ -30,9 +30,10 @@ class ElevenLabsTTS:
         api_key: str,
         voice_id: str = "H9eYlNHpm1vah6PPgYAk",
         model_id: str = "eleven_v4_turbo",
-        speed: float = 0.96,
-        stability: float = 0.55,
+        speed: float = 0.94,
+        stability: float = 0.35,
         similarity_boost: float = 0.78,
+        style: float = 0.45,
         timeout: float = 15.0,
         cache_dir: str | None = None,
         max_cache_mb: int = 500,
@@ -43,6 +44,7 @@ class ElevenLabsTTS:
         self.speed = float(speed)
         self.stability = float(stability)
         self.similarity_boost = float(similarity_boost)
+        self.style = float(style)
         self.cache_dir = cache_dir
         self.max_cache_bytes = max(20, int(max_cache_mb)) * 1024 * 1024
         self._cache_lock = threading.Lock()
@@ -68,7 +70,7 @@ class ElevenLabsTTS:
     def _cache_path(self, text: str, lang: str | None) -> str | None:
         if not self.cache_dir:
             return None
-        key_src = f"{self.model_id}|{self.voice_id}|{self.speed:.2f}|{lang or 'auto'}|{text}"
+        key_src = f"{self.model_id}|{self.voice_id}|{self.speed:.2f}|{self.stability:.2f}|{self.style:.2f}|{lang or 'auto'}|{text}"
         digest = hashlib.sha256(key_src.encode("utf-8")).hexdigest()[:24]
         return os.path.join(self.cache_dir, f"{digest}.pcm")
 
@@ -144,7 +146,7 @@ class ElevenLabsTTS:
             "voice_settings": {
                 "stability": self.stability,
                 "similarity_boost": self.similarity_boost,
-                "style": 0.0,
+                "style": self.style,
                 "use_speaker_boost": True,
                 "speed": self.speed,
             },
@@ -209,11 +211,17 @@ class ElevenLabsTTS:
                 self._write_cache(cpath, bytes(full_pcm))
 
     def synthesize_pcm24k(self, text: str, lang: str | None = None) -> np.ndarray:
-        """Synthesize a complete phrase (serves from disk cache at 0ms / 0 credits on subsequent restarts)."""
+        """Synthesize a complete phrase cleanly with 5ms edge fades (eliminates chunk-boundary clicks/stutters)."""
         parts = list(self.stream_pcm24k(text, lang=lang))
         if not parts:
             return np.zeros((1, SAMPLE_RATE // 10), np.float32)
-        return np.concatenate(parts, axis=1)
+        arr = np.concatenate(parts, axis=1).reshape(-1)
+        fade = min(120, arr.size // 4)  # 5ms linear fade-in/out @ 24 kHz
+        if fade > 1:
+            ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+            arr[:fade] *= ramp
+            arr[-fade:] *= ramp[::-1]
+        return arr.reshape(1, -1)
 
     def stats(self) -> dict:
         files = 0
