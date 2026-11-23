@@ -3,6 +3,14 @@ import http from "node:http";
 import path from "node:path";
 import next from "next";
 import { WebSocketServer } from "ws";
+import {
+  buildClearSessionCookie,
+  buildSessionSetCookie,
+  createSessionToken,
+  sanitizeStateForViewer,
+  verifyGoogleIdToken,
+  verifySessionFromCookieHeader,
+} from "./lib/auth.mjs";
 import { SipEngine } from "./lib/sip-engine.mjs";
 
 const envPath = path.resolve(process.cwd(), ".env.local");
@@ -31,11 +39,97 @@ const sip = new SipEngine({
   ollamaApiKey: process.env.OLLAMA_API_KEY || "",
 });
 
+function readJsonBody(req, maxBytes = 32768) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        reject(new Error("Payload too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"));
+      } catch {
+        reject(new Error("Invalid JSON"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function sendJson(res, status, data, extraHeaders = {}) {
+  const body = JSON.stringify(data);
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    ...extraHeaders,
+  });
+  res.end(body);
+}
+
+function isRequestHttps(req) {
+  const proto = String(req.headers["x-forwarded-proto"] || "").toLowerCase();
+  return proto === "https" || Boolean(req.socket?.encrypted);
+}
+
 app.prepare().then(async () => {
   await sip.start();
 
-  const server = http.createServer((req, res) => {
-    handle(req, res);
+  const server = http.createServer(async (req, res) => {
+    const urlPath = (req.url || "").split("?")[0];
+
+    // --- Auth Endpoints (Google Sign-In + HttpOnly Session Cookie) ---
+    if (urlPath === "/api/auth/me" && req.method === "GET") {
+      const session = verifySessionFromCookieHeader(req.headers.cookie);
+      return sendJson(res, 200, {
+        authenticated: Boolean(session),
+        isAdmin: Boolean(session?.isAdmin),
+        email: session?.email || null,
+        name: session?.name || null,
+        picture: session?.picture || null,
+        googleClientId: process.env.GOOGLE_CLIENT_ID || "",
+      });
+    }
+
+    if (urlPath === "/api/auth/google" && req.method === "POST") {
+      try {
+        const body = await readJsonBody(req);
+        const user = await verifyGoogleIdToken(body.credential);
+        const token = createSessionToken(user);
+        const cookie = buildSessionSetCookie(token, isRequestHttps(req));
+        return sendJson(
+          res,
+          200,
+          {
+            ok: true,
+            authenticated: true,
+            isAdmin: user.isAdmin,
+            email: user.email,
+            name: user.name,
+            picture: user.picture,
+            message: user.isAdmin
+              ? "เข้าสู่ระบบผู้ดูแลสำเร็จ"
+              : "เข้าสู่ระบบแล้ว แต่บัญชีนี้ไม่มีสิทธิ์ผู้ดูแล (โหมดผู้ชมดูได้อย่างเดียว)",
+          },
+          { "Set-Cookie": cookie }
+        );
+      } catch (err) {
+        return sendJson(res, 401, { ok: false, error: err.message });
+      }
+    }
+
+    if (urlPath === "/api/auth/logout" && req.method === "POST") {
+      const cookie = buildClearSessionCookie(isRequestHttps(req));
+      return sendJson(res, 200, { ok: true }, { "Set-Cookie": cookie });
+    }
+
+    return handle(req, res);
   });
 
   const wss = new WebSocketServer({ noServer: true });
@@ -53,10 +147,15 @@ app.prepare().then(async () => {
   });
 
   function broadcastState(state) {
-    const payload = JSON.stringify({ type: "state", data: state });
+    const adminPayload = JSON.stringify({ type: "state", data: state, readOnly: false });
+    const viewerPayload = JSON.stringify({
+      type: "state",
+      data: sanitizeStateForViewer(state),
+      readOnly: true,
+    });
     for (const client of wss.clients) {
       if (client.readyState === 1) {
-        client.send(payload);
+        client.send(client.isAdmin ? adminPayload : viewerPayload);
       }
     }
   }
@@ -69,16 +168,41 @@ app.prepare().then(async () => {
     frame[0] = lineId & 0xff;
     payload.copy(frame, 1);
     for (const client of wss.clients) {
-      if (client.readyState === 1) {
+      // Only authenticated admin can listen to live audio stream
+      if (client.readyState === 1 && client.isAdmin) {
         client.send(frame, { binary: true });
       }
     }
   });
 
-  wss.on("connection", (ws) => {
-    ws.send(JSON.stringify({ type: "state", data: sip.publicState() }));
+  wss.on("connection", (ws, req) => {
+    const session = verifySessionFromCookieHeader(req.headers.cookie);
+    ws.isAdmin = Boolean(session?.isAdmin);
+    ws.userEmail = session?.email || null;
+
+    const current = sip.publicState();
+    ws.send(
+      JSON.stringify({
+        type: "state",
+        data: ws.isAdmin ? current : sanitizeStateForViewer(current),
+        readOnly: !ws.isAdmin,
+      })
+    );
 
     ws.on("message", async (data, isBinary) => {
+      // Strict server-side read-only enforcement for non-admin viewers
+      if (!ws.isAdmin) {
+        if (!isBinary) {
+          ws.send(
+            JSON.stringify({
+              type: "error",
+              message: "โหมดผู้ชม (ดูได้อย่างเดียว) กรุณาเข้าสู่ระบบผู้ดูแลด้วย Google ก่อนดำเนินการ",
+            })
+          );
+        }
+        return;
+      }
+
       if (isBinary) {
         const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
         if (buf.length < 2) return;
@@ -159,6 +283,6 @@ app.prepare().then(async () => {
   });
 
   server.listen(port, hostname, () => {
-    console.log(`> Yalecom 5-Line Console ready on http://localhost:${port}`);
+    console.log(`> BC Call Center ready on http://localhost:${port}`);
   });
 });

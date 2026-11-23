@@ -245,10 +245,12 @@ export function CallQaDrawer({
   log,
   onClose,
   onReanalyze,
+  readOnly = false,
 }: {
   log: CallLogEntry;
   onClose: () => void;
   onReanalyze: (phone: string, sessionId: string) => void;
+  readOnly?: boolean;
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -297,15 +299,17 @@ export function CallQaDrawer({
               <Sparkles className="h-4 w-4" />
               <span>ผลวิเคราะห์คุณภาพสาย (AI QA)</span>
             </h3>
-            <button
-              type="button"
-              disabled={analyzing}
-              onClick={() => onReanalyze(log.phone, log.sessionId)}
-              className="cc-btn cc-btn--tone tone-ai h-9"
-            >
-              <RefreshCw className={`h-3.5 w-3.5 ${analyzing ? "animate-spin" : ""}`} />
-              <span>{analyzing ? "กำลังวิเคราะห์..." : "วิเคราะห์ใหม่ (DeepSeek)"}</span>
-            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                disabled={analyzing}
+                onClick={() => onReanalyze(log.phone, log.sessionId)}
+                className="cc-btn cc-btn--tone tone-ai h-9"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${analyzing ? "animate-spin" : ""}`} />
+                <span>{analyzing ? "กำลังวิเคราะห์..." : "วิเคราะห์ใหม่ (DeepSeek)"}</span>
+              </button>
+            )}
           </div>
 
           <AnalysisState log={log} />

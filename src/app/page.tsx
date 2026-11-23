@@ -10,6 +10,7 @@ import {
   Clock3,
   ExternalLink,
   History,
+  Lock,
   Moon,
   Phone,
   PhoneCall,
@@ -40,6 +41,8 @@ import {
   lineStatusLabel,
   lineTone,
 } from "@/components/LineCard";
+import { AuthControls } from "@/components/AuthControls";
+import type { AuthState } from "@/components/AuthControls";
 import { CallQaDrawer, formatScore, scoreTone, sentimentMeta } from "@/components/CallQaDrawer";
 import { CrmWorkspace } from "@/components/CrmWorkspace";
 import { AudioBridge } from "@/lib/audio-bridge";
@@ -102,10 +105,95 @@ export default function ConsolePage() {
   const [rightTab, setRightTab] = useState<RightTab>("qa");
   const [toast, setToast] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [auth, setAuth] = useState<AuthState>({
+    loaded: false,
+    authenticated: false,
+    isAdmin: false,
+    email: null,
+    name: null,
+    picture: null,
+    googleClientId: "",
+  });
+  const [wsReadOnly, setWsReadOnly] = useState(true);
+  const [wsEpoch, setWsEpoch] = useState(0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioRef = useRef<AudioBridge | null>(null);
   const isDark = theme === "dark";
+  const isReadOnly = !auth.isAdmin || wsReadOnly;
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/auth/me", { cache: "no-store" })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!active) return;
+        setAuth({
+          loaded: true,
+          authenticated: Boolean(data.authenticated),
+          isAdmin: Boolean(data.isAdmin),
+          email: data.email || null,
+          name: data.name || null,
+          picture: data.picture || null,
+          googleClientId: data.googleClientId || "",
+        });
+      })
+      .catch(() => {
+        if (!active) return;
+        setAuth((prev) => ({ ...prev, loaded: true }));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const handleGoogleCredential = useCallback(async (credential: string) => {
+    try {
+      const res = await fetch("/api/auth/google", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credential }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setToast(data.error || "เข้าสู่ระบบด้วย Google ไม่สำเร็จ");
+        return;
+      }
+      setAuth((prev) => ({
+        ...prev,
+        loaded: true,
+        authenticated: Boolean(data.authenticated),
+        isAdmin: Boolean(data.isAdmin),
+        email: data.email || null,
+        name: data.name || null,
+        picture: data.picture || null,
+      }));
+      setToast(data.message || (data.isAdmin ? "เข้าสู่ระบบผู้ดูแลสำเร็จ" : "เข้าสู่ระบบในโหมดผู้ชม"));
+      setWsEpoch((v) => v + 1);
+    } catch {
+      setToast("ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ยืนยันตัวตนได้");
+    }
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {}
+    setAuth((prev) => ({
+      ...prev,
+      loaded: true,
+      authenticated: false,
+      isAdmin: false,
+      email: null,
+      name: null,
+      picture: null,
+    }));
+    setWsReadOnly(true);
+    setSelectedCallerPhone(null);
+    setCrmFocusPhone(null);
+    setToast("ออกจากระบบแล้ว — สลับกลับเป็นโหมดผู้ชม (ดูได้อย่างเดียว)");
+    setWsEpoch((v) => v + 1);
+  }, []);
 
   useEffect(() => {
     try {
@@ -166,8 +254,12 @@ export default function ConsolePage() {
         }
         try {
           const msg = JSON.parse(String(ev.data));
-          if (msg.type === "state") setState(msg.data);
-          else if (msg.type === "error") setToast(msg.message);
+          if (msg.type === "state") {
+            setState(msg.data);
+            setWsReadOnly(msg.readOnly !== false);
+          } else if (msg.type === "error") {
+            setToast(msg.message);
+          }
         } catch {}
       };
     };
@@ -180,18 +272,23 @@ export default function ConsolePage() {
       wsRef.current?.close();
       bridge.destroy();
     };
-  }, []);
+  }, [wsEpoch]);
 
   useEffect(() => {
     const bridge = audioRef.current;
     if (!bridge) return;
+    if (isReadOnly) {
+      bridge.setActiveLine(null);
+      bridge.stopRingtone();
+      return;
+    }
     const activeLine = state.lines.find((l) => l.lineId === state.activeAudioLine);
     bridge.setActiveLine(activeLine && !activeLine.aiActive ? activeLine.lineId : null);
 
     const hasIncoming = !state.autoAnswerAi && state.lines.some((l) => l.state === "ringing_in");
     if (hasIncoming) bridge.startRingtone();
     else bridge.stopRingtone();
-  }, [state]);
+  }, [state, isReadOnly]);
 
   useEffect(() => {
     if (!toast) return;
@@ -206,14 +303,21 @@ export default function ConsolePage() {
     setMicWarning(audioRef.current.micError);
   }, []);
 
-  const sendCmd = useCallback((payload: Record<string, unknown>) => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      setToast("ยังไม่ได้เชื่อมต่อเซิร์ฟเวอร์");
-      return;
-    }
-    ws.send(JSON.stringify(payload));
-  }, []);
+  const sendCmd = useCallback(
+    (payload: Record<string, unknown>) => {
+      if (isReadOnly) {
+        setToast("โหมดผู้ชม (ดูได้อย่างเดียว) — กรุณาเข้าสู่ระบบผู้ดูแลด้วย Google");
+        return;
+      }
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        setToast("ยังไม่ได้เชื่อมต่อเซิร์ฟเวอร์");
+        return;
+      }
+      ws.send(JSON.stringify(payload));
+    },
+    [isReadOnly]
+  );
 
   const handleAnswer = useCallback(
     async (lineId: number) => {
@@ -327,20 +431,27 @@ export default function ConsolePage() {
               <span suppressHydrationWarning>{clock}</span>
             </span>
 
-            <button
-              type="button"
-              role="switch"
-              aria-checked={state.autoAnswerAi}
-              onClick={() => sendCmd({ type: "setAutoAnswerAi", enabled: !state.autoAnswerAi })}
-              className={`cc-btn h-9 gap-2 tone-ai ${state.autoAnswerAi ? "cc-btn--tone" : ""}`}
-            >
-              <Bot className="h-3.5 w-3.5" />
-              <span>AI รับสายอัตโนมัติ</span>
-              <span className={`cc-switch ${state.autoAnswerAi ? "is-on" : ""}`} aria-hidden="true">
-                <span className="cc-switch__knob" />
+            {isReadOnly ? (
+              <span className={`cc-chip h-9 rounded-xl px-3 ${state.autoAnswerAi ? "tone-ai" : "tone-idle"}`}>
+                <Bot className="h-3.5 w-3.5" />
+                <span>AI รับสายอัตโนมัติ: {state.autoAnswerAi ? "เปิด" : "ปิด"}</span>
               </span>
-              <span>{state.autoAnswerAi ? "เปิด" : "ปิด"}</span>
-            </button>
+            ) : (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={state.autoAnswerAi}
+                onClick={() => sendCmd({ type: "setAutoAnswerAi", enabled: !state.autoAnswerAi })}
+                className={`cc-btn h-9 gap-2 tone-ai ${state.autoAnswerAi ? "cc-btn--tone" : ""}`}
+              >
+                <Bot className="h-3.5 w-3.5" />
+                <span>AI รับสายอัตโนมัติ</span>
+                <span className={`cc-switch ${state.autoAnswerAi ? "is-on" : ""}`} aria-hidden="true">
+                  <span className="cc-switch__knob" />
+                </span>
+                <span>{state.autoAnswerAi ? "เปิด" : "ปิด"}</span>
+              </button>
+            )}
 
             <span className={`cc-chip ${trunkTone} h-9 rounded-xl px-3`}>
               <span className={`cc-led ${trunkOnline || state.trunk.status === "error" ? "" : "cc-led--blink"}`} />
@@ -353,14 +464,16 @@ export default function ConsolePage() {
               </span>
             </span>
 
-            <button
-              type="button"
-              onClick={activateAudio}
-              className={`cc-btn cc-btn--tone h-9 ${audioReady ? "tone-live" : "tone-held"}`}
-            >
-              {audioReady ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
-              <span>{audioReady ? "เปิดเสียงแล้ว" : "เปิดเสียง/ไมค์"}</span>
-            </button>
+            {!isReadOnly && (
+              <button
+                type="button"
+                onClick={activateAudio}
+                className={`cc-btn cc-btn--tone h-9 ${audioReady ? "tone-live" : "tone-held"}`}
+              >
+                {audioReady ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
+                <span>{audioReady ? "เปิดเสียงแล้ว" : "เปิดเสียง/ไมค์"}</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -372,11 +485,29 @@ export default function ConsolePage() {
               <span>{isDark ? "โหมดสว่าง" : "โหมดมืด"}</span>
             </button>
 
-            <button type="button" onClick={() => sendCmd({ type: "reregister" })} className="cc-btn h-9 w-9 px-0" title="เชื่อมต่อ SIP ใหม่">
-              <RefreshCw className="h-3.5 w-3.5" />
-            </button>
+            {!isReadOnly && (
+              <button type="button" onClick={() => sendCmd({ type: "reregister" })} className="cc-btn h-9 w-9 px-0" title="เชื่อมต่อ SIP ใหม่">
+                <RefreshCw className="h-3.5 w-3.5" />
+              </button>
+            )}
+
+            <AuthControls
+              auth={auth}
+              isDark={isDark}
+              onGoogleCredential={handleGoogleCredential}
+              onLogout={handleLogout}
+            />
           </div>
         </header>
+
+        {auth.loaded && isReadOnly && (
+          <div role="status" className="cc-banner tone-held mb-4 px-4 py-2.5">
+            <Lock className="h-4 w-4 shrink-0" />
+            <span>
+              โหมดผู้ชม (ดูได้อย่างเดียว) • หมายเลขโทรศัพท์ทั้งหมดถูกปกปิดเป็นความลับ กรุณาเข้าสู่ระบบผู้ดูแลด้วย Google เพื่อดูหมายเลขและควบคุมระบบ
+            </span>
+          </div>
+        )}
 
         {/* Command Center Alert Hero */}
         {ringingLine || activeAiLine ? (
@@ -386,6 +517,7 @@ export default function ConsolePage() {
             queuedCount={Math.max(0, ringingLines.length - 1)}
             autoAnswerAi={state.autoAnswerAi}
             nowMs={nowMs}
+            readOnly={isReadOnly}
             onAnswer={handleAnswer}
             onReject={handleReject}
             onTakeOver={handleTakeOverAi}
@@ -412,13 +544,14 @@ export default function ConsolePage() {
             }
             callLogs={callLogs}
             initialPhone={crmFocusPhone}
+            readOnly={isReadOnly}
             onUpsertCustomer={(customer) => {
               sendCmd({ type: "crmUpsertCustomer", customer });
-              setToast("บันทึกข้อมูลลูกค้าลง CRM เรียบร้อยแล้ว");
+              if (!isReadOnly) setToast("บันทึกข้อมูลลูกค้าลง CRM เรียบร้อยแล้ว");
             }}
             onCreateTicket={(ticket) => {
               sendCmd({ type: "crmCreateTicket", ticket });
-              setToast("สร้างเคสติดตามงานใหม่เรียบร้อยแล้ว");
+              if (!isReadOnly) setToast("สร้างเคสติดตามงานใหม่เรียบร้อยแล้ว");
             }}
             onUpdateTicket={(id, patch) => sendCmd({ type: "crmUpdateTicket", id, patch })}
             onDeleteTicket={(id) => sendCmd({ type: "crmDeleteTicket", id })}
@@ -461,6 +594,7 @@ export default function ConsolePage() {
                       isDark={isDark}
                       isActiveAudio={state.activeAudioLine === line.lineId}
                       nowMs={nowMs}
+                      readOnly={isReadOnly}
                       onAnswer={handleAnswer}
                       onReject={handleReject}
                       onHangup={(id) => sendCmd({ type: "hangup", lineId: id })}
@@ -564,7 +698,7 @@ export default function ConsolePage() {
         </footer>
       </div>
 
-      {selectedLog && <CallQaDrawer log={selectedLog} onClose={closeDrawer} onReanalyze={handleReanalyze} />}
+      {selectedLog && <CallQaDrawer log={selectedLog} onClose={closeDrawer} onReanalyze={handleReanalyze} readOnly={isReadOnly} />}
     </div>
   );
 }
@@ -577,6 +711,7 @@ function CommandAlertHero({
   queuedCount,
   autoAnswerAi,
   nowMs,
+  readOnly = false,
   onAnswer,
   onReject,
   onTakeOver,
@@ -586,6 +721,7 @@ function CommandAlertHero({
   queuedCount: number;
   autoAnswerAi: boolean;
   nowMs: number;
+  readOnly?: boolean;
   onAnswer: (lineId: number) => void;
   onReject: (lineId: number) => void;
   onTakeOver: (lineId: number) => void;
@@ -681,7 +817,12 @@ function CommandAlertHero({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          {isRinging ? (
+          {readOnly ? (
+            <span className="cc-chip tone-held h-10 rounded-xl px-4">
+              <Lock className="h-4 w-4" />
+              <span>โหมดผู้ชม (ดูอย่างเดียว)</span>
+            </span>
+          ) : isRinging ? (
             <>
               <button type="button" onClick={() => onAnswer(line.lineId)} className="cc-btn cc-btn--solid cc-btn--xl tone-in">
                 <Phone className="h-4 w-4" />

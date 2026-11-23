@@ -35,6 +35,7 @@ interface LineCardProps {
   onAttachAi: (lineId: number) => void;
   onViewCallerHistory?: (phone: string) => void;
   onChangeLanguage?: (lineId: number, language: string | null) => void;
+  readOnly?: boolean;
 }
 
 /** Visual signal tone of a line — maps to `.tone-*` classes in globals.css */
@@ -209,6 +210,7 @@ export function LineCard({
   onAttachAi,
   onViewCallerHistory,
   onChangeLanguage,
+  readOnly = false,
 }: LineCardProps) {
   const tone = lineTone(line);
   const isIdle = line.state === "idle";
@@ -321,7 +323,13 @@ export function LineCard({
             </span>
           )}
 
-          {isRingingIn && (
+          {!isIdle && readOnly && (
+            <span className="cc-chip tone-idle h-9 rounded-xl px-3">
+              <span>ดูอย่างเดียว</span>
+            </span>
+          )}
+
+          {isRingingIn && !readOnly && (
             <>
               <button type="button" onClick={() => onAnswer(line.lineId)} className="cc-btn cc-btn--solid cc-btn--lg tone-in">
                 <Phone className="h-4 w-4" />
@@ -334,7 +342,7 @@ export function LineCard({
             </>
           )}
 
-          {(isConnected || isHeld) && (
+          {(isConnected || isHeld) && !readOnly && (
             <>
               {onChangeLanguage && (
                 <select

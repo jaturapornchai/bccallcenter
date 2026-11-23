@@ -49,6 +49,7 @@ interface CrmWorkspaceProps {
   onUpdateTicket: (id: string, patch: { status?: TicketStatus; priority?: TicketPriority; assignee?: string }) => void;
   onDeleteTicket: (id: string) => void;
   onOpenQaLog: (phone: string, sessionId: string) => void;
+  readOnly?: boolean;
 }
 
 const TIER_META: Record<CrmTier, { label: string; tone: string }> = {
@@ -89,6 +90,7 @@ export function CrmWorkspace({
   onUpdateTicket,
   onDeleteTicket,
   onOpenQaLog,
+  readOnly = false,
 }: CrmWorkspaceProps) {
   const [subTab, setSubTab] = useState<"customers" | "tickets">("customers");
   const [search, setSearch] = useState("");
@@ -312,39 +314,43 @@ export function CrmWorkspace({
             />
           </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              setSubTab("customers");
-              setShowNewCustomer(true);
-              setEditDraft({
-                phone: "",
-                name: "",
-                company: "",
-                tier: "new",
-                stage: "lead",
-                preferredLanguage: "",
-                tagsText: "",
-                notes: "",
-              });
-            }}
-            className="cc-btn cc-btn--tone tone-in h-9"
-          >
-            <UserPlus className="h-3.5 w-3.5" />
-            <span>เพิ่มลูกค้า</span>
-          </button>
+          {!readOnly && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setSubTab("customers");
+                  setShowNewCustomer(true);
+                  setEditDraft({
+                    phone: "",
+                    name: "",
+                    company: "",
+                    tier: "new",
+                    stage: "lead",
+                    preferredLanguage: "",
+                    tagsText: "",
+                    notes: "",
+                  });
+                }}
+                className="cc-btn cc-btn--tone tone-in h-9"
+              >
+                <UserPlus className="h-3.5 w-3.5" />
+                <span>เพิ่มลูกค้า</span>
+              </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setTicketForm((prev) => ({ ...prev, phone: activeCustomer?.phone || prev.phone }));
-              setShowNewTicket((v) => !v);
-            }}
-            className="cc-btn cc-btn--solid tone-live h-9"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span>สร้างเคสใหม่</span>
-          </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setTicketForm((prev) => ({ ...prev, phone: activeCustomer?.phone || prev.phone }));
+                  setShowNewTicket((v) => !v);
+                }}
+                className="cc-btn cc-btn--solid tone-live h-9"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>สร้างเคสใหม่</span>
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -517,29 +523,31 @@ export function CrmWorkspace({
                       </p>
                     )}
                   </div>
-                  <div className="flex items-center gap-2">
-                    {!showNewCustomer && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setTicketForm((p) => ({ ...p, phone: activeDraft.phone }));
-                          setShowNewTicket(true);
-                        }}
-                        className="cc-btn cc-btn--tone tone-live h-9"
-                      >
-                        <Plus className="h-3.5 w-3.5" />
-                        <span>เปิดเคส</span>
+                  {!readOnly && (
+                    <div className="flex items-center gap-2">
+                      {!showNewCustomer && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTicketForm((p) => ({ ...p, phone: activeDraft.phone }));
+                            setShowNewTicket(true);
+                          }}
+                          className="cc-btn cc-btn--tone tone-live h-9"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          <span>เปิดเคส</span>
+                        </button>
+                      )}
+                      <button type="button" onClick={handleSaveCustomer} className="cc-btn cc-btn--solid tone-in h-9 px-4">
+                        <Save className="h-3.5 w-3.5" />
+                        <span>บันทึกข้อมูล CRM</span>
                       </button>
-                    )}
-                    <button type="button" onClick={handleSaveCustomer} className="cc-btn cc-btn--solid tone-in h-9 px-4">
-                      <Save className="h-3.5 w-3.5" />
-                      <span>บันทึกข้อมูล CRM</span>
-                    </button>
-                  </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Form Grid */}
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <fieldset disabled={readOnly} className="grid grid-cols-1 gap-3 sm:grid-cols-2 disabled:opacity-80">
                   <div>
                     <label className="mb-1 block text-[11px] font-medium cc-muted">เบอร์โทรศัพท์</label>
                     <input
@@ -639,7 +647,7 @@ export function CrmWorkspace({
                       placeholder="เช่น สนใจแพ็กเกจ Standard 5 เครื่อง, นัดส่งใบเสนอราคาวันจันทร์"
                     />
                   </div>
-                </div>
+                </fieldset>
 
                 {/* Linked Tickets & Call Logs */}
                 {!showNewCustomer && activeCustomer && (
@@ -767,14 +775,16 @@ export function CrmWorkspace({
                         </span>
                       )}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => onDeleteTicket(t.id)}
-                      className="cc-btn h-7 w-7 px-0 tone-danger"
-                      title="ลบเคส"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                    {!readOnly && (
+                      <button
+                        type="button"
+                        onClick={() => onDeleteTicket(t.id)}
+                        className="cc-btn h-7 w-7 px-0 tone-danger"
+                        title="ลบเคส"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                   </div>
 
                   <h4 className="mt-2 text-sm font-semibold cc-text">{t.subject}</h4>
@@ -793,9 +803,10 @@ export function CrmWorkspace({
                   <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--cc-border)] pt-3">
                     <div className="flex flex-wrap items-center gap-2">
                       <select
+                        disabled={readOnly}
                         value={t.status}
                         onChange={(e) => onUpdateTicket(t.id, { status: e.target.value as TicketStatus })}
-                        className="h-8 rounded-lg border border-[var(--cc-border)] bg-[var(--cc-panel)] px-2 text-xs cc-text outline-none"
+                        className="h-8 rounded-lg border border-[var(--cc-border)] bg-[var(--cc-panel)] px-2 text-xs cc-text outline-none disabled:opacity-70"
                       >
                         {(Object.keys(STATUS_META) as TicketStatus[]).map((st) => (
                           <option key={st} value={st}>
@@ -805,13 +816,14 @@ export function CrmWorkspace({
                       </select>
 
                       <input
+                        disabled={readOnly}
                         defaultValue={t.assignee}
                         onBlur={(e) => {
                           if (e.target.value.trim() !== t.assignee) {
                             onUpdateTicket(t.id, { assignee: e.target.value.trim() });
                           }
                         }}
-                        className="h-8 w-36 rounded-lg border border-[var(--cc-border)] bg-[var(--cc-panel)] px-2.5 text-xs cc-text outline-none"
+                        className="h-8 w-36 rounded-lg border border-[var(--cc-border)] bg-[var(--cc-panel)] px-2.5 text-xs cc-text outline-none disabled:opacity-70"
                         placeholder="ผู้รับผิดชอบ"
                       />
                     </div>

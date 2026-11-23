@@ -22,6 +22,10 @@
   - แนบข้อมูล CRM + โน้ต + เคสค้าง + ประวัติการคุยเดิมให้ **J.A.R.V.I.S** เพื่อคุยต่อเนื่องได้เหมือนพนักงานคนจริง
   - สร้างเคสติดตาม (`TCK-...`) ให้อัตโนมัติเมื่อ DeepSeek QA พบว่าสายนั้นยังแก้ไม่จบหรือต้องให้เจ้าหน้าที่ติดต่อกลับ
 - **วิเคราะห์คุณภาพสายอัตโนมัติหลังวางสาย (Post-Call QA)** ด้วย **Ollama Cloud (`deepseek-v4.1-flash`)** แสดงคะแนน CSAT (`/10`), คะแนนคุณภาพ AI (`/10`), อารมณ์และแนวโน้มอารมณ์ลูกค้า, หัวข้อ/สรุปบทสนทนา, สถานะและวิธีแก้ไข, ความเร่งด่วน/Follow-up และ AI Coaching Tip
+- **ระบบยืนยันตัวตนด้วย Google Sign-In และโหมดผู้ชมแบบปกปิดเบอร์ (Privacy & Read-Only Mode)**:
+  - หากยังไม่ได้เข้าสู่ระบบด้วยบัญชีผู้ดูแล (`ADMIN_EMAIL`) หน้าเว็บจะเข้าสู่ **โหมดผู้ชม (ดูได้อย่างเดียว)** โดยอัตโนมัติ
+  - เซิร์ฟเวอร์จะปกปิดหมายเลขโทรศัพท์ของผู้โทรทุกเบอร์ (เป็นรหัสแทน เช่น `•••-•••-••#01`), ชื่อ/บริษัทลูกค้า, IP ของ SIP Trunk และเบอร์โทรในบทสนทนา/สรุป QA ก่อนส่งผ่าน WebSocket (โดยยังแสดงเบอร์ Call Center หลักจาก `SIP_USER` ได้)
+  - ปิดกั้นคำสั่งควบคุมสาย, การแก้ไข CRM/เคส, การสั่งวิเคราะห์ QA ใหม่ และการรับ-ส่งเสียงสนทนาทั้งฝั่ง UI และฝั่งเซิร์ฟเวอร์ WebSocket จนกว่าจะเข้าสู่ระบบด้วยบัญชีผู้ดูแลผ่าน Google Sign-In (`HttpOnly` HMAC-signed cookie)
 
 ---
 
@@ -39,7 +43,8 @@ flowchart LR
 ```
 
 ### โครงสร้างโปรเจกต์
-- `server.mjs` — Next.js Production/Dev Server + WebSocket (`/ws/sip`)
+- `server.mjs` — Next.js Production/Dev Server + Auth API (`/api/auth/*`) + WebSocket (`/ws/sip`) พร้อมบังคับสิทธิ์ผู้ดูแล/ผู้ชม
+- `lib/auth.mjs` — ตรวจสอบ Google ID Token, ออก/ตรวจ `HttpOnly` HMAC-SHA256 Session Cookie และปกปิดข้อมูลหมายเลขโทรศัพท์ผู้โทรฝั่งเซิร์ฟเวอร์ (`sanitizeStateForViewer`)
 - `lib/sip-engine.mjs` — SIP UDP Trunk (5 คู่สาย), RTP Audio Bridge, Auto-Answer, Multi-Language Routing, CRM Sync และ Post-Call QA trigger
 - `lib/jarvis-bridge.mjs` — WebRTC Bridge (`werift`, PCMU/8000), DataChannel/Energy Fast Barge-in และซิงก์ภาษา (`POST /language`)
 - `lib/crm-store.mjs` — ฐานข้อมูล CRM โลคอล (โปรไฟล์ลูกค้า 360°, ภาษาประจำเบอร์, เคสติดตามงาน และ Auto-Ticket จาก AI QA)
@@ -71,6 +76,9 @@ flowchart LR
 | `OLLAMA_BASE_URL` | Endpoint ของ Ollama Cloud (`https://ollama.com`) |
 | `OLLAMA_MODEL` | โมเดล DeepSeek ล่าสุด (เช่น `deepseek-v4.1-flash`) |
 | `OLLAMA_API_KEY` | API Key ของ Ollama Cloud (เก็บใน `.env.local` เท่านั้น) |
+| `GOOGLE_CLIENT_ID` | Google OAuth 2.0 Web Client ID สำหรับปุ่มเข้าสู่ระบบด้วย Google (ต้องเพิ่มโดเมนใน Authorized JavaScript origins ใน Google Cloud Console) |
+| `ADMIN_EMAIL` | อีเมลบัญชี Google ที่มีสิทธิ์ผู้ดูแลเต็มรูปแบบ (ดูเบอร์จริงและควบคุมระบบได้) |
+| `AUTH_COOKIE_SECRET` | คีย์สุ่มสำหรับลงนาม `HttpOnly` Session Cookie (เก็บใน `.env.local` เท่านั้น) |
 
 ### 2. ตั้งค่า J.A.R.V.I.S (`jarvis/.env`)
 คัดลอก `jarvis/.env.example` เป็น `jarvis/.env` แล้วใส่ `DEEPSEEK_API_KEY` (และเตรียมโฟลเดอร์โมเดลใน `jarvis/models/`):
