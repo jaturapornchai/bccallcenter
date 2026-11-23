@@ -182,9 +182,146 @@ _DEFAULT_TRANSCRIBE = transcribe
 CALL_LANG: dict[str, str | None] = {}  # webrtc_id -> ISO lang code ("th","en","zh","ja","ko","lo","my","vi","km") or None (auto)
 CALL_NEW_CALLER: dict[str, bool] = {}  # webrtc_id -> True when caller is new and language is not yet known
 CALL_CONTEXT: dict[str, str] = {}  # webrtc_id -> initial CRM/caller context injected without extra LLM turn
-CALL_CALLER_META: dict[str, dict] = {}  # webrtc_id -> {"name", "company", "totalCalls", "lastTopic"} from CRM
+CALL_CALLER_META: dict[str, dict] = {}  # webrtc_id -> {"phone", "name", "company", "totalCalls", "lastTopic"}
 LAST_WAIT_AT: dict[str, float] = {}  # webrtc_id -> monotonic ts of last wait filler (avoid repetitive cues)
 PENDING_LANG_CONFIRM: dict[str, str] = {}  # webrtc_id -> detected other language awaiting caller confirmation
+
+CALLER_PROFILES_PATH = os.path.join(C.SESSIONS_DIR, "caller_profiles.json")
+CALLER_PROFILES_LOCK = threading.Lock()
+_CALLER_PROFILES_CACHE: dict[str, dict] | None = None
+_TH_DIGITS = "ศูนย์ หนึ่ง สอง สาม สี่ ห้า หก เจ็ด แปด เก้า".split()
+_NAME_PREFIX_RE = re.compile(r"^(?:ชื่อเล่น|ชื่อว่า|ชื่อ|เรียกว่า|ว่า|คือ|เป็น)\s*")
+_NAME_SUFFIX_RE = re.compile(r"(?:ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|คับ|ก็ได้|นะ|เอง)$")
+_HONORIFIC_RE = re.compile(r"^(?:คุณ|พี่|ลุง|ป้า|น้า|อา|น้อง|อาจารย์|หมอ|เฮีย|เจ๊)")
+_EXPLICIT_NAME_TH_RE = re.compile(
+    r"(?:ผมชื่อว่า|ดิฉันชื่อว่า|หนูชื่อว่า|ฉันชื่อว่า|พี่ชื่อว่า|ชื่อว่า|ผมชื่อ|ดิฉันชื่อ|หนูชื่อ|ฉันชื่อ|พี่ชื่อ|"
+    r"เรียกผมว่า|เรียกพี่ว่า|เรียกหนูว่า|เรียกฉันว่า|เรียกว่า|ชื่อเล่นว่า|ชื่อเล่น|ชื่อ)\s*([ก-๙a-zA-Z]{2,20})"
+)
+_EXPLICIT_NAME_EN_RE = re.compile(r"(?:my name is|i am|i'm|call me)\s+([A-Za-z]{2,20})", re.I)
+_ASKED_NAME_BOT_RE = re.compile(r"(?:ขอเรียกชื่อ|ชื่อเล่นว่าอะไร|ชื่ออะไรดี|may i have your name|what(?:'s| is) your name)", re.I)
+_BAD_CALLER_NAMES = {
+    "อะไร", "เล่น", "จริง", "โปรแกรม", "ระบบ", "บริษัท", "ร้าน", "ลูกค้า", "เมนู", "สินค้า",
+    "ไม่", "ครับ", "ค่ะ", "คะ", "คับ", "ไม่สะดวก", "ไม่เป็นไร", "ไม่บอก", "ไม่ต้อง", "เบอร์",
+    "ราคา", "ใช่", "ไม่ใช่", "โอเค", "ได้เลย", "ดี", "ครับผม", "เปลี่ยนเลย", "เรื่องเดิม",
+    "calling", "asking", "looking", "trying", "interested", "using", "not", "here", "fine", "good", "okay",
+}
+
+
+def _normalize_phone(raw: str | None) -> str:
+    s = re.sub(r"[^\d+]", "", str(raw or "").strip())
+    if s.startswith("+66"):
+        return "0" + s[3:]
+    if s.startswith("66") and len(s) >= 10:
+        return "0" + s[2:]
+    return s
+
+
+def _format_phone_spoken(phone: str) -> tuple[str, str]:
+    digits = re.sub(r"\D", "", phone or "")
+    if not digits:
+        return "", ""
+    if len(digits) == 10:
+        dashed = f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
+    elif len(digits) == 9:
+        dashed = f"{digits[:2]}-{digits[2:5]}-{digits[5:]}"
+    else:
+        dashed = digits
+    spoken = " ".join(_TH_DIGITS[int(ch)] for ch in digits if ch.isdigit())
+    return dashed, spoken
+
+
+def _clean_caller_name(raw: str | None) -> str:
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    for _ in range(3):
+        ns = _NAME_SUFFIX_RE.sub("", _NAME_PREFIX_RE.sub("", s)).strip()
+        if ns == s:
+            break
+        s = ns
+    return s[:80]
+
+
+def _format_addressed_name(name: str) -> str:
+    clean_n = _clean_caller_name(name)
+    if not clean_n:
+        return ""
+    return clean_n if _HONORIFIC_RE.match(clean_n) else f"คุณ{clean_n}"
+
+
+def _extract_caller_name_py(text: str, prev_bot: str = "") -> tuple[str, bool]:
+    s = (text or "").strip()
+    if not s:
+        return "", False
+    if m := _EXPLICIT_NAME_TH_RE.search(s):
+        cand = _clean_caller_name(m.group(1))
+        if len(cand) >= 2 and cand.lower() not in _BAD_CALLER_NAMES:
+            return cand, True
+    if m := _EXPLICIT_NAME_EN_RE.search(s):
+        cand = m.group(1).strip()
+        if len(cand) >= 2 and cand.lower() not in _BAD_CALLER_NAMES:
+            return cand, True
+    if prev_bot and _ASKED_NAME_BOT_RE.search(prev_bot):
+        if m := re.match(r"^([ก-๙a-zA-Z]{2,18})(?:\s*(?:ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|คับ|ก็ได้))?$", s):
+            cand = _clean_caller_name(m.group(1))
+            if len(cand) >= 2 and cand.lower() not in _BAD_CALLER_NAMES and not re.match(r"^(?:ไม่|ขอ|อยาก|มี|ทำ|ราคา|เบอร์)", cand):
+                return cand, False
+    return "", False
+
+
+def _load_all_caller_profiles() -> dict[str, dict]:
+    global _CALLER_PROFILES_CACHE
+    if _CALLER_PROFILES_CACHE is not None:
+        return _CALLER_PROFILES_CACHE
+    try:
+        if os.path.exists(CALLER_PROFILES_PATH):
+            with open(CALLER_PROFILES_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                _CALLER_PROFILES_CACHE = data
+                return _CALLER_PROFILES_CACHE
+    except Exception:
+        log.warning("caller_profiles load failed, starting fresh")
+    _CALLER_PROFILES_CACHE = {}
+    return _CALLER_PROFILES_CACHE
+
+
+def _save_all_caller_profiles(profiles: dict[str, dict]) -> None:
+    try:
+        os.makedirs(C.SESSIONS_DIR, exist_ok=True)
+        tmp = f"{CALLER_PROFILES_PATH}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(profiles, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CALLER_PROFILES_PATH)
+    except OSError as e:
+        log.warning("caller_profiles save failed: %s", e)
+
+
+def _sync_caller_profile(phone: str, meta: dict) -> dict:
+    norm_phone = _normalize_phone(phone)
+    cleaned_in = {
+        "phone": norm_phone,
+        "name": _clean_caller_name(meta.get("name")),
+        "company": str(meta.get("company") or "").strip()[:120],
+        "totalCalls": int(meta.get("totalCalls") or 0),
+        "lastTopic": str(meta.get("lastTopic") or "").strip()[:80],
+    }
+    if not norm_phone:
+        return cleaned_in
+    with CALLER_PROFILES_LOCK:
+        profiles = _load_all_caller_profiles()
+        existing = profiles.get(norm_phone) if isinstance(profiles.get(norm_phone), dict) else {}
+        merged = {
+            "phone": norm_phone,
+            "name": cleaned_in["name"] or _clean_caller_name(existing.get("name")),
+            "company": cleaned_in["company"] or str(existing.get("company") or "").strip()[:120],
+            "totalCalls": max(cleaned_in["totalCalls"], int(existing.get("totalCalls") or 0)),
+            "lastTopic": cleaned_in["lastTopic"] or str(existing.get("lastTopic") or "").strip()[:80],
+            "updatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        }
+        profiles[norm_phone] = merged
+        _save_all_caller_profiles(profiles)
+        return dict(merged)
 LANG_NAMES = {
     "th": "ภาษาไทย (Thai)",
     "en": "ภาษาอังกฤษ (English)",
@@ -936,12 +1073,13 @@ LEAD_LOCK, LEAD_COUNT = threading.Lock(), defaultdict(int)  # call id -> message
 LEAD_SPEC = tool_spec(
     # 2026-11-11 08:30: a caller gave a name and a number, the boss searched the brain for them and stored nothing
     "leave_message", f"บันทึกข้อความฝากติดต่อกลับ เรียกทันทีเมื่อลูกค้าสนใจซื้อ ขอให้ติดต่อกลับ หรือฝากเรื่องถึงฝ่ายขายหรือ{C.USER_NAME} "
-    "และให้ชื่อกับเบอร์โทรแล้ว ใส่เฉพาะสิ่งที่ลูกค้าพูดเอง ห้ามแต่งเพิ่ม แล้วบอกลูกค้าตามผลที่ได้ "
+    "หากระบบมีเบอร์โทรที่ลูกค้าโทรเข้ามาอยู่แล้วและลูกค้าขอให้ติดต่อกลับ สามารถใช้เบอร์ที่โทรเข้ามาได้เลยไม่ต้องถามซ้ำ "
+    "ใส่เฉพาะข้อมูลจริงจากลูกค้าหรือข้อมูลสายที่ระบบให้ไว้ ห้ามแต่งเพิ่ม แล้วบอกลูกค้าตามผลที่ได้ "
     "ถ้ายังไม่ได้เรียกหรือเรียกไม่สำเร็จ ห้ามพูดว่าบันทึกหรือส่งเรื่องแล้ว",
     {"type": "object", "required": ["name", "phone"], "properties": {
-        "name": {"type": "string", "description": "ชื่อลูกค้าตามที่ลูกค้าบอก"},
+        "name": {"type": "string", "description": "ชื่อลูกค้าตามที่ลูกค้าบอกหรือจากข้อมูลลูกค้า"},
         "company": {"type": "string", "description": "ชื่อร้านหรือบริษัท ถ้าลูกค้าบอก"},
-        "phone": {"type": "string", "description": "เบอร์โทรติดต่อกลับตามที่ลูกค้าพูด"},
+        "phone": {"type": "string", "description": "เบอร์โทรติดต่อกลับ (ใช้เบอร์ที่ลูกค้าโทรเข้ามาได้หากลูกค้าไม่ได้ระบุเบอร์อื่น)"},
         "message": {"type": "string", "description": "เรื่องที่ลูกค้าอยากให้ติดต่อกลับ สรุปสั้นๆ จากคำของลูกค้า"}}})
 
 
@@ -968,11 +1106,20 @@ def leave_message(name="", company="", phone="", message="", heard="", call=""):
     ponytail: the name and company are stored as the boss wrote them; a number said in two parts with other
     digits between is refused and asked again; 3 messages per call, one message box per call."""
     lead = {k: " ".join(str(v).split())[:n] for (k, n), v in zip(LEAD_FIELDS.items(), (name, company, phone, message))}
+    meta = CALL_CALLER_META.get(call) or {}
+    caller_phone = spoken_digits(meta.get("phone") or "")
+    if not lead["name"] and meta.get("name"):
+        lead["name"] = _clean_caller_name(meta.get("name"))[:LEAD_FIELDS["name"]]
+    if not lead["company"] and meta.get("company"):
+        lead["company"] = str(meta.get("company"))[:LEAD_FIELDS["company"]]
     digits = spoken_digits(lead["phone"])
+    if not digits and 9 <= len(caller_phone) <= 15:
+        lead["phone"] = caller_phone
+        digits = caller_phone
     if not lead["name"] or not 9 <= len(digits) <= 15:
         return [], "ยังไม่ได้บันทึก ต้องมีชื่อและเบอร์โทรติดต่อกลับ ให้ถามลูกค้าส่วนที่ยังขาด"
-    if digits not in spoken_digits(heard):
-        return [], "ยังไม่ได้บันทึก เบอร์นี้ไม่ตรงกับที่ลูกค้าพูด ให้ถามเบอร์โทรอีกครั้ง"
+    if digits not in spoken_digits(heard) and (not caller_phone or digits != caller_phone):
+        return [], "ยังไม่ได้บันทึก เบอร์นี้ไม่ตรงกับที่ลูกค้าพูดหรือเบอร์ที่โทรเข้ามา ให้ถามเบอร์โทรอีกครั้ง"
     with LEAD_LOCK:
         if LEAD_COUNT[call] >= 3:
             return [], "ยังไม่ได้บันทึกเพิ่ม สายนี้ฝากข้อความครบ 3 ครั้งแล้ว"
@@ -1954,18 +2101,52 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             yield AdditionalOutputs({"kind": "done"})
             return
 
+    if cid and heard and not hello:
+        prev_bot_msg = history[-1]["content"] if history and history[-1].get("role") == "assistant" else ""
+        detected_name, explicit_name = _extract_caller_name_py(heard, prev_bot_msg)
+        if detected_name:
+            cur_meta = dict(CALL_CALLER_META.get(cid) or {})
+            if not cur_meta.get("name") or explicit_name:
+                cur_meta["name"] = detected_name
+                CALL_CALLER_META[cid] = _sync_caller_profile(cur_meta.get("phone") or "", cur_meta)
+                log.info("CALLER-NAME-CAPTURED (%s): name=%s phone=%s", cid, detected_name, masked(cur_meta.get("phone") or ""))
+                yield AdditionalOutputs({"kind": "caller_name", "name": detected_name})
+
     if cid and CALL_CONTEXT.get(cid):
         now += f"\n{CALL_CONTEXT.pop(cid)}"
+    c_name = ""
     if cid and (meta := CALL_CALLER_META.get(cid)):
-        c_name = str(meta.get("name") or "").strip()
+        c_phone = _normalize_phone(meta.get("phone"))
+        c_name = _clean_caller_name(meta.get("name"))
         c_comp = str(meta.get("company") or "").strip()
         c_calls = int(meta.get("totalCalls") or 0)
+        c_topic = str(meta.get("lastTopic") or "").strip()
+        phone_note = ""
+        if c_phone:
+            dashed_p, spoken_p = _format_phone_spoken(c_phone)
+            phone_note = (
+                f" เบอร์โทรที่ลูกค้าโทรเข้ามาคือ {c_phone} ({dashed_p} อ่านว่า {spoken_p}) "
+                f"— ถ้าลูกค้าถามเบอร์ที่โทรเข้ามาให้บอกเบอร์นี้ได้เลยเป็นคำอ่านไทย "
+                f"และถ้าลูกค้าขอให้ติดต่อกลับให้ใช้เบอร์ที่โทรเข้ามาได้เลยไม่ต้องถามขอเบอร์ซ้ำ ยกเว้นลูกค้าบอกเบอร์อื่น"
+            )
+        topic_note = f" เรื่องที่คุยไว้ครั้งก่อน: {c_topic}" if c_topic else ""
         if c_name:
-            now += f"\n(ข้อมูลลูกค้าจากเบอร์โทร: ชื่อ {c_name}{f' ({c_comp})' if c_comp else ''} โทรมาครั้งที่ {max(c_calls, 1)} — เรียกชื่อลูกค้าอย่างเป็นกันเองได้เลย ห้ามถามชื่อซ้ำ)"
+            addressed_n = _format_addressed_name(c_name)
+            now += (
+                f"\n(ข้อมูลลูกค้าจากระบบสายเข้า: ชื่อ {addressed_n}{f' ({c_comp})' if c_comp else ''} "
+                f"โทรมาครั้งที่ {max(c_calls, 1)}{topic_note}.{phone_note} "
+                f"— เรียกชื่อลูกค้าว่า {addressed_n} อย่างเป็นกันเองได้เลย ห้ามถามชื่อซ้ำ)"
+            )
         elif c_calls > 1:
-            now += f"\n(ข้อมูลลูกค้าจากเบอร์โทร: ลูกค้าเก่าโทรมาครั้งที่ {c_calls}{f' ({c_comp})' if c_comp else ''} แต่ยังไม่มีชื่อในระบบ — ถามชื่อเล่นแบบสบายๆ ไม่บังคับได้แค่ครั้งเดียวตามจังหวะ)"
+            now += (
+                f"\n(ข้อมูลลูกค้าจากระบบสายเข้า: ลูกค้าเก่าโทรมาครั้งที่ {c_calls}{f' ({c_comp})' if c_comp else ''}{topic_note} "
+                f"แต่ยังไม่มีชื่อในระบบ.{phone_note} — ถามชื่อเล่นแบบสบายๆ ไม่บังคับได้แค่ครั้งเดียวตามจังหวะ)"
+            )
         else:
-            now += "\n(ข้อมูลลูกค้าจากเบอร์โทร: ลูกค้าใหม่ยังไม่มีชื่อในระบบ — ตอบคำถามให้สบายใจก่อน ค่อยถามชื่อเล่นแบบไม่บังคับแค่ครั้งเดียวตามจังหวะ)"
+            now += (
+                f"\n(ข้อมูลลูกค้าจากระบบสายเข้า: ลูกค้าใหม่ยังไม่มีชื่อในระบบ.{phone_note} "
+                f"— ตอบคำถามให้สบายใจก่อน ค่อยถามชื่อเล่นแบบไม่บังคับแค่ครั้งเดียวตามจังหวะ)"
+            )
     if cid and (alt_heard := LAST_ALT_HEARD.pop(cid, [])):
         now += f"\n(ระบบฟัง 3 หู — คำจากหูสำรองเผื่อหูหลักเพี้ยน: {' | '.join(alt_heard[:2])})"
 
@@ -2187,8 +2368,15 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             # prefetched notes instead of calling leave_message (the 2026-11-11 08:30 miss again). A number heard, a
             # promise said and no leave_message this turn: told once to store it.
             # ponytail: words, not meaning; a promise in other words ends the turn unsaved as before
+            has_callback_phone = (
+                9 <= len(spoken_digits(heard)) <= 15
+                or (
+                    bool(re.search(r"โทรกลับ|ติดต่อกลับ|ฝากเรื่อง", heard))
+                    and 9 <= len(spoken_digits((CALL_CALLER_META.get(cid) or {}).get("phone") or "")) <= 15
+                )
+            )
             if (not calls and rnd < C.MAX_TOOL_ROUNDS and not turn.get("lead_nudged") and "leave_message" in tools
-                    and 9 <= len(spoken_digits(heard)) <= 15 and LEAD_PROMISE.search(" ".join(said))
+                    and has_callback_phone and LEAD_PROMISE.search(" ".join(said))
                     and not any(c["function"]["name"] == "leave_message" for m in messages for c in m.get("tool_calls", ()))):
                 turn["lead_nudged"] = True
                 log.info("lead nudge: a number heard and a call back promised, leave_message not called")
@@ -2255,7 +2443,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 and said[0] not in (CUT_ALL, SCREEN_ONLY)
                 and not locals().get("cached_qa")
             ):
-                if QA_CACHE.store(heard, said, lang=active_lang or "th", phone_mode=on_phone()):
+                if QA_CACHE.store(heard, said, lang=active_lang or "th", phone_mode=on_phone(), caller_name=c_name):
                     log.info("QA-CACHE SAVED (%d sentences): %s", len(said), masked(heard))
     yield AdditionalOutputs({"kind": "done"})
 
@@ -2272,29 +2460,40 @@ def greet(*_, public=False):
         CALL_LANG[cid] = "th"
     cur_lang = CALL_LANG.get(cid) or "th"
 
-    # Returning phone caller: greet warmly by name & last topic from CRM phone lookup!
+    # Returning phone caller: greet warmly by name & last topic from phone/CRM lookup!
     meta = CALL_CALLER_META.get(cid) or {}
-    c_name = str(meta.get("name") or "").strip()
+    c_phone = _normalize_phone(meta.get("phone"))
+    c_name = _clean_caller_name(meta.get("name"))
     c_calls = int(meta.get("totalCalls") or 0)
     last_topic = str(meta.get("lastTopic") or "").strip()
+    log.info("GREET (%s): lang=%s phone=%s name=%s calls=%d", cid, cur_lang, masked(c_phone), c_name or "-", c_calls)
 
-    if on_phone() and cur_lang == "th" and not session(public)[1]:
-        if c_name or (c_calls > 1 and last_topic):
-            if c_name:
-                addressed = c_name if re.match(r"^(คุณ|พี่|ลุง|น้อง|อาจารย์|หมอ|เฮีย|เจ๊)", c_name) else f"คุณ{c_name}"
+    if on_phone():
+        if c_name:
+            if cur_lang == "en":
+                greeting = f"Hello {c_name}, this is Jarvis from BC Call Center. Great to talk with you again! How can I help you today?"
+                yield bot_out(greeting, speak(greeting, lang_override="en"), lead=0.14)
+                yield AdditionalOutputs({"kind": "done"})
+                return
+            if cur_lang == "th":
+                addressed = _format_addressed_name(c_name)
                 if last_topic:
                     greeting = f"สวัสดีครับ{addressed} เจาร์วิสครับ คราวก่อนเราคุยเรื่อง{last_topic}กันไว้ วันนี้คุยต่อเรื่องเดิมหรือมีเรื่องไหนให้ช่วยดูครับ"
                 else:
                     greeting = f"สวัสดีครับ{addressed} เจาร์วิสครับ ดีใจที่ได้คุยกันอีกนะครับ วันนี้มีเรื่องไหนให้ผมช่วยดูดีครับ"
-            else:
+                yield bot_out(greeting, speak(greeting, lang_override="th"), lead=0.14)
+                yield AdditionalOutputs({"kind": "done"})
+                return
+        if cur_lang == "th":
+            if c_calls > 1 and last_topic:
                 greeting = f"สวัสดีครับ ยินดีต้อนรับกลับมาครับ เจาร์วิสครับ คราวก่อนเราคุยเรื่อง{last_topic}กันไว้ วันนี้คุยต่อได้เลยนะครับ"
-            yield bot_out(greeting, speak(greeting, lang_override="th"), lead=0.14)
+                yield bot_out(greeting, speak(greeting, lang_override="th"), lead=0.14)
+                yield AdditionalOutputs({"kind": "done"})
+                return
+            yield bot_out(FILLER_TEXT["hello"], FILLERS["hello"], lead=0.18)
+            yield bot_out(FILLER_TEXT["phone_intro"], FILLERS["phone_intro"], lead=0.12)
             yield AdditionalOutputs({"kind": "done"})
             return
-        yield bot_out(FILLER_TEXT["hello"], FILLERS["hello"], lead=0.18)
-        yield bot_out(FILLER_TEXT["phone_intro"], FILLERS["phone_intro"], lead=0.12)
-        yield AdditionalOutputs({"kind": "done"})
-        return
 
     yield bot_out(FILLER_TEXT["hello"], FILLERS["hello"], lead=0.25)
     back = "ผู้โทรคนนี้เคยคุยกันแล้ว ทักต่อแบบคนคุ้นเคยตามเรื่องก่อนหน้าได้เลย " if session(public)[1] else ""
@@ -2751,6 +2950,7 @@ def make_app(stream, public=False):
         is_new = bool(body.get("is_new_caller", False))
         init_ctx = body.get("initial_context")
         pending_confirm = body.get("pending_confirm")
+        caller_phone = body.get("caller_phone")
         caller_meta = body.get("caller_meta")
         if not call:
             return JSONResponse({"error": "webrtc_id is required"}, status_code=400)
@@ -2763,18 +2963,30 @@ def make_app(stream, public=False):
         CALL_NEW_CALLER[call] = is_new
         if isinstance(init_ctx, str) and init_ctx.strip():
             CALL_CONTEXT[call] = init_ctx.strip()[:800]
-        if isinstance(caller_meta, dict):
-            CALL_CALLER_META[call] = {
-                "name": str(caller_meta.get("name") or "").strip()[:80],
-                "company": str(caller_meta.get("company") or "").strip()[:120],
-                "totalCalls": int(caller_meta.get("totalCalls") or 0),
-                "lastTopic": str(caller_meta.get("lastTopic") or "").strip()[:80],
-            }
+        if isinstance(caller_meta, dict) or caller_phone:
+            raw_meta = dict(caller_meta) if isinstance(caller_meta, dict) else {}
+            phone_val = _normalize_phone(caller_phone or raw_meta.get("phone") or (CALL_CALLER_META.get(call) or {}).get("phone"))
+            merged_meta = _sync_caller_profile(phone_val, raw_meta)
+            CALL_CALLER_META[call] = merged_meta
+            log.info(
+                "CALLER-SYNC (%s): phone=%s name=%s company=%s calls=%d",
+                call,
+                masked(merged_meta.get("phone") or ""),
+                merged_meta.get("name") or "-",
+                merged_meta.get("company") or "-",
+                int(merged_meta.get("totalCalls") or 0),
+            )
         if pending_confirm and str(pending_confirm) in LANG_NAMES:
             PENDING_LANG_CONFIRM[call] = str(pending_confirm)
         elif pending_confirm is None and "pending_confirm" in body:
             PENDING_LANG_CONFIRM.pop(call, None)
-        return {"ok": True, "language": CALL_LANG[call], "is_new_caller": is_new}
+        return {
+            "ok": True,
+            "language": CALL_LANG[call],
+            "is_new_caller": is_new,
+            "caller_known": bool((CALL_CALLER_META.get(call) or {}).get("name")),
+            "caller_name": (CALL_CALLER_META.get(call) or {}).get("name") or "",
+        }
 
     @app.post("/chat")  # typed message instead of speech; answered with voice + screen like a spoken turn
     async def post_chat(body: dict):

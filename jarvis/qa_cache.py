@@ -17,10 +17,16 @@ _POLITE_RE = re.compile(
     re.I,
 )
 _STRIP_PUNCT_RE = re.compile(r"[\s.,!?;:\"'()\[\]{}\-_/\\~`?؟。、「」！？]+")
-# Context-dependent pronouns / follow-ups that MUST NOT be answered from standalone cache
+# Context-dependent pronouns / personal / callback / follow-ups that MUST NOT use standalone cache
 _CONTEXT_DEP_RE = re.compile(
-    r"(?:อันนี้|อันนั้น|ตัวนี้|ตัวนั้น|เรื่องนี้|เรื่องนั้น|แบบนั้น|แบบนี้|เมื่อกี้|ต่อเลย|แล้วมัน|แล้วถ้า|มันทำ|ของผม|ของฉัน|ของหนู|บริษัทผม|ร้านผม|เบอร์|ชื่อผม|ชื่อฉัน|"
-    r"\b(?:this one|that one|it|previous|continue|my company|my phone|my name)\b)",
+    r"(?:อันนี้|อันนั้น|ตัวนี้|ตัวนั้น|เรื่องนี้|เรื่องนั้น|แบบนั้น|แบบนี้|เมื่อกี้|ต่อเลย|แล้วมัน|แล้วถ้า|มันทำ|"
+    r"ของผม|ของฉัน|ของหนู|บริษัทผม|ร้านผม|เบอร์|ชื่อผม|ชื่อฉัน|ผมชื่อ|ฉันชื่อ|หนูชื่อ|ชื่อว่า|ชื่ออะไร|จำผม|จำชื่อ|จำได้ไหม|"
+    r"โทรกลับ|ติดต่อกลับ|ฝากเรื่อง|สาขาอื่น|ไปใช้สาขา|ใช่เลย|ใช่แค่|"
+    r"\b(?:this one|that one|it|previous|continue|my company|my phone|my name|who am i|call me back|callback)\b)",
+    re.I,
+)
+_PERSONAL_REPLY_RE = re.compile(
+    r"(?:ยังไม่รู้ชื่อ|ขอเรียกชื่อ|ยินดีที่ได้รู้จัก|มองไม่เห็นเบอร์|ไม่ค่อยเข้าใจคำถาม|ฝากเรื่องไว้ให้|ขอเบอร์ที่สะดวก|ติดต่อกลับไป)",
     re.I,
 )
 _PERSONAL_NUM_RE = re.compile(r"\d{4,}")
@@ -136,11 +142,17 @@ class QACache:
             self.misses += 1
             return None
 
-    def store(self, question: str, sentences: list[str], lang: str = "th", phone_mode: bool = True) -> bool:
+    def store(self, question: str, sentences: list[str], lang: str = "th", phone_mode: bool = True, caller_name: str = "") -> bool:
         if not is_cacheable_question(question):
             return False
         clean_sents = [s.strip() for s in (sentences or []) if s and s.strip()]
         if not clean_sents:
+            return False
+        joined = " ".join(clean_sents)
+        if _PERSONAL_REPLY_RE.search(joined):
+            return False
+        cname = (caller_name or "").strip()
+        if cname and len(cname) >= 2 and cname in joined:
             return False
         norm = normalize_question(question)
         bucket = f"{lang or 'th'}|{'phone' if phone_mode else 'web'}"
