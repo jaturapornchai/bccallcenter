@@ -2332,10 +2332,12 @@ class BargeInReplyOnPause(ReplyOnPause):
             LIVE.pop(id(self), None)
 
     _BARGE_KEYWORDS = ("หยุด", "เดี๋ยว", "แป๊บ", "ขอถาม", "สอบถาม", "เอาใหม่", "เปลี่ยนภาษา", "stop", "wait", "excuse")
+    _is_phone = False
 
-    def live_words(self, sr, snap, state):
+    def live_words(self, sr, snap, state, is_phone=False):
         """Stream live karaoke words over the WebRTC data channel while the caller is still speaking,
-        and trigger Word-Verified Barge-in on phone calls so coughs/ambient noise never cut off the agent."""
+        and trigger Word-Verified Barge-in on phone calls so coughs/ambient noise never cut off the agent
+        while real interruptions stop playback within ~200ms."""
         live = LIVE.get(id(self))
         try:
             if not state.started_talking:
@@ -2353,9 +2355,13 @@ class BargeInReplyOnPause(ReplyOnPause):
             spoken = " ".join(t for s, e, t, _ in self.playing if e + 0.5 > now_m - turn_s and s < now_m)
             if spoken and grounding.is_echo(txt, spoken):
                 return
-            # Word-Verified Barge-in on phone lines: only interrupt active speech when foreground human words are heard
-            if on_phone() and not self.cut and any(e > now_m and not is_f for _, e, _, is_f in self.playing):
-                dbfs = _audio_dbfs(snap16)
+            # Word-Verified Barge-in on phone lines: stop immediately as soon as foreground human words are heard
+            # Note: is_phone is passed explicitly because ThreadPoolExecutor threads do not inherit FastRTC contextvars!
+            bot_active = state.responding or any(e > now_m and not is_f for _, e, _, is_f in self.playing)
+            if (is_phone or self._is_phone) and not self.cut and bot_active:
+                # Measure peak foreground level across both latest delta and recent stream window
+                recent_tail = state.stream[-int(sr * 0.5):] if state.stream is not None else snap
+                dbfs = max(_audio_dbfs(snap16), _audio_dbfs(to16k((sr, recent_tail))))
                 low_bare = bare.lower()
                 is_real_barge = dbfs >= C.SIP_BARGE_MIN_DBFS and (
                     bare in self.SIP_CUT_INS
@@ -2364,6 +2370,7 @@ class BargeInReplyOnPause(ReplyOnPause):
                 )
                 if is_real_barge:
                     self.cut_off(f"word-verified barge-in: {masked(bare)} ({dbfs:.0f} dBFS)")
+                    state.responding = False
             if live:
                 new, live["text"] = txt != live["text"], txt
                 if new:
@@ -2379,7 +2386,10 @@ class BargeInReplyOnPause(ReplyOnPause):
         0.6-1.2 s late; this checks the last second every PAUSE_STEP_S, and the turn ends PAUSE_SILENCE_S after the
         last word. At EARLY_STT_SILENCE_S the speech so far is transcribed already; reply() takes those words if the
         caller said nothing more (LiveKit's preemptive generation, the STT part only: the boss's tools can act)."""
-        pause = C.SIP_PAUSE_SILENCE_S if on_phone() else C.PAUSE_SILENCE_S
+        is_phone = on_phone()
+        if is_phone:
+            self._is_phone = True
+        pause = C.SIP_PAUSE_SILENCE_S if is_phone else C.PAUSE_SILENCE_S
         step, window = int(sampling_rate * C.PAUSE_STEP_S), int(sampling_rate * (pause + 0.4))
         if len(audio) < (step if state.started_talking else window):
             return False
@@ -2409,7 +2419,8 @@ class BargeInReplyOnPause(ReplyOnPause):
             fed = live.get("fed", 0)
             delta = state.stream[fed:].copy() if live.get("stream") is not None else state.stream[-15 * sampling_rate:].copy()
             live["busy"], live["t"], live["fed"] = True, now_m, state.stream.size
-            EARLY_STT.submit(self.live_words, sampling_rate, delta, state)
+            ctx = contextvars.copy_context()
+            EARLY_STT.submit(ctx.run, self.live_words, sampling_rate, delta, state, is_phone)
         # speech past what was transcribed early makes it out of date; a speech end the sliding VAD merely moves a
         # little (through Opus it does) inside the transcribed audio does not. No speech in the window: the speech
         # end did not move, `silence` is just capped at the window. Without `chunks` every 0.9 s of quiet counted as
@@ -2420,7 +2431,8 @@ class BargeInReplyOnPause(ReplyOnPause):
             early = None
         fresh = not early and silence >= C.EARLY_STT_SILENCE_S
         if fresh:
-            early = EARLY[id(self)] = (state.stream, EARLY_STT.submit(transcribe_final, (sampling_rate, state.stream)))
+            ctx_stt = contextvars.copy_context()
+            early = EARLY[id(self)] = (state.stream, EARLY_STT.submit(ctx_stt.run, transcribe_final, (sampling_rate, state.stream)))
         # the secretary neither thinks nor had a phrase on the caller's speaker during this speech (as just_filler counts it)
         if fresh and not state.responding and not any(e + 0.5 > now_m - state.stream.size / sampling_rate for _, e, _, _ in self.playing):
             history = session(self.fn is reply_public)[1]

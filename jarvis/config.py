@@ -299,8 +299,8 @@ SIP_PAUSE_SILENCE_S = 0.40
 SIP_BARGE_MIN_SPEECH_S = 0.35
 # Cough & ambient noise rejection thresholds for phone calls (dBFS)
 SIP_MIN_SPEECH_DBFS = float(os.environ.get("SIP_MIN_SPEECH_DBFS", "-33.0"))  # ignore distant TV/background chatter
-SIP_BARGE_MIN_DBFS = float(os.environ.get("SIP_BARGE_MIN_DBFS", "-30.0"))    # barge-in must be clear foreground speech
-SIP_BARGE_MIN_CHARS = int(os.environ.get("SIP_BARGE_MIN_CHARS", "4"))        # require real words (not a cough/grunt) to interrupt
+SIP_BARGE_MIN_DBFS = float(os.environ.get("SIP_BARGE_MIN_DBFS", "-31.0"))    # barge-in must be clear foreground speech
+SIP_BARGE_MIN_CHARS = int(os.environ.get("SIP_BARGE_MIN_CHARS", "2"))        # interrupt as soon as real spoken words are heard (not coughs)
 # added to the boss's system message on sip calls only, after everything setup_facts reads: no judge source, and no
 # facts in it (ลุงจืด's price example stays out: a number here would pass the judge without bcbrain)
 PHONE_PROMPT = (
