@@ -12,6 +12,9 @@
 
 ## Objective (เป้าหมายของระบบ)
 - **รวมระบบไว้ในที่เดียว (Unified Monorepo)**: รวม Frontend/SIP Engine (`server.mjs`, `lib/`, `src/`), ผู้ช่วยเสียง **J.A.R.V.I.S** (`jarvis/`) และชุดสถาปัตยกรรม **LiveKit SIP + LiveKit Agents** (`livekit-voice-ai/`) ไว้ในโปรเจกต์เดียว
+- **2 บทบาทหลักของ J.A.R.V.I.S (Dual Role — Sales + Call Center)**:
+  - **พนักงานขายโปรแกรม BC Ai Account**: รับฟังประเภทธุรกิจและปัญหาการทำงาน แนะนำจุดเด่น/โมดูลจากคลังความรู้จริง ชวนทดลองใช้งานและรับฝากข้อมูลติดต่อกลับให้ทีมเดโม
+  - **พนักงาน Call Center แนะนำการใช้งาน**: ช่วยตอบวิธีใช้งาน เมนู ขั้นตอน การตั้งค่า และแก้ไขปัญหาโปรแกรม BC Ai Account ตรงจุดทีละขั้น
 - **รับสายเข้าพร้อมกันสูงสุด 5 คู่สาย (Inbound-Only)** ผ่าน SIP Trunk (UDP 5060 / G.711 PCMU 8kHz) พร้อม Motion Graphic เรดาร์/คลื่นเสียง Equalizer แนวศูนย์บัญชาการ และโหมดมืด/สว่าง
 - **กระแสเสียงต่อเนื่อง 20ms Outbound RTP + ElevenLabs `eleven_v4_turbo` Streaming TTS + Local Cache**:
   - ตัวส่งกระแสเสียง `20ms` Drift-Compensated Outbound RTP Pacer พร้อม Pre-buffer 60ms และ Barge-in Flush ใน `lib/sip-engine.mjs` ทำให้เสียงไหลออกสายโทรศัพท์สม่ำเสมอไม่กระตุก
