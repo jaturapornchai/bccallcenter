@@ -137,6 +137,33 @@ class OpenThaiASR:
             return ""
         return self.decode_mel(self.log_mel(x), x.size / SAMPLE_RATE)
 
+    def transcribe_dual_prompts(self, audio_16k: np.ndarray) -> tuple[str, str]:
+        """Run batched B=2 ONNX encoder pass once for both th-TH (ear2) and th-mix (ear3) on CPU."""
+        x = np.asarray(audio_16k, dtype=np.float32).reshape(-1)
+        if x.size < 800 or not np.any(x):
+            return "", ""
+        mel = self.log_mel(x)
+        n_frames = mel.shape[2]
+        if n_frames == 0:
+            return "", ""
+        audio_s = x.size / SAMPLE_RATE
+        delta = -2.5 if audio_s < 2.0 else -1.0
+        mel2 = np.concatenate([mel, mel], axis=0)
+        length2 = np.array([n_frames, n_frames], dtype=np.int64)
+        prompts2 = np.array([PROMPTS["th-TH"], PROMPTS["th-mix"]], dtype=np.int64)
+        with self._lock:
+            encoded, enc_len = self._enc.run(
+                None, {"audio_signal": mel2, "length": length2, "prompt_index": prompts2}
+            )
+        out: list[str] = []
+        for idx in (0, 1):
+            enc_i = encoded[idx:idx + 1, :int(enc_len[idx]), :]
+            txt = self._decode_encoded(enc_i, delta=delta)
+            if not txt and audio_s >= 0.25:
+                txt = self._decode_encoded(enc_i, delta=-4.0)
+            out.append(txt)
+        return out[0], out[1]
+
     def stream(self) -> "OpenThaiStream":
         """Create an incremental streaming session for one live utterance."""
         return OpenThaiStream(self)

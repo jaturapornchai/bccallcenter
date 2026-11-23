@@ -21,7 +21,7 @@ DEVICE = "cuda" if HAS_CUDA else "cpu"
 # stays free for Ollama + the TTS. Prompt index: "th-TH" (32) or "th-mix" (63).
 STT_MODEL = os.environ.get("STT_MODEL", "iapp/OpenThai2.0-ASR-Streaming-ONNX")
 STT_MODEL_DIR = os.environ.get("STT_MODEL_DIR", os.path.join(BASE_DIR, "models", "openthai2_asr_fp32"))
-STT_LANGUAGE = os.environ.get("STT_LANGUAGE", "th-TH")
+STT_LANGUAGE = os.environ.get("STT_LANGUAGE", "th-mix")
 STT_THREADS = int(os.environ.get("STT_THREADS", "8"))
 STT_VAD_PARAMS = dict(min_silence_duration_ms=400)  # Silero VAD gate used by voiced() before barge-in/turn checks
 # The words the answer is made from: Typhoon Whisper Turbo (SCB 10X) on the GPU through faster-whisper; OpenThai keeps
@@ -241,6 +241,7 @@ REF_TEXT = "สวัสดีครับทุกคน วันนี้ผ�
 REF_VOICE = "th-TH-NiwatNeural"  # edge-tts fallback voice used by generate_ref.py when REF_SEED_PATH is absent
 TTS_MODEL = os.environ.get("TTS_MODEL", "hotdogs/omnivoice-thai")
 TTS_STEP = 16  # diffusion steps, the setting of the samples ลุงจืด picked from
+SIP_TTS_STEP = int(os.environ.get("SIP_TTS_STEP", "10"))  # balanced clarity (no slurring) & speed on phone calls
 TTS_CFG = 2.0  # guidance scale
 # ลุงจืด 2026-11-17 "ต้องการให้ ตอบเร็วๆ แต่ครบถ้วน ฟังสบายๆ" and "อยากได้เสียง แบบ Ekkarat": 0.9 is Ekkarat's pace. Measured
 # on the same three texts without the gaps: this voice at 1.0 took 27.4 s, the ElevenLabs Ekkarat samples 29.9 s (0.92),
@@ -263,15 +264,15 @@ PAUSE_STEP_S = 0.1  # how often the end-of-turn check runs
 # (CARRY_MERGE_S), words after cut it off
 PAUSE_SILENCE_S = 0.7
 BARGE_MIN_SPEECH_S = 0.5  # speech shorter than this does not cut the secretary off (LiveKit interruption min_duration default)
-EARLY_STT_SILENCE_S = 0.25  # silence that starts the transcription early (dropped if the caller goes on)
+EARLY_STT_SILENCE_S = 0.20  # silence that starts the transcription early (dropped if the caller goes on)
 LIVE_STEP_S = 0.18  # incremental OpenThai streaming cadence for live Karaoke partials
 CARRY_MERGE_S = 5.0  # window (s) to merge a resumed phrase if barge-in stopped reply() before the bot spoke
 # ลุงจืด 2026-11-23: calls bridged from BC Call Center (webrtc_id "sip-...") answer like a real phone agent. A phone line
 # has no speaker leaking into the mic, so a shorter stop ends the turn and a shorter sound cuts the secretary off.
-# ponytail: 0.5 s ends the turn of a caller who stops to think again (the 2026-11-17 complaint), for sip calls only
+# ponytail: 0.4 s ends the turn fast while keeping natural breathing pauses intact
 SIP_PREFIX = "sip-"
-SIP_PAUSE_SILENCE_S = 0.50
-SIP_BARGE_MIN_SPEECH_S = 0.32
+SIP_PAUSE_SILENCE_S = 0.40
+SIP_BARGE_MIN_SPEECH_S = 0.35
 # added to the boss's system message on sip calls only, after everything setup_facts reads: no judge source, and no
 # facts in it (ลุงจืด's price example stays out: a number here would pass the judge without bcbrain)
 PHONE_PROMPT = (
