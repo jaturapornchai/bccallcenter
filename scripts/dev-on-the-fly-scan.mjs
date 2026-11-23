@@ -1,9 +1,16 @@
 #!/usr/bin/env node
 /**
  * Dev-on-the-Fly Call Scanner & State Tracker for BC Call Center (d:\yalecom)
- * Used by the hourly Antigravity Scheduled Automation to discover unreviewed calls
+ * Used by the hourly Dev-on-the-Fly review (docs/dev-on-the-fly.md) to discover unreviewed calls
  * with WAV recordings + transcripts + DeepSeek QA, check line idle safety before deploy,
  * and record review outcomes without leaking real caller phone numbers.
+ *
+ *   --limit N [--lock] [--recorded-only]   list unreviewed calls; --lock claims the run so two reviews never
+ *                             overlap; --recorded-only skips calls that have no WAV recording
+ *   --jarvis-log <sessionId>  J.A.R.V.I.S log lines written during that call
+ *   --check-idle              is any call live right now?
+ *   --mark-done <ids> --changed <true|false> --summary "<text>"   record the outcome and release the lock
+ *   --unlock                  release the lock without recording anything (aborted run)
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -14,6 +21,9 @@ const MEMORY_PATH = path.join(DATA_DIR, "call-memory.json");
 const RECORDINGS_DIR = path.join(DATA_DIR, "recordings");
 const STATE_PATH = path.join(DATA_DIR, "dev-on-the-fly-state.json");
 const LOG_PATH = path.join(DATA_DIR, "dev-on-the-fly-log.jsonl");
+const LOCK_PATH = path.join(DATA_DIR, "dev-on-the-fly.lock");
+const LOCK_STALE_MS = 100 * 60_000; // a run that died without --mark-done/--unlock must not block reviews forever
+const JARVIS_LOG_DIR = path.join(ROOT, "jarvis", "logs");
 
 function maskPhone(raw) {
   const s = String(raw || "");
@@ -42,8 +52,80 @@ function saveState(state) {
   fs.renameSync(tmp, STATE_PATH);
 }
 
+function activeLock() {
+  const lock = loadJson(LOCK_PATH, null);
+  return lock?.at && Date.now() - new Date(lock.at).getTime() < LOCK_STALE_MS ? lock : null;
+}
+
+function releaseLock() {
+  try {
+    fs.unlinkSync(LOCK_PATH);
+  } catch {}
+}
+
+function findSession(mem, sessionId) {
+  for (const rec of Object.values(mem.callers || {})) {
+    const session = (rec.sessions || []).find((s) => s?.id === sessionId);
+    if (session) return session;
+  }
+  return null;
+}
+
+/** Log lines stamped inside [fromMs, toMs]; unstamped lines (tracebacks) follow the stamped line above them. */
+function jarvisLogLines(fromMs, toMs) {
+  if (!fs.existsSync(JARVIS_LOG_DIR)) return null;
+  const files = fs
+    .readdirSync(JARVIS_LOG_DIR)
+    .filter((f) => f.startsWith("voice_agent.log"))
+    .map((f) => ({ fp: path.join(JARVIS_LOG_DIR, f), mtime: fs.statSync(path.join(JARVIS_LOG_DIR, f)).mtimeMs }))
+    .filter((f) => f.mtime >= fromMs)
+    .sort((a, b) => a.mtime - b.mtime);
+  const picked = [];
+  for (const { fp } of files) {
+    let inWindow = false;
+    for (const line of fs.readFileSync(fp, "utf8").split(/\r?\n/)) {
+      // J.A.R.V.I.S stamps in local time: "2026-11-23 13:53:01,123"
+      const m = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d),(\d{3})/.exec(line);
+      if (m) {
+        const at = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], +m[7]).getTime();
+        inWindow = at >= fromMs && at <= toMs;
+      }
+      if (inWindow && line) picked.push(maskTextPhones(line).slice(0, 400));
+    }
+  }
+  return picked;
+}
+
 const args = process.argv.slice(2);
 const flagIdx = (name) => args.indexOf(name);
+
+if (args.includes("--unlock")) {
+  releaseLock();
+  console.log(JSON.stringify({ ok: true, unlocked: true }));
+  process.exit(0);
+}
+
+// Mode 0: J.A.R.V.I.S log excerpt for one call (the log carries no Node session id, so the call's time window is used)
+if (flagIdx("--jarvis-log") >= 0) {
+  const session = findSession(loadJson(MEMORY_PATH, { callers: {} }), args[flagIdx("--jarvis-log") + 1] || "");
+  if (!session) {
+    console.log("session not found");
+    process.exit(1);
+  }
+  const maxLines = flagIdx("--max-lines") >= 0 ? Math.max(20, Number(args[flagIdx("--max-lines") + 1]) || 150) : 150;
+  const fromMs = new Date(session.startedAt).getTime() - 5_000;
+  const toMs = (session.endedAt ? new Date(session.endedAt).getTime() : Date.now()) + 20_000; // the post-call QA lands late
+  const lines = jarvisLogLines(fromMs, toMs);
+  if (!lines) {
+    console.log("no J.A.R.V.I.S log file yet (jarvis/logs/voice_agent.log)");
+  } else if (lines.length > maxLines) {
+    const half = Math.floor(maxLines / 2);
+    console.log([...lines.slice(0, half), `... ${lines.length - half * 2} lines omitted ...`, ...lines.slice(-half)].join("\n"));
+  } else {
+    console.log(lines.length ? lines.join("\n") : "no J.A.R.V.I.S log lines in this call's time window");
+  }
+  process.exit(0);
+}
 
 // Mode 1: Check whether any call is currently active (safety gate before auto-deploy restart)
 if (args.includes("--check-idle")) {
@@ -76,7 +158,7 @@ if (flagIdx("--mark-done") >= 0) {
   state.lastRunAt = nowIso;
   state.totalRuns = Number(state.totalRuns || 0) + 1;
   saveState(state);
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  releaseLock();
   fs.appendFileSync(
     LOG_PATH,
     JSON.stringify({ at: nowIso, sessionIds: ids, changed, summary: summary.slice(0, 600) }) + "\n",
@@ -90,6 +172,14 @@ if (flagIdx("--mark-done") >= 0) {
 const limitArg = flagIdx("--limit") >= 0 ? Number(args[flagIdx("--limit") + 1] || 5) : 5;
 const maxItems = Number.isFinite(limitArg) && limitArg > 0 ? Math.min(limitArg, 10) : 5;
 
+const recordedOnly = args.includes("--recorded-only"); // calls from before recording existed have no audio to review
+const wantsLock = args.includes("--lock");
+const heldLock = wantsLock ? activeLock() : null;
+if (heldLock) {
+  console.log(JSON.stringify({ ok: false, locked: true, lockedAt: heldLock.at, sessionIds: heldLock.sessionIds || [] }, null, 2));
+  process.exit(0);
+}
+
 const mem = loadJson(MEMORY_PATH, { callers: {} });
 const state = loadJson(STATE_PATH, { reviewed: {}, lastRunAt: null, totalRuns: 0 });
 const reviewed = state.reviewed || {};
@@ -102,7 +192,7 @@ for (const rec of Object.values(mem.callers || {})) {
     const wavPath = path.join(RECORDINGS_DIR, `${s.id}.wav`);
     const hasWav = fs.existsSync(wavPath);
     const msgCount = Array.isArray(s.messages) ? s.messages.length : 0;
-    if (!hasWav && msgCount < 2) continue;
+    if (!hasWav && (recordedOnly || msgCount < 2)) continue;
     const wavSizeKb = hasWav ? Math.round(fs.statSync(wavPath).size / 1024) : 0;
     candidates.push({
       sessionId: s.id,
@@ -141,6 +231,9 @@ candidates.sort((a, b) => {
 });
 
 const batch = candidates.slice(0, maxItems);
+if (wantsLock && batch.length > 0) {
+  fs.writeFileSync(LOCK_PATH, JSON.stringify({ at: new Date().toISOString(), sessionIds: batch.map((s) => s.sessionId) }), "utf8");
+}
 console.log(
   JSON.stringify(
     {

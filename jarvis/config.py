@@ -53,6 +53,7 @@ LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.2"))
 HISTORY_TURNS = 10  # user+assistant pairs kept per caller session
 SESSIONS_DIR = os.path.join(BASE_DIR, "sessions")  # one <session id>.json per browser, so calls go on where they left off
 LEADS_PATH = os.path.join(SESSIONS_DIR, "leads.jsonl")  # callback requests customers left (leave_message), one JSON per line
+LOG_DIR = os.path.join(BASE_DIR, "logs")  # voice_agent.log (rotating); scripts/dev-on-the-fly-scan.mjs --jarvis-log reads it
 # ห้ามแต่งเรื่อง: checks every spoken phrase and screen line against this turn's sources (numbers: grounding.py).
 # On DeepSeek since 2026-11-19 (judge lab: fewer true lines cut, no made-up line more passed; voice_agent.DeepSeekJudge)
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", DEEPSEEK_MODEL)

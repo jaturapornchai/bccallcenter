@@ -33,6 +33,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from decimal import ROUND_HALF_UP, Decimal
+from logging.handlers import RotatingFileHandler
 from types import SimpleNamespace
 
 import aioice.ice
@@ -72,6 +73,12 @@ QA_CACHE = QACache(C.QA_CACHE_PATH, ttl_s=C.QA_CACHE_TTL_S, max_entries=C.QA_CAC
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+# A detached server's console is kept nowhere; the hourly Dev-on-the-Fly review reads this file instead.
+os.makedirs(C.LOG_DIR, exist_ok=True)
+_file_log = RotatingFileHandler(os.path.join(C.LOG_DIR, "voice_agent.log"), maxBytes=5_000_000, backupCount=5,
+                                encoding="utf-8")
+_file_log.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+logging.getLogger().addHandler(_file_log)
 log = logging.getLogger("voice")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
