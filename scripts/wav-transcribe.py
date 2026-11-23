@@ -11,6 +11,7 @@ Usage: python scripts/wav-transcribe.py <recording.wav> [--vad-only] [--device a
        -> JSON on stdout, progress on stderr
 """
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -78,6 +79,21 @@ def transcribe_spans(model, audio, spans):
     return out
 
 
+def expose_cuda_libraries():
+    """cuBLAS and cuDNN ship inside torch in this venv. The live agent finds them because it imports torch;
+    a review only needs their folder on the DLL search path."""
+    spec = importlib.util.find_spec("torch")
+    if spec and spec.origin:
+        os.environ["PATH"] = os.path.join(os.path.dirname(spec.origin), "lib") + os.pathsep + os.environ["PATH"]
+
+
+def transcribe_channels(device, threads, channels, spans):
+    if device == "cuda":
+        expose_cuda_libraries()
+    model = load_model(device, threads)
+    return {name: transcribe_spans(model, audio, spans[name]) for name, audio in channels.items()}
+
+
 def yield_cpu_to_live_calls():
     """A review runs while the line is open; the live agent's streaming ASR is on the CPU too and must win."""
     if os.name != "nt":
@@ -107,17 +123,15 @@ def main():
     if not args.vad_only:
         device = pick_device(args.device)
         try:
-            model = load_model(device, args.threads)
-        except Exception as error:  # VRAM taken between the check and the load
+            transcripts = transcribe_channels(device, args.threads, channels, spans)
+        except Exception as error:  # VRAM taken since the check, or a CUDA library that will not load
             if device != "cuda":
                 raise
-            print(f"cuda load failed ({type(error).__name__}), using cpu", file=sys.stderr)
+            print(f"cuda failed ({type(error).__name__}: {error}), using cpu", file=sys.stderr)
             device = "cpu"
-            model = load_model(device, args.threads)
-        result.update(model=C.FINAL_STT_MODEL, device=device)
-        for name, audio in channels.items():
-            result[name] = transcribe_spans(model, audio, spans[name])
-            print(f"{name}: {len(result[name])} utterances at {time.monotonic() - began:.0f}s ({device})", file=sys.stderr)
+            transcripts = transcribe_channels(device, args.threads, channels, spans)
+        result.update(model=C.FINAL_STT_MODEL, device=device, **transcripts)
+        print(f"transcribed on {device} at {time.monotonic() - began:.0f}s", file=sys.stderr)
     result["elapsedSec"] = round(time.monotonic() - began, 1)
     json.dump(result, sys.stdout, ensure_ascii=False)
 
