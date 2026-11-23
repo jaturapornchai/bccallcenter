@@ -78,7 +78,7 @@ node scripts/dev-on-the-fly-scan.mjs --jarvis-log <sessionId>
    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/restart-services.ps1 -Target all
    ```
 
-   - exit 0 และ `"ok": true` → บริการในเครื่องและ `https://callcenter.bcsmethai.com/` ตอบ 200 แล้ว
+   - exit 0 และ `"ok": true` → บริการในเครื่องและ `https://callcenter.bcsmethai.com/` ตอบ 200 แล้ว ถ้ารีสตาร์ท J.A.R.V.I.S ด้วย ให้ดู `tail -n 40 jarvis/logs/voice_agent.log` ต้องมีบรรทัด `MCP bcbrain: [...]` ถ้าเป็น `MCP bcbrain unavailable -> its tools are skipped` แปลว่าสายลูกค้าไม่มีคลังความรู้ ให้สั่ง `-Target jarvis` ซ้ำ
    - exit 2 → มีสายเข้ามาพอดี รอ 60 วินาทีแล้วสั่งซ้ำ
    - exit 1 → **ถอยกลับ:** `git stash push -u -m "dotf-failed <วันที่>"` แล้ว `npm run build` และรีสตาร์ทซ้ำจนได้ `"ok": true` จากนั้นไปขั้น 6 ด้วย `--changed false` และสรุปขึ้นต้นว่า `ROLLBACK`
 5. อัปเดต `README.md` ถ้าพฤติกรรมที่ README อธิบายไว้เปลี่ยน

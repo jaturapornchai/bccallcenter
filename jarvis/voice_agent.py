@@ -1414,14 +1414,30 @@ def mcp_tool(server, client, name):
     return run
 
 
-def load_mcp_tools():
-    for server, url in C.MCP_SERVERS.items():
+MCP_CONNECT_TRIES = 3  # tools are listed once at start-up: one 502 from bcbrain then left every call without it (2026-11-23)
+MCP_RETRY_WAIT_SEC = 5
+
+
+def connect_mcp(server, url):
+    """The server's client and read-only tools, or None when it stays unreachable."""
+    for attempt in range(1, MCP_CONNECT_TRIES + 1):
         try:
             client = MCPClient(url)
-            tools = client.read_only_tools()
+            return client, client.read_only_tools()
         except Exception as e:
-            log.warning("MCP %s unavailable (%s) -> its tools are skipped", server, e)
+            log.warning("MCP %s unavailable, try %d/%d (%s)", server, attempt, MCP_CONNECT_TRIES, e)
+            if attempt < MCP_CONNECT_TRIES:
+                time.sleep(MCP_RETRY_WAIT_SEC)
+    return None
+
+
+def load_mcp_tools():
+    for server, url in C.MCP_SERVERS.items():
+        connected = connect_mcp(server, url)
+        if not connected:
+            log.warning("MCP %s unavailable -> its tools are skipped", server)
             continue
+        client, tools = connected
         for t in tools:
             schema = {k: v for k, v in t["inputSchema"].items() if k != "$schema"}
             TOOL_SPECS.append(tool_spec(t["name"], t.get("description", ""), schema))
