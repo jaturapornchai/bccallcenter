@@ -1687,7 +1687,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
     if heard and not hello:
         carry_ts, carry_txt = take("carry", (0.0, ""))
         # the window counts from when this speech started: a phone call's answer stops at its first word (cut_off)
-        if carry_txt and time.monotonic() - carry_ts < C.CARRY_MERGE_S + data.size / sr:
+        if carry_txt and time.monotonic() - carry_ts < C.CARRY_MERGE_S + data.size / max(sr, 1):
             heard = f"{carry_txt} {heard}".strip()
     sid, history = session(public)
     if "leave_message" in tools:  # the tool gets the caller's own words and call id from here, never from the boss
