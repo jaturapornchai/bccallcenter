@@ -308,10 +308,12 @@ def test_three_tier_search_planner():
     assert diverge("ไปรับสินค้าสิทธิ์สิการสิตเองครับ ไอล์รัดสิงานครัว", ["ใบรับสินค้าเมนูอะไร"])
     assert needs("ไปรับสินค้าสิทธิ์สิการสิตเองครับ ไอล์รัดสิงานครัว", ["ใบรับสินค้าเมนูอะไร"], [])
 
-    # Tier 3 Planner-Path: short/vague follow-up with history (e.g. "คำนวณยังไง", 10 chars) -> run search_words
+    # Tier 3 Planner-Path: short/vague follow-up with history (e.g. "คำนวณยังไง", "แรงงานอยู่ไหน" -> "รายงานอยู่ไหน")
     hist = [{"role": "user", "content": "วิธีคิดต้นทุน FIFO"}, {"role": "assistant", "content": "ระบบรองรับ FIFO ครับ"}]
     assert needs("แล้วแบบอื่นล่ะ", ["แล้วแบบอื่นล่ะ"], hist)
     assert needs("คำนวณยังไง", ["คำนวณยังไง"], hist)
+    assert needs("แรงงานอยู่ไหน", ["แรงงานอยู่ไหน"], hist)
+    assert needs("รายงานอยู่ไหน", ["รายงานอยู่ไหน"], hist)
 
     # words_ask includes alt_heard when provided so words_early and search_words share the exact same key
     _, ask = words_ask(hist, "คำเพี้ยน", alt_heard=["ใบรับสินค้าเมนูอะไร"])

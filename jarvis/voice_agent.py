@@ -2146,8 +2146,8 @@ def worker_chat(messages, tools):
 # little (STT wrote FIFO as "ไฟโฟ"; "การคำนวณต้นทุนล่ะ" glued to the question before it found depreciation notes)
 # first wording (2026-11-08 check) dragged the last topic into a new question and added terms not asked (FIFO to a lot question)
 SEARCH_ASK = (f"{C.EXPERT}เขียนคำค้นคลังความรู้โปรแกรมบัญชี BC สำหรับคำพูดล่าสุดของผู้โทร บรรทัดแรกเป็นคำค้น 2-6 คำ (ถ้าคำถามมีหลายแง่มุมในเรื่องเดียวกัน คั่นคำค้นเพิ่มอีก 1-2 มุมด้วยเครื่องหมาย ; เช่น ลูกหนี้เจ้าหนี้คนเดียวกัน หักกลบ ; รายงานสถานะลูกหนี้เจ้าหนี้) ไม่ต้องอธิบาย "
-              "แก้คำที่ระบบฟังเสียงเขียนผิดหรือสะกดผิด (ไฟโฟ -> FIFO, พีโอเอส -> POS, หลอด หรือ รถ ในเรื่องสต็อก -> LOT ล็อต, คิวรี่ คิวลี่ หรือ Q -> query SQL) คำที่คนไทยพูดทับศัพท์ให้ใส่ทั้งคำไทยและคำอังกฤษ "
-              "ถ้าคำพูดล่าสุดยังถามต่อในเรื่องเดิมหรือพูดคำสั้นๆ ที่อยู่ในหัวข้อที่กำลังคุยได้ (เช่น คุยเรื่องต้นทุนสินค้าอยู่แล้วถามว่า \"FIFO?\", \"แล้วยกเลิกล่ะ\", \"30 บรรทัด\", \"ขอ query\") ให้คงหัวข้อเรื่องที่กำลังคุยอยู่ไว้ในคำค้นด้วย "
+              "ดูบริบทที่คุยต่อเนื่องเสมอและเดาแก้คำที่ระบบฟังเสียงเพี้ยนตามเสียงใกล้เคียงให้ตรงเรื่องเดิม (เช่น รอบก่อนเพิ่งคุยเรื่องรายงาน แล้วได้ยิน แรงงานอยู่ไหน -> รายงานจัดซื้อ อยู่เมนูไหน ; เพิ่งคุยเรื่องรับของเข้าคลัง แล้วได้ยิน ฟังสินค้า/ต้อนรับของ -> รับของเข้าคลัง ; ไฟโฟ -> FIFO, พีโอเอส -> POS, หลอด/รถ -> LOT ล็อต, คิวรี่/Q -> query SQL) คำที่คนไทยพูดทับศัพท์ให้ใส่ทั้งคำไทยและคำอังกฤษ "
+              "ถ้าคำพูดล่าสุดยังถามต่อในเรื่องเดิมหรือพูดคำสั้นๆ ที่อยู่ในหัวข้อที่กำลังคุยได้ (เช่น คุยเรื่องต้นทุนสินค้าอยู่แล้วถามว่า \"FIFO?\", \"แล้วยกเลิกล่ะ\", \"รายงานอยู่ไหน\", \"ขอ query\") ให้คงหัวข้อเรื่องที่กำลังคุยอยู่ไว้ในคำค้นด้วย "
               "ถ้าเปลี่ยนไปถามระบบหรือเรื่องอื่นชัดเจน ใช้เรื่องใหม่อย่างเดียว ห้ามเอาเรื่องก่อนมาปน และห้ามใส่คำอื่นที่ผู้โทรไม่ได้พูดถึง "
               "ถ้าคำพูดล่าสุดถามหรือขอเรื่องอื่นที่ไม่ใช่เรื่องที่คุยอยู่ (ระบบอื่นของโปรแกรมเดียวกันก็นับเป็นเรื่องอื่น เช่น คุยเรื่องต้นทุนสินค้าอยู่แล้วถามเรื่องระบบเงินเดือนพนักงาน) "
               "และผู้โทรไม่ได้พูดเองว่าขอเปลี่ยนเรื่อง (อาจเพราะระบบฟังเสียงผิด) ต้องเพิ่มบรรทัดที่สองว่า เปลี่ยนเรื่อง: เรื่องที่คุยอยู่ | เรื่องใหม่ที่ได้ยิน "
@@ -2171,7 +2171,10 @@ def swarm_queries(query, heard, history):
 
 
 _FOLLOWUP_START_RE = re.compile(r"^(?:แล้ว|อันนี้|อันนั้น|ตัวนี้|ตัวนั้น|มัน|แบบนั้น|ถ้าอย่างนั้น|ถ้าแบบ|งั้น|ส่วน)")
-_VAGUE_FOLLOWUP_RE = re.compile(r"^(?:คำนวณ|คิด|ทำ|ใช้|ดู|เข้า|ตั้ง|แก้|เพิ่ม|ลบ)(?:ยังไง|อย่างไร|ตรงไหน|เมนูไหน|ได้ไหม|ได้มั้ย)")
+_VAGUE_FOLLOWUP_RE = re.compile(
+    r"^(?:คำนวณ|คิด|ทำ|ใช้|ดู|เข้า|ตั้ง|แก้|เพิ่ม|ลบ)(?:ยังไง|อย่างไร|ตรงไหน|เมนูไหน|ได้ไหม|ได้มั้ย)"
+    r"|(?:อยู่ไหน|อยู่ที่ไหน|เมนูไหน|อยู่ตรงไหน|ทำยังไง|คิดยังไง)[\s.!?…]*$"
+)
 
 
 def _stt_ears_diverge(heard: str, alt_heard: list[str]) -> bool:
@@ -2198,7 +2201,7 @@ def _needs_search_planner(heard: str, alt_heard: list[str], history: list[dict])
         return True
     if len(s) > 38:
         return True
-    if history and (len(s) < 13 or bool(_FOLLOWUP_START_RE.match(s)) or bool(_VAGUE_FOLLOWUP_RE.match(s))):
+    if history and (len(s) < 13 or bool(_FOLLOWUP_START_RE.match(s)) or (len(s) <= 18 and bool(_VAGUE_FOLLOWUP_RE.search(s)))):
         return True
     return False
 
@@ -2220,8 +2223,9 @@ def search_words(history, heard, alt_heard=None):
     talk, ask = words_ask(history, heard, alt_heard=alt_heard)
     try:
         early, t = WORDS.pop(ask[1]["content"], None), time.perf_counter()  # words_early asked this already, before the turn ended
-        wait_cap = 0.65 if ("on_phone" in globals() and on_phone()) else None
-        text, _ = early.result(timeout=wait_cap) if early else worker_chat(ask, None)
+        phone_now = "on_phone" in globals() and on_phone()
+        job = early or (WORDS_POOL.submit(worker_chat, ask, None) if phone_now else None)
+        text, _ = job.result(timeout=0.90 if phone_now else None) if job else worker_chat(ask, None)
         log.info("search words: %s, waited %.2fs", "asked early" if early else "asked now", time.perf_counter() - t)
     except (httpx.HTTPError, ValueError, KeyError, TimeoutError) as e:
         log.warning("search words skipped (%s)", type(e).__name__)
