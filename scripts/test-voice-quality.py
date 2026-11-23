@@ -293,23 +293,25 @@ def test_config_and_source_invariants():
 
 def test_three_tier_search_planner():
     scope = load_symbols({
-        "_FOLLOWUP_START_RE", "_stt_ears_diverge", "_needs_search_planner", "words_ask", "SEARCH_ASK",
+        "_FOLLOWUP_START_RE", "_VAGUE_FOLLOWUP_RE", "_stt_ears_diverge", "_needs_search_planner", "words_ask", "SEARCH_ASK",
     }, extra_scope={"grounded": None})
     needs = scope["_needs_search_planner"]
     diverge = scope["_stt_ears_diverge"]
     words_ask = scope["words_ask"]
 
-    # Tier 2 Fast-Path: clear question & agreeing ears -> skip search_words LLM call
+    # Tier 2 Fast-Path: clear question & agreeing (or close) ears -> skip search_words LLM call
     assert not diverge("ราคาแพ็กเกจเท่าไหร่ครับ", ["ราคาแพ็กเกจเท่าไหร่"])
     assert not needs("ราคาแพ็กเกจเท่าไหร่ครับ", ["ราคาแพ็กเกจเท่าไหร่"], [])
+    assert not diverge("คุณพูดได้กี่ภาษาครับ", ["คุณพูดได้กินลักษณะครับ"])  # minor OpenThai diff must stay Fast-Path
 
-    # Tier 3 Planner-Path: ears disagree (e.g. garbled e1 vs clean e2) -> run search_words with both ears
-    assert diverge("ต้นทุนที่ สินค้า ต้นนี้ ขายสิบใจ", ["ต้นทุนสินค้า"])
-    assert needs("ต้นทุนที่ สินค้า ต้นนี้ ขายสิบใจ", ["ต้นทุนสินค้า"], [])
+    # Tier 3 Planner-Path: ears strongly disagree (e.g. garbled e1 vs clean e2) -> run search_words with both ears
+    assert diverge("ไปรับสินค้าสิทธิ์สิการสิตเองครับ ไอล์รัดสิงานครัว", ["ใบรับสินค้าเมนูอะไร"])
+    assert needs("ไปรับสินค้าสิทธิ์สิการสิตเองครับ ไอล์รัดสิงานครัว", ["ใบรับสินค้าเมนูอะไร"], [])
 
-    # Tier 3 Planner-Path: short follow-up with history -> run search_words
+    # Tier 3 Planner-Path: short/vague follow-up with history (e.g. "คำนวณยังไง", 10 chars) -> run search_words
     hist = [{"role": "user", "content": "วิธีคิดต้นทุน FIFO"}, {"role": "assistant", "content": "ระบบรองรับ FIFO ครับ"}]
     assert needs("แล้วแบบอื่นล่ะ", ["แล้วแบบอื่นล่ะ"], hist)
+    assert needs("คำนวณยังไง", ["คำนวณยังไง"], hist)
 
     # words_ask includes alt_heard when provided so words_early and search_words share the exact same key
     _, ask = words_ask(hist, "คำเพี้ยน", alt_heard=["ใบรับสินค้าเมนูอะไร"])

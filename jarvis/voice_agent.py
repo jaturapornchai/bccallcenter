@@ -2171,6 +2171,7 @@ def swarm_queries(query, heard, history):
 
 
 _FOLLOWUP_START_RE = re.compile(r"^(?:แล้ว|อันนี้|อันนั้น|ตัวนี้|ตัวนั้น|มัน|แบบนั้น|ถ้าอย่างนั้น|ถ้าแบบ|งั้น|ส่วน)")
+_VAGUE_FOLLOWUP_RE = re.compile(r"^(?:คำนวณ|คิด|ทำ|ใช้|ดู|เข้า|ตั้ง|แก้|เพิ่ม|ลบ)(?:ยังไง|อย่างไร|ตรงไหน|เมนูไหน|ได้ไหม|ได้มั้ย)")
 
 
 def _stt_ears_diverge(heard: str, alt_heard: list[str]) -> bool:
@@ -2181,15 +2182,15 @@ def _stt_ears_diverge(heard: str, alt_heard: list[str]) -> bool:
     b = re.sub(r"[\s.,!?…]+", "", alt_heard[0]).lower()
     if not a or not b or a == b or a in b or b in a:
         return False
-    # Character bigram Jaccard similarity: < 0.50 means the ears heard different phrases
+    # Character bigram Jaccard similarity: < 0.35 means the ears heard genuinely different phrases
     sa = {a[i : i + 2] for i in range(max(len(a) - 1, 1))}
     sb = {b[i : i + 2] for i in range(max(len(b) - 1, 1))}
-    return len(sa & sb) / max(len(sa | sb), 1) < 0.50
+    return len(sa & sb) / max(len(sa | sb), 1) < 0.35
 
 
 def _needs_search_planner(heard: str, alt_heard: list[str], history: list[dict]) -> bool:
     """Tier-2 Fast-Path vs Tier-3 AI Search Planner:
-    Run search_words before quick_answer when ears disagree, utterance is vague/follow-up, or long/rambling."""
+    Run search_words before quick_answer when ears strongly disagree, utterance is vague/follow-up, or long/rambling."""
     s = (heard or "").strip()
     if not s:
         return False
@@ -2197,7 +2198,7 @@ def _needs_search_planner(heard: str, alt_heard: list[str], history: list[dict])
         return True
     if len(s) > 38:
         return True
-    if history and (len(s) < 10 or bool(_FOLLOWUP_START_RE.match(s))):
+    if history and (len(s) < 13 or bool(_FOLLOWUP_START_RE.match(s)) or bool(_VAGUE_FOLLOWUP_RE.match(s))):
         return True
     return False
 
@@ -2219,10 +2220,11 @@ def search_words(history, heard, alt_heard=None):
     talk, ask = words_ask(history, heard, alt_heard=alt_heard)
     try:
         early, t = WORDS.pop(ask[1]["content"], None), time.perf_counter()  # words_early asked this already, before the turn ended
-        text, _ = early.result() if early else worker_chat(ask, None)
+        wait_cap = 0.65 if ("on_phone" in globals() and on_phone()) else None
+        text, _ = early.result(timeout=wait_cap) if early else worker_chat(ask, None)
         log.info("search words: %s, waited %.2fs", "asked early" if early else "asked now", time.perf_counter() - t)
-    except (httpx.HTTPError, ValueError, KeyError) as e:
-        log.warning("search words failed (%s)", type(e).__name__)
+    except (httpx.HTTPError, ValueError, KeyError, TimeoutError) as e:
+        log.warning("search words skipped (%s)", type(e).__name__)
         return "", None
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     # real calls (log 2026-11-09): the jump line came first, or a reply sentence came instead of a query, and that
