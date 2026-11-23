@@ -10,12 +10,14 @@ import {
   ClipboardList,
   Crown,
   Phone,
+  PhoneCall,
   Plus,
   Save,
   Search,
   Sparkles,
   Tag,
   Trash2,
+  UserCheck,
   UserPlus,
   Users,
 } from "lucide-react";
@@ -36,6 +38,8 @@ interface CrmWorkspaceProps {
   crm: CrmState;
   callLogs: CallLogEntry[];
   initialPhone?: string | null;
+  initialSubTab?: "customers" | "tickets";
+  onSubTabChange?: (tab: "customers" | "tickets") => void;
   onUpsertCustomer: (customer: Partial<CrmCustomer> & { phone: string }) => void;
   onCreateTicket: (ticket: {
     phone: string;
@@ -47,6 +51,8 @@ interface CrmWorkspaceProps {
     assignee: string;
   }) => void;
   onUpdateTicket: (id: string, patch: { status?: TicketStatus; priority?: TicketPriority; assignee?: string }) => void;
+  onAcknowledgeTicket?: (id: string) => void;
+  onCloseTicket?: (id: string) => void;
   onDeleteTicket: (id: string) => void;
   onOpenQaLog: (phone: string, sessionId: string) => void;
   readOnly?: boolean;
@@ -85,14 +91,21 @@ export function CrmWorkspace({
   crm,
   callLogs,
   initialPhone,
+  initialSubTab,
+  onSubTabChange,
   onUpsertCustomer,
   onCreateTicket,
   onUpdateTicket,
+  onAcknowledgeTicket,
+  onCloseTicket,
   onDeleteTicket,
   onOpenQaLog,
   readOnly = false,
 }: CrmWorkspaceProps) {
-  const [subTab, setSubTab] = useState<"customers" | "tickets">("customers");
+  const [subTab, setSubTab] = useState<"customers" | "tickets">(initialSubTab || "customers");
+  useEffect(() => {
+    if (initialSubTab) setSubTab(initialSubTab);
+  }, [initialSubTab]);
   const [search, setSearch] = useState("");
   const [tierFilter, setTierFilter] = useState<CrmTier | "all">("all");
   const [statusFilter, setStatusFilter] = useState<TicketStatus | "all">("all");
@@ -297,7 +310,10 @@ export function CrmWorkspace({
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => setSubTab("customers")}
+            onClick={() => {
+              setSubTab("customers");
+              onSubTabChange?.("customers");
+            }}
             className={`cc-btn h-9 ${subTab === "customers" ? "cc-btn--tone tone-ai" : ""}`}
           >
             <Users className="h-3.5 w-3.5" />
@@ -305,7 +321,10 @@ export function CrmWorkspace({
           </button>
           <button
             type="button"
-            onClick={() => setSubTab("tickets")}
+            onClick={() => {
+              setSubTab("tickets");
+              onSubTabChange?.("tickets");
+            }}
             className={`cc-btn h-9 ${subTab === "tickets" ? "cc-btn--tone tone-live" : ""}`}
           >
             <ClipboardList className="h-3.5 w-3.5" />
@@ -779,6 +798,12 @@ export function CrmWorkspace({
                       <span className={`cc-chip ${PRIORITY_META[t.priority].tone} text-[10.5px]`}>
                         {PRIORITY_META[t.priority].label}
                       </span>
+                      {t.source === "ai_callback" && (
+                        <span className="cc-chip tone-danger text-[10.5px]">
+                          <PhoneCall className="h-3 w-3" />
+                          <span>ลูกค้าขอให้โทรกลับ</span>
+                        </span>
+                      )}
                       {t.source === "ai_auto" && (
                         <span className="cc-chip tone-ai text-[10.5px]">
                           <Bot className="h-3 w-3" />
@@ -800,7 +825,10 @@ export function CrmWorkspace({
 
                   <h4 className="mt-2 text-sm font-semibold cc-text">{t.subject}</h4>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs cc-muted">
-                    {t.phone && <span className="font-mono">{formatPhone(t.phone)}</span>}
+                    {(t.callbackPhone || t.phone) && <span className="font-mono">{formatPhone(t.callbackPhone || t.phone)}</span>}
+                    {t.callerPhone && (t.callbackPhone || t.phone) && t.callerPhone !== (t.callbackPhone || t.phone) && (
+                      <span>(โทรเข้าจาก {formatPhone(t.callerPhone)})</span>
+                    )}
                     {t.customerName && <span>• {t.customerName}</span>}
                     {t.company && <span>({t.company})</span>}
                   </div>
@@ -809,6 +837,42 @@ export function CrmWorkspace({
                     <p className="mt-2 whitespace-pre-line rounded-xl border border-[var(--cc-border)] bg-[var(--cc-panel)] p-2.5 text-xs leading-relaxed cc-muted">
                       {t.description}
                     </p>
+                  )}
+
+                  {(t.acknowledgedBy || t.closedBy) && (
+                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] cc-dim">
+                      {t.acknowledgedBy && t.acknowledgedAt && (
+                        <span>รับทราบโดย {t.acknowledgedBy} • {formatDateTime(t.acknowledgedAt)}</span>
+                      )}
+                      {t.closedBy && t.closedAt && (
+                        <span>ปิดเคสโดย {t.closedBy} • {formatDateTime(t.closedAt)}</span>
+                      )}
+                    </div>
+                  )}
+
+                  {!readOnly && t.status !== "closed" && (onAcknowledgeTicket || onCloseTicket) && (
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      {t.status === "open" && !t.acknowledgedAt && onAcknowledgeTicket && (
+                        <button
+                          type="button"
+                          onClick={() => onAcknowledgeTicket(t.id)}
+                          className="cc-btn cc-btn--tone tone-held h-8 px-3"
+                        >
+                          <UserCheck className="h-3.5 w-3.5" />
+                          <span>รับทราบแล้ว</span>
+                        </button>
+                      )}
+                      {onCloseTicket && (
+                        <button
+                          type="button"
+                          onClick={() => onCloseTicket(t.id)}
+                          className="cc-btn cc-btn--solid tone-in h-8 px-3"
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          <span>ปิด Ticket (รับรู้แล้ว)</span>
+                        </button>
+                      )}
+                    </div>
                   )}
 
                   <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--cc-border)] pt-3">

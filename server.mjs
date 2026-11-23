@@ -8,6 +8,7 @@ import {
   buildSessionSetCookie,
   createSessionToken,
   sanitizeStateForViewer,
+  sanitizeTicketForViewer,
   verifyGoogleIdToken,
   verifySessionFromCookieHeader,
 } from "./lib/auth.mjs";
@@ -366,6 +367,20 @@ app.prepare().then(async () => {
 
   sip.on("state", broadcastState);
 
+  sip.on("callback_ticket", (ticket) => {
+    const publicTrunk = sip.publicState().trunk?.user || "";
+    const adminPayload = JSON.stringify({ type: "callback_ticket", ticket });
+    const viewerPayload = JSON.stringify({
+      type: "callback_ticket",
+      ticket: sanitizeTicketForViewer(ticket, publicTrunk),
+    });
+    for (const client of wss.clients) {
+      if (client.readyState === 1) {
+        client.send(client.isAdmin ? adminPayload : viewerPayload);
+      }
+    }
+  });
+
   sip.on("meter", (levels) => {
     if (wss.clients.size === 0) return;
     const payload = JSON.stringify({ type: "meter", levels, ts: Date.now() });
@@ -410,6 +425,7 @@ app.prepare().then(async () => {
     const session = verifySessionFromCookieHeader(req.headers.cookie);
     ws.isAdmin = Boolean(session?.isAdmin);
     ws.userEmail = session?.email || null;
+    ws.userName = session?.name || session?.email || "ผู้ดูแลระบบ";
     ws.isAlive = true;
     ws.on("pong", () => {
       ws.isAlive = true;
@@ -522,7 +538,13 @@ app.prepare().then(async () => {
             sip.crmCreateTicket(msg.ticket || {});
             break;
           case "crmUpdateTicket":
-            sip.crmUpdateTicket(String(msg.id || ""), msg.patch || {});
+            sip.crmUpdateTicket(String(msg.id || ""), msg.patch || {}, ws.userName);
+            break;
+          case "crmAcknowledgeTicket":
+            sip.crmAcknowledgeTicket(String(msg.id || ""), ws.userName);
+            break;
+          case "crmCloseTicket":
+            sip.crmCloseTicket(String(msg.id || ""), ws.userName, String(msg.note || ""));
             break;
           case "crmDeleteTicket":
             sip.crmDeleteTicket(String(msg.id || ""));

@@ -1219,9 +1219,53 @@ def general_knowledge(question):
     return [card], f"ความรู้ทั่วไปจาก DeepSeek ไม่ใช่ข้อมูลของโปรแกรม ต้องบอกผู้ฟังสั้นๆ ว่าเป็นความรู้ทั่วไป: {text}"
 
 
-MCP_CACHE_TTL_S = 60.0
-MCP_CACHE_MAX = 128
-MCP_CACHEABLE_TOOLS = frozenset({"quick_answer", "lookup_menu", "batch_read", "read_note", "search_brain"})
+MCP_CACHE_TTL_S = 300.0
+MCP_CACHE_MAX = 256
+MCP_CACHEABLE_TOOLS = frozenset({"quick_answer", "batch_ask", "lookup_menu", "batch_read", "read_note", "search_brain"})
+_BOOTSTRAP_LOCK = threading.Lock()
+_BOOTSTRAP_CACHE: dict[str, dict] = {}
+BRAIN_AUDIENCE_TOOLS = frozenset({
+    "quick_answer", "batch_ask", "lookup_menu", "batch_read",
+    "ask_brain", "search_brain", "traverse_brain", "list_notes", "find_media",
+})
+
+
+def _is_brain_abstain(text: str) -> bool:
+    s = str(text or "")
+    return "🛑" in s or "abstain" in s.lower()
+
+
+def load_bootstrap_pack(audience: str = "user", force: bool = False) -> str:
+    """โหลด BC Brain bootstrap-pack ผ่าน ETag ลง RAM เพื่อตอบเมนูยอดฮิตและราคา 4 รุ่นได้ทันทีใน 0 MCP call (fail-soft)."""
+    url = getattr(C, "BRAIN_BOOTSTRAP_URL", "")
+    ttl = float(getattr(C, "BRAIN_BOOTSTRAP_TTL_S", 1800))
+    if not url:
+        return ""
+    now_m = time.monotonic()
+    with _BOOTSTRAP_LOCK:
+        entry = _BOOTSTRAP_CACHE.get(audience)
+        if entry and not force and now_m - entry["ts"] < ttl:
+            return entry["text"]
+        prev_etag = entry.get("etag") if entry else None
+        prev_text = entry.get("text", "") if entry else ""
+    try:
+        headers = {"Accept": "text/markdown, text/plain"}
+        if prev_etag:
+            headers["If-None-Match"] = prev_etag
+        r = httpx.get(f"{url}?audience={audience}", headers=headers, timeout=5.0)
+        if r.status_code == 304 and prev_text:
+            with _BOOTSTRAP_LOCK:
+                _BOOTSTRAP_CACHE[audience] = {"ts": now_m, "etag": prev_etag, "text": prev_text}
+            return prev_text
+        if r.status_code == 200 and r.text:
+            text = r.text.strip()[:14000]
+            etag = r.headers.get("etag") or prev_etag
+            with _BOOTSTRAP_LOCK:
+                _BOOTSTRAP_CACHE[audience] = {"ts": now_m, "etag": etag, "text": text}
+            return text
+    except Exception as e:
+        log.warning("BC Brain bootstrap-pack(%s) fetch skipped: %s", audience, e)
+    return prev_text
 
 
 class MCPClient:
@@ -1443,7 +1487,20 @@ def leave_message(name="", company="", phone="", message="", heard="", call=""):
         notify_owner()
     text = " ".join(f"{label} {lead[k]}" for k, label in (("name", "ชื่อ"), ("company", "บริษัท"), ("phone", "เบอร์"),
                                                          ("message", "เรื่อง")) if lead[k])
-    card = {"source": "message", "title": "บันทึกข้อมูลติดต่อกลับแล้ว", "snippet": text[:300], "url": None}
+    card = {
+        "source": "message",
+        "title": "บันทึกข้อมูลติดต่อกลับแล้ว",
+        "snippet": text[:300],
+        "url": None,
+        "lead": {
+            "name": lead["name"],
+            "company": lead["company"],
+            "phone": lead["phone"],
+            "callerPhone": caller_phone,
+            "message": lead["message"],
+            "at": at,
+        },
+    }
     return [card], f"บันทึกข้อความฝากติดต่อกลับแล้ว {text} จะประสานให้ติดต่อกลับ ยังไม่ได้นัดเวลาติดต่อกลับ"
 
 
@@ -1484,8 +1541,10 @@ SQL_ASK = re.compile(r"(?i)(?<![a-z])(?:sql|quer(?:y|ies)|tables?|database|schem
 
 
 def brain_audience(public, words):
-    """The brain zone a prefetch search reads: the owner's line as before (every zone), a customer's by what was asked."""
-    return {"audience": "all" if SQL_ASK.search(words) else "user"} if public else {}
+    """The brain zone a prefetch search reads: caller lines ALWAYS stay strictly in 'user' zone (no SQL/code leaks)."""
+    if public:
+        return {"audience": "user"}
+    return {"audience": "dev" if SQL_ASK.search(words) else "user"}
 
 
 def brain_hits(server, text):
@@ -1563,9 +1622,11 @@ MENU_CODE_ASK = re.compile(r"(?:\b[1-9]\d{3}\b|\b\d+\.\d+(?:\.\d+)?\b|รหั�
 def mcp_tool(server, client, name):
     def run(**args):
         text = client.call(name, args)
+        if _is_brain_abstain(text):
+            return [], f"{text}\n(ระบบ: สมองคืน Abstain ไม่มีข้อมูลยืนยัน ห้ามเดาหรือแต่งคำตอบเอง ให้แจ้งตรงๆ ว่าไม่มีข้อมูลยืนยันในระบบ)"
         if name == "search_brain":
             return brain_hits(server, text)
-        if name in ("read_note", "quick_answer", "batch_read"):
+        if name in ("read_note", "quick_answer", "batch_read", "batch_ask"):
             first_heading = next((ln.lstrip("# ").strip() for ln in text.splitlines() if ln.strip().startswith("#")), "")
             slug_m = re.search(r"(?m)^slug:\s*([\w.-]+)", text)
             body = NOTE_META.sub("", text).strip()
@@ -1619,6 +1680,11 @@ def load_mcp_tools():
             WORKER[t["name"]] = server
             STATUS[t["name"]] = f"กำลังค้นคลังความรู้ {server}"
         log.info("MCP %s: %s", server, [t["name"] for t in tools])
+    loader = globals().get("load_bootstrap_pack")
+    if callable(loader) and getattr(C, "BRAIN_BOOTSTRAP_URL", ""):
+        pack = loader("user", force=True)
+        if pack:
+            log.info("BC Brain bootstrap-pack (user): %d chars", len(pack))
 
 
 def run_tool(name, args, tools):
@@ -2393,7 +2459,16 @@ def load_workers():
     # the public line (callcenter.bcsmethai.com): the BC brain's tools and nothing else this PC has (ลุงจืด 2026-11-04);
     # its own prompt, so no owner-line setup (desktop, Google) is ever in a customer's call
     # ลุงจืด 2026-11-08: the calculator and general knowledge too; still nothing of this PC (docs, Google)
-    PUBLIC["tools"] = {n: f for n, f in TOOLS.items() if WORKER.get(n) in ("bcbrain", "calc", "deepseek")}
+    def _pin_user_audience(name, fn):
+        if WORKER.get(name) != "bcbrain" or name not in BRAIN_AUDIENCE_TOOLS:
+            return fn
+        return lambda **kw: fn(**{**kw, "audience": "user"})
+
+    PUBLIC["tools"] = {
+        n: _pin_user_audience(n, f)
+        for n, f in TOOLS.items()
+        if WORKER.get(n) in ("bcbrain", "calc", "deepseek")
+    }
     PUBLIC["specs"] = [s for s in TOOL_SPECS if s["function"]["name"] in PUBLIC["tools"]] + [LEAD_SPEC]
     pub = sorted({names[WORKER[n]] for n in PUBLIC["tools"]})
     # customers only: the owner line has nobody to call back. Added after `pub`, and told by LEAD_SPEC alone: a line
@@ -2458,6 +2533,8 @@ def dispatch(calls, said, turn, tools):
             for card in results[k][0]:
                 turn["media"] = turn.get("media", 0) + len(card.get("media") or ())  # the prefetch asks find_media when none came
                 yield AdditionalOutputs({"kind": "info", "job": ids[k], **card})  # job: the page shows each worker's finds
+                if card.get("source") == "message" and isinstance(card.get("lead"), dict):
+                    yield AdditionalOutputs({"kind": "callback_request", **card["lead"]})
     finally:  # a barge-in closes this generator: the with-block waited for every worker (MCP up to 20 s)
         pool.shutdown(wait=False, cancel_futures=True)
     return [text for _, text in results]
@@ -2678,23 +2755,33 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 qs = [stay_topic] if stay_topic else swarm_queries(wording[0], heard, history)
             query = " | ".join(qs)
             sql_ctx = " SQL" if history and "```sql" in history[-1]["content"].lower() else ""
-            zone = brain_audience(public, f"{heard} {query}{sql_ctx}")  # a follow-up on a SQL answer stays in every zone
-            clean_q0 = LONG_NUMBER.sub("", qs[0]).strip() or qs[0].strip()
-            if "quick_answer" in tools and clean_q0:
-                # Fastest single-round-trip brain path (~52ms): quick_answer (+ parallel alt-ear / lookup_menu)
-                calls = [("quick_answer", {
-                    "question": clean_q0,
-                    **zone,
-                    "max_chars": 2200 if phone_mode else 2600,
-                    "include_media": not phone_mode,
-                })]
-                if phone_mode and len(qs) > 1:
-                    clean_q1 = LONG_NUMBER.sub("", qs[1]).strip() or qs[1].strip()
-                    if clean_q1 and clean_q1 != clean_q0:
+            zone = brain_audience(public, f"{heard} {query}{sql_ctx}")  # customer lines stay in "user" zone; owner dev stays "dev"
+            unique_qs = list(dict.fromkeys((LONG_NUMBER.sub("", q).strip() or q.strip()) for q in qs if q and q.strip()))[:5]
+            clean_q0 = unique_qs[0] if unique_qs else ""
+            if "quick_answer" in tools and unique_qs:
+                if phone_mode and len(unique_qs) >= 2 and "batch_ask" in tools:
+                    # Single round-trip batch_ask(ultra) for multi-interpretation / multi-intent phone turns
+                    calls = [("batch_ask", {
+                        "questions": unique_qs,
+                        **zone,
+                        "mode": "ultra",
+                        "include_media": False,
+                    })]
+                else:
+                    # Single round-trip quick_answer: ultra (~500-700 chars) on phone, normal (~2000 chars) on desktop
+                    calls = [("quick_answer", {
+                        "question": clean_q0,
+                        **zone,
+                        "mode": "ultra" if phone_mode else "normal",
+                        "max_chars": 700 if phone_mode else 2000,
+                        "include_media": not phone_mode,
+                    })]
+                    if phone_mode and len(unique_qs) > 1:
                         calls.append(("quick_answer", {
-                            "question": clean_q1,
+                            "question": unique_qs[1],
                             **zone,
-                            "max_chars": 1600,
+                            "mode": "ultra",
+                            "max_chars": 700,
                             "include_media": False,
                         }))
                 if "lookup_menu" in tools and MENU_CODE_ASK.search(f"{heard} {query} {' '.join(alt_heard)}"):
@@ -2703,13 +2790,15 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                     calls.append(("search_docs", {"query": qs[0]}))
                 texts = yield from dispatch(calls, said, turn, tools)
                 qa_text = texts[0] if texts else ""
-                read = bool(qa_text and "ไม่พบ" not in qa_text[:120] and "no matching" not in qa_text[:120].lower())
+                abstained = any(_is_brain_abstain(t) for t in texts)
+                read = bool(qa_text and not abstained and "ไม่พบ" not in qa_text[:120] and "no matching" not in qa_text[:120].lower())
                 if read and not phone_mode:
                     slug_m = re.search(r"(?m)^slug:\s*([\w.-]+)", qa_text)
                     if slug_m:
                         turn["note"] = slug_m.group(1)
                     yield AdditionalOutputs({"kind": "panel", "text": note_panel(qa_text, NOTE_META.sub("", qa_text).strip()[:2000])})
             else:
+                abstained = False
                 # Legacy fallback when bcbrain has not exposed quick_answer
                 calls = [*(("search_brain", {"query": q2, **zone}) for q in qs if "search_brain" in tools and (q2 := LONG_NUMBER.sub("", q).strip())),
                          *(("search_docs", {"query": qs[0]}) for _ in (1,) if "search_docs" in tools and not phone_mode)]
@@ -2754,10 +2843,12 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                  "ห้ามครอบผังย่อหน้าด้วย ``` และห้ามใส่ตัวเลขสองหลักขึ้นไปหรือวันที่สมมติเองโดยไม่ผ่าน calc ถ้าไม่ได้เรียก calc ให้ใช้รหัสติดตัวอักษรเช่น WH01, A01, SKU01)")
             )
             reuse_hint = (
-                "ผลค้นจาก quick_answer ด้านบนมีข้อมูลพร้อมแล้ว ให้ใช้ตอบทันทีได้เลย ห้ามเรียก quick_answer ซ้ำด้วยคำถามเดิม "
-                "เรียก lookup_menu หรือ batch_read เพิ่มเฉพาะเมื่อข้อมูลด้านบนยังขาดรหัสเมนูหรือรายละเอียดสำคัญจริงๆ เท่านั้น "
-                if read else
-                "ถ้าไม่มีส่วนไหนตรง ให้สั่งลูกทีมค้นสมองในรอบเดียวก่อน (quick_answer / lookup_menu / batch_read หรือ web_search) "
+                "สมองคืนค่า Abstain (ไม่มีข้อมูลยืนยันในระบบ) ห้ามเดาหรือแต่งคำตอบเองเด็ดขาด ให้แจ้งลูกค้าตรงๆ ว่าไม่มีข้อมูลยืนยันในระบบ และเสนอให้พนักงานโทรกลับช่วยตรวจสอบแทน "
+                if abstained else
+                ("ผลค้นจาก quick_answer/batch_ask ด้านบนมีข้อมูลพร้อมแล้ว ให้ใช้ตอบทันทีได้เลย ห้ามเรียก quick_answer ซ้ำด้วยคำถามเดิม "
+                 "เรียก lookup_menu หรือ batch_read เพิ่มเฉพาะเมื่อข้อมูลด้านบนยังขาดรหัสเมนูหรือรายละเอียดสำคัญจริงๆ เท่านั้น "
+                 if read else
+                 "ถ้าไม่มีส่วนไหนตรง ให้สั่งลูกทีมค้นสมองในรอบเดียวก่อน (quick_answer / batch_ask / lookup_menu / batch_read หรือ web_search) ")
             )
             now += (f"\n(ระบบ: คำพูดนี้น่าจะหมายถึง {query} ลูกทีม Swarm ค้นสมองให้แล้ว {found} "
                     "ใช้เฉพาะข้อมูลที่มีอยู่จริงในผลค้นสมองนี้เท่านั้น ห้ามเดาหรือแต่งเติมเองเด็ดขาด เวลาพูดให้คุยเป็นกันเองเหมือนเพื่อนโดยไม่ต้องพูดคำว่า จากคลังความรู้บีซี "
@@ -2766,9 +2857,16 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                     "ถ้ายังไม่เจอและเป็นความรู้ทั่วไปที่ไม่ใช่เรื่อง BC ให้ถาม general_knowledge ถ้าเป็นเรื่อง BC จึงบอกสั้นๆ ว่ายังไม่มีข้อมูล "
                     "แล้วถามว่าหมายถึงเรื่องไหน ถ้าขอตัวอย่างหรือให้คิดเลข ให้ตั้งตัวเลขสมมติตามสูตรในผลค้นแล้วคิดด้วย calc ห้ามตอบจากความจำ "
                     + sample_hint)
-        messages = [{"role": "system", "content": prompt + (C.PHONE_PROMPT if on_phone() else "")}, *history,
+        bp_aud = "user" if public else ("dev" if SQL_ASK.search(f"{heard} {now}") else "user")
+        bootstrap_pack = load_bootstrap_pack(bp_aud) if tools and any(n in tools for n in BRAIN_AUDIENCE_TOOLS) else ""
+        sys_msg = prompt + (C.PHONE_PROMPT if on_phone() else "") + (
+            f"\n\n# ข้อมูลอ้างอิงพื้นฐาน BC Brain ({bp_aud})\n{bootstrap_pack}" if bootstrap_pack else ""
+        )
+        messages = [{"role": "system", "content": sys_msg}, *history,
                     {"role": "user", "content": now.strip()}]
         known = grounding.numbers(" ".join(m["content"] for m in messages[1:]))  # every number a source gave this turn
+        if bootstrap_pack:
+            known |= grounding.numbers(bootstrap_pack)
         answered = True
         if ask := turn.get("ask"):
             log.info("BOT  (topic ask): %s", masked(ask))
@@ -2781,7 +2879,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             # what the judge may accept: this turn's question, prefetch and tool results, earlier turns, and what
             # load_workers said is true of this setup (Google not connected, the team); fixed within a round so
             # the judge's calls share DeepSeek's cached prefix
-            sources = "\n".join([*(m["content"] for m in messages[1:]), setup_facts(prompt), OWN_WORDS])
+            sources = "\n".join([setup_facts(prompt), OWN_WORDS, bootstrap_pack, *(m["content"] for m in messages[1:])])
             # force calc only when the turn asks for/needs math; on phone calls (no screen table), only force on explicit math sums (~1.5s faster)
             prev_kb = any(m["role"] == "assistant" and C.SCREEN_MARK in m["content"] for m in history[-2:])
             phone_mode_turn = on_phone()

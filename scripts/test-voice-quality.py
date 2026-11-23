@@ -270,8 +270,8 @@ def test_legacy_mcp_tools_hidden_from_llm_when_fast_tools_present():
         scope["load_mcp_tools"]()
         return [s["function"]["name"] for s in specs], set(tools)
 
-    spec_names, tool_names = run_load(["quick_answer", "lookup_menu", "batch_read", "search_brain", "read_note", "ask_brain"])
-    assert set(spec_names) == {"quick_answer", "lookup_menu", "batch_read"}, f"legacy tools must be hidden from LLM specs: {spec_names}"
+    spec_names, tool_names = run_load(["quick_answer", "batch_ask", "lookup_menu", "batch_read", "search_brain", "read_note", "ask_brain"])
+    assert set(spec_names) == {"quick_answer", "batch_ask", "lookup_menu", "batch_read"}, f"legacy tools must be hidden from LLM specs: {spec_names}"
     assert "read_note" in tool_names and "search_brain" in tool_names, "legacy tools must stay in TOOLS dict for internal fallback"
 
     legacy_specs, _ = run_load(["search_brain", "read_note"])
@@ -440,13 +440,39 @@ def test_leave_message_requires_topic_when_no_continuity():
         _, res_bad_name = leave_msg("และ", "", "020000001", "ปัญหาสต็อกติดลบ", heard="โทรกลับเบอร์ 020000001 ได้เลย", call="c1")
         assert "ต้องมีชื่อลูกค้าจริง" in res_bad_name, f"unexpected: {res_bad_name}"
 
-        _, res_ok = leave_msg("สมชาย", "", "020000001", "ปัญหาสต็อกติดลบ", heard="โทรกลับเบอร์ 020000001 ได้เลย", call="c1")
+        cards_ok, res_ok = leave_msg("สมชาย", "", "020000001", "ปัญหาสต็อกติดลบ", heard="โทรกลับเบอร์ 020000001 ได้เลย", call="c1")
         assert "บันทึก" in res_ok or "สมชาย" in res_ok, f"unexpected ok result: {res_ok}"
+        assert cards_ok and isinstance(cards_ok[0].get("lead"), dict), "leave_message must return structured lead dict"
+        lead_obj = cards_ok[0]["lead"]
+        for k in ("name", "company", "phone", "callerPhone", "message", "at"):
+            assert k in lead_obj, f"missing lead field {k}"
+        assert lead_obj["name"] == "สมชาย" and lead_obj["phone"] == "020000001" and lead_obj["callerPhone"] == "020000001"
+        assert lead_obj["message"] == "ปัญหาสต็อกติดลบ"
+
         _, res_cont = leave_msg("สมชาย", "", "020000002", "", heard="โทรกลับเบอร์ 020000002 ได้เลย", call="c2")
         assert "ออกใบกำกับภาษีไม่ได้" in res_cont, f"unexpected continuity result: {res_cont}"
 
         rows = [json.loads(line) for line in Path(leads_path).read_text(encoding="utf-8").splitlines() if line.strip()]
         assert len(rows) == 2 and rows[0]["message"] == "ปัญหาสต็อกติดลบ" and rows[1]["message"] == "ออกใบกำกับภาษีไม่ได้"
+        assert '"callback_request"' in SOURCE.read_text(encoding="utf-8")
+
+
+def test_bcbrain_v230_zone_abstain_and_ultra_mode():
+    scope = load_symbols({
+        "SQL_ASK", "brain_audience", "_is_brain_abstain",
+        "MCP_CACHE_TTL_S", "MCP_CACHEABLE_TOOLS", "BRAIN_AUDIENCE_TOOLS",
+    })
+    assert scope["brain_audience"](True, "ขอดูตาราง SQL ic_trans") == {"audience": "user"}
+    assert scope["brain_audience"](False, "ขอดูตาราง SQL ic_trans") == {"audience": "dev"}
+    assert scope["brain_audience"](False, "ออกใบกำกับภาษีเข้าเมนูไหน") == {"audience": "user"}
+    assert scope["_is_brain_abstain"]("🛑 Abstain: ไม่มีข้อมูลยืนยันในระบบ") is True
+    assert scope["_is_brain_abstain"]("เมนู 4013 ขายสินค้า/บริการ") is False
+    assert "batch_ask" in scope["MCP_CACHEABLE_TOOLS"]
+    assert scope["MCP_CACHE_TTL_S"] >= 300
+    assert C.BRAIN_BOOTSTRAP_URL.endswith("/api/bootstrap-pack")
+    assert C.BRAIN_BOOTSTRAP_TTL_S >= 1800
+    src = SOURCE.read_text(encoding="utf-8")
+    assert '"ultra"' in src and "_pin_user_audience" in src and "load_bootstrap_pack" in src
 
 
 TESTS = [
@@ -460,6 +486,7 @@ TESTS = [
     test_incomplete_tail_and_phone_fallback_queries,
     test_first_call_ai_intro_name_capture_and_callback_confirm,
     test_leave_message_requires_topic_when_no_continuity,
+    test_bcbrain_v230_zone_abstain_and_ultra_mode,
 ]
 
 

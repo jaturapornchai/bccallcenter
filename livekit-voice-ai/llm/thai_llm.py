@@ -3,7 +3,44 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
+
+import httpx
 from livekit.plugins import openai as lk_openai
+
+_BOOTSTRAP_LOCK = threading.Lock()
+_BOOTSTRAP_CACHE: dict[str, Any] = {"ts": 0.0, "etag": None, "text": ""} if False else {"ts": 0.0, "etag": None, "text": ""}
+
+
+def _load_bootstrap_pack_cached(audience: str = "user") -> str:
+    """โหลด /api/bootstrap-pack ผ่าน ETag (รีเฟรชทุก 30 นาที, fail-soft) เพื่อตอบเมนูยอดฮิต/ราคาใน 0 MCP call."""
+    url = os.getenv("BC_BRAIN_BOOTSTRAP_URL", "https://brain.bcsmethai.com/api/bootstrap-pack")
+    now_m = time.monotonic()
+    with _BOOTSTRAP_LOCK:
+        if _BOOTSTRAP_CACHE["text"] and now_m - float(_BOOTSTRAP_CACHE["ts"]) < 1800:
+            return str(_BOOTSTRAP_CACHE["text"])
+        prev_etag = _BOOTSTRAP_CACHE["etag"]
+        prev_text = str(_BOOTSTRAP_CACHE["text"])
+    try:
+        headers = {"Accept": "text/markdown, text/plain"}
+        if prev_etag:
+            headers["If-None-Match"] = str(prev_etag)
+        r = httpx.get(f"{url}?audience={audience}", headers=headers, timeout=4.0)
+        if r.status_code == 304 and prev_text:
+            with _BOOTSTRAP_LOCK:
+                _BOOTSTRAP_CACHE["ts"] = now_m
+            return prev_text
+        if r.status_code == 200 and r.text:
+            text = r.text.strip()[:12000]
+            with _BOOTSTRAP_LOCK:
+                _BOOTSTRAP_CACHE["ts"] = now_m
+                _BOOTSTRAP_CACHE["etag"] = r.headers.get("etag") or prev_etag
+                _BOOTSTRAP_CACHE["text"] = text
+            return text
+    except Exception:
+        pass
+    return prev_text
 
 
 def build_callcenter_system_prompt(
@@ -24,6 +61,8 @@ def build_callcenter_system_prompt(
     lang_block = (
         f"- ภาษาเริ่มต้นของสายนี้: `{preferred_language or 'th'}` (สายใหม่ค่าเริ่มต้นคือภาษาไทย และแจ้งลูกค้าว่าคุยได้ทุกภาษา) — ให้ตอบและแปลคำตอบจากฐานความรู้ภาษาไทยเป็นภาษา `{preferred_language or 'th'}` ตลอดการสนทนา"
     )
+    bootstrap_pack = _load_bootstrap_pack_cached("user")
+    bootstrap_block = f"\n\n# ข้อมูลอ้างอิงพื้นฐาน BC Ai Account (โซน user)\n{bootstrap_pack}" if bootstrap_pack else ""
 
     return f"""คุณคือ "เจาร์วิส" (J.A.R.V.I.S) พนักงาน Call Center มืออาชีพประจำ "ระบบ BC Call Center" ที่รับสายโทรศัพท์จริงจากลูกค้า
 
@@ -38,7 +77,10 @@ def build_callcenter_system_prompt(
 2. **ห้ามใช้ Markdown หรือตารางเด็ดขาด**: เพราะคำตอบจะถูกอ่านออกเสียงทางโทรศัพท์ ห้ามพิมพ์ `##`, `**`, `|---|`, หรือรายการข้อย่อยยาวๆ ให้พูดสรุปใจความสำคัญที่สุดเป็นภาษาพูดสุภาพแทน
 3. **รับฟังและใส่ใจอารมณ์ (Empathy First)**: หากลูกค้ามีน้ำเสียงกังวล รีบด่วน หรือไม่พอใจ ให้แสดงความเข้าใจและขออภัยอย่างจริงใจก่อนเสมอ
 4. **ถามทีละคำถาม**: ห้ามถามลูกค้า 2–3 คำถามพร้อมกันในประโยคเดียว ให้ถามทีละประเด็นชัดเจน
-5. **ไม่เดาข้อมูล**: หากลูกค้าถามรายละเอียดเมนู ราคา หรือวิธีใช้งานโปรแกรมบัญชี BC Ai Account ให้เรียกใช้ tool `search_knowledge_base` ก่อนตอบเสมอ (แปลคำค้นเป็นภาษาไทยก่อนค้นหากลูกค้าถามเป็นภาษาอื่น)
+5. **ไม่เดาข้อมูล & กฎ Abstain / โซน User**:
+   - ใช้โซน `user` เสมอ: อธิบายภาษาไทยเข้าใจง่าย ระบุเส้นทางเมนู + รหัสเมนู 4 หลัก (`1001`–`9070`) **ห้ามพูดชื่อตาราง SQL โค้ด หรือชื่อไฟล์ภายในให้ลูกค้าฟัง**
+   - หากข้อมูลพื้นฐานด้านล่างยังไม่พอ ให้เรียก `lookup_menu` (ถ้าระบุรหัส/ชื่อเมนู), `batch_ask_knowledge` (ถ้ามีหลายประเด็นในประโยคเดียว), หรือ `search_knowledge_base` (ตอบแบบ `quick_answer ultra`) แปลคำค้นเป็นภาษาไทยก่อนค้นหากลูกค้าถามภาษาอื่น
+   - **Strict Abstain**: ถ้าเครื่องมือคืน `Abstain` หรือไม่มีข้อมูลยืนยันในระบบ ห้ามเดาหรือแต่งคำตอบเอง ให้แจ้งลูกค้าตรงๆ ว่าไม่มีข้อมูลยืนยันในระบบ และเสนอฝากเรื่องให้พนักงานโทรกลับ
 6. **ส่งต่อเจ้าหน้าที่อย่างราบรื่น**:
    - หากลูกค้าขอคุยกับเจ้าหน้าที่คนจริง หรือเป็นเคสซับซ้อน/เร่งด่วน ให้เรียก `transfer_to_human` (แผนก: `sales`, `support`, หรือ `operator`)
    - หากไม่สะดวกรอสาย ให้เก็บ ชื่อ, ชื่อร้าน/บริษัท, เบอร์ติดต่อกลับ และเรื่องที่ต้องการ แล้วเรียก `create_callback_ticket`
@@ -48,7 +90,7 @@ def build_callcenter_system_prompt(
 - เบอร์ผู้โทร: {caller_phone or "ไม่ระบุเบอร์"}
 - สถานะลูกค้า: {"ลูกค้าใหม่" if is_new_caller else "ลูกค้าเดิม"}
 - ข้อจำกัดระบบ: ระบบนี้รับสายเข้าอย่างเดียว (Inbound-Only) ไม่มีการโทรออก
-{history_block}
+{history_block}{bootstrap_block}
 """.strip()
 
 

@@ -133,6 +133,49 @@ export class AudioBridge {
     this.nextPlayTime += buf.duration;
   }
 
+  unlockOutputOnly(): boolean {
+    try {
+      if (!this.ctx) {
+        const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        this.ctx = new AudioCtx();
+      }
+      if (this.ctx.state === "suspended") {
+        void this.ctx.resume();
+      }
+      return this.ctx.state === "running";
+    } catch {
+      return false;
+    }
+  }
+
+  playTicketAlertChime(): boolean {
+    try {
+      const unlocked = this.unlockOutputOnly();
+      if (!this.ctx || (!unlocked && this.ctx.state !== "running")) return false;
+      const now = this.ctx.currentTime;
+      const notes = [880, 1174.66, 1318.51];
+      notes.forEach((freq, idx) => {
+        if (!this.ctx) return;
+        const start = now + idx * 0.14;
+        const gain = this.ctx.createGain();
+        gain.gain.setValueAtTime(0.001, start);
+        gain.gain.linearRampToValueAtTime(0.14, start + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, start + 0.2);
+        gain.connect(this.ctx.destination);
+
+        const osc = this.ctx.createOscillator();
+        osc.type = "triangle";
+        osc.frequency.setValueAtTime(freq, start);
+        osc.connect(gain);
+        osc.start(start);
+        osc.stop(start + 0.22);
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   playDtmf(digit: string) {
     const freqs = DTMF_FREQS[digit];
     if (!freqs) return;

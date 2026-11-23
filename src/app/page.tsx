@@ -5,6 +5,8 @@ import type { ReactNode } from "react";
 import {
   Activity,
   BarChart3,
+  BellOff,
+  BellRing,
   Bot,
   Briefcase,
   ChevronRight,
@@ -47,10 +49,12 @@ import { AnalyticsWorkspace } from "@/components/AnalyticsWorkspace";
 import { AuthControls } from "@/components/AuthControls";
 import type { AuthState } from "@/components/AuthControls";
 import { CallQaDrawer, formatScore, scoreTone, sentimentMeta } from "@/components/CallQaDrawer";
+import { CallbackAlertPanel, CallbackTicketList } from "@/components/CallbackAlertPanel";
 import { CrmWorkspace } from "@/components/CrmWorkspace";
 import { AudioBridge } from "@/lib/audio-bridge";
+import { sendBrowserTicketNotification, speakTicketAlert, stopTicketSpeech } from "@/lib/voice-alert";
 import { languageShortLabel } from "@/types/sip";
-import type { CallHistoryEntry, CallLogEntry, CallerRecord, ConsoleState, CrmState, SipLine } from "@/types/sip";
+import type { CallHistoryEntry, CallLogEntry, CallerRecord, ConsoleState, CrmState, CrmTicket, SipLine } from "@/types/sip";
 
 const INITIAL_STATE: ConsoleState = {
   trunk: {
@@ -92,13 +96,16 @@ const INITIAL_STATE: ConsoleState = {
   },
 };
 
-type RightTab = "qa" | "callers" | "history";
+type RightTab = "callbacks" | "qa" | "callers" | "history";
 type MainView = "console" | "crm" | "analytics";
 
 export default function ConsolePage() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [activeView, setActiveView] = useState<MainView>("console");
   const [crmFocusPhone, setCrmFocusPhone] = useState<string | null>(null);
+  const [crmSubTab, setCrmSubTab] = useState<"customers" | "tickets">("customers");
+  const [voiceAlertEnabled, setVoiceAlertEnabled] = useState(true);
+  const [audioBlocked, setAudioBlocked] = useState(false);
   const [state, setState] = useState<ConsoleState>(INITIAL_STATE);
   const [wsConnected, setWsConnected] = useState(false);
   const [audioReady, setAudioReady] = useState(false);
@@ -126,6 +133,38 @@ export default function ConsolePage() {
   const audioRef = useRef<AudioBridge | null>(null);
   const isDark = theme === "dark";
   const isReadOnly = !auth.isAdmin || wsReadOnly;
+  const voiceAlertEnabledRef = useRef(voiceAlertEnabled);
+  const isReadOnlyRef = useRef(isReadOnly);
+  const pendingSpokenTicketRef = useRef<CrmTicket | null>(null);
+  const repeatCountsRef = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    voiceAlertEnabledRef.current = voiceAlertEnabled;
+  }, [voiceAlertEnabled]);
+
+  useEffect(() => {
+    isReadOnlyRef.current = isReadOnly;
+  }, [isReadOnly]);
+
+  const announceCallbackTicket = useCallback((ticket: CrmTicket, isManual = false) => {
+    if (!isManual && !voiceAlertEnabledRef.current) return;
+    const audioOk = audioRef.current?.playTicketAlertChime() ?? false;
+    window.setTimeout(() => {
+      const spokeOk = speakTicketAlert(ticket, isReadOnlyRef.current, () => {
+        pendingSpokenTicketRef.current = ticket;
+        setAudioBlocked(true);
+      });
+      if (!audioOk && !spokeOk) {
+        pendingSpokenTicketRef.current = ticket;
+        setAudioBlocked(true);
+      } else {
+        setAudioBlocked(false);
+      }
+    }, 380);
+    if (!isManual) {
+      sendBrowserTicketNotification(ticket, isReadOnlyRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -204,8 +243,27 @@ export default function ConsolePage() {
     try {
       const saved = localStorage.getItem("yalecom-theme");
       if (saved === "light" || saved === "dark") setTheme(saved);
+      const savedVoice = localStorage.getItem("bc-cc-ticket-voice-alert");
+      if (savedVoice === "false") setVoiceAlertEnabled(false);
     } catch {}
   }, []);
+
+  useEffect(() => {
+    const unlock = () => {
+      audioRef.current?.unlockOutputOnly();
+      const pending = pendingSpokenTicketRef.current;
+      if (pending) {
+        pendingSpokenTicketRef.current = null;
+        announceCallbackTicket(pending, true);
+      }
+    };
+    window.addEventListener("pointerdown", unlock, { once: true });
+    window.addEventListener("keydown", unlock, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, [announceCallbackTicket]);
 
   const toggleTheme = useCallback(() => {
     setTheme((prev) => {
@@ -285,6 +343,11 @@ export default function ConsolePage() {
             setMeters(msg.levels || {});
           } else if (msg.type === "pong" && typeof msg.ts === "number") {
             setWsLatencyMs(Math.max(1, Date.now() - msg.ts));
+          } else if (msg.type === "callback_ticket" && msg.ticket) {
+            const ticket = msg.ticket as CrmTicket;
+            setToast(`แจ้งเตือนใหม่: ลูกค้าขอให้โทรกลับ (${ticket.id})`);
+            announceCallbackTicket(ticket, false);
+            setRightTab("callbacks");
           } else if (msg.type === "error") {
             setToast(msg.message);
           }
@@ -339,7 +402,7 @@ export default function ConsolePage() {
       wsRef.current?.close();
       bridge.destroy();
     };
-  }, [wsEpoch]);
+  }, [wsEpoch, announceCallbackTicket]);
 
   useEffect(() => {
     const bridge = audioRef.current;
@@ -407,6 +470,68 @@ export default function ConsolePage() {
     (phone: string, sessionId: string) => sendCmd({ type: "reanalyze", phone, sessionId }),
     [sendCmd]
   );
+  const handleAcknowledgeTicket = useCallback(
+    (id: string) => {
+      stopTicketSpeech();
+      sendCmd({ type: "crmAcknowledgeTicket", id });
+      setToast("บันทึกรับทราบเคสแล้ว");
+    },
+    [sendCmd]
+  );
+  const handleCloseTicket = useCallback(
+    (id: string) => {
+      stopTicketSpeech();
+      sendCmd({ type: "crmCloseTicket", id });
+      setToast("ปิด Ticket (พนักงานรับรู้แล้ว) เรียบร้อย");
+    },
+    [sendCmd]
+  );
+  const handleReplayTicketVoice = useCallback(
+    (ticket: CrmTicket) => {
+      audioRef.current?.unlockOutputOnly();
+      announceCallbackTicket(ticket, true);
+    },
+    [announceCallbackTicket]
+  );
+  const handleUnlockAudio = useCallback(() => {
+    audioRef.current?.unlockOutputOnly();
+    const pending = pendingSpokenTicketRef.current;
+    pendingSpokenTicketRef.current = null;
+    setAudioBlocked(false);
+    if (pending) {
+      announceCallbackTicket(pending, true);
+    } else if (state.crm?.tickets) {
+      const firstPending = state.crm.tickets.find(
+        (t) => t.source === "ai_callback" && t.status !== "closed" && t.status !== "resolved"
+      );
+      if (firstPending) announceCallbackTicket(firstPending, true);
+    }
+  }, [announceCallbackTicket, state.crm?.tickets]);
+  const handleOpenCrmTickets = useCallback(() => {
+    setCrmSubTab("tickets");
+    setActiveView("crm");
+  }, []);
+  const toggleVoiceAlert = useCallback(() => {
+    setVoiceAlertEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("bc-cc-ticket-voice-alert", String(next));
+      } catch {}
+      if (next) {
+        audioRef.current?.unlockOutputOnly();
+        setAudioBlocked(false);
+        if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
+          void Notification.requestPermission().catch(() => {});
+        }
+        setToast("เปิดเสียงเตือนและเสียงพูด Ticket แล้ว");
+      } else {
+        stopTicketSpeech();
+        pendingSpokenTicketRef.current = null;
+        setToast("ปิดเสียงเตือน Ticket ชั่วคราว");
+      }
+      return next;
+    });
+  }, []);
   const closeDrawer = useCallback(() => setSelectedLogId(null), []);
   const viewCaller = useCallback((phone: string) => {
     setSelectedCallerPhone(phone);
@@ -415,6 +540,35 @@ export default function ConsolePage() {
 
   const callers: CallerRecord[] = state.callers || [];
   const callLogs: CallLogEntry[] = state.callLogs || [];
+  const callbackTickets = useMemo(
+    () => (state.crm?.tickets || []).filter((t) => t.source === "ai_callback"),
+    [state.crm?.tickets]
+  );
+  const pendingCallbacks = useMemo(
+    () => callbackTickets.filter((t) => t.status !== "closed" && t.status !== "resolved"),
+    [callbackTickets]
+  );
+  const unackCallbacks = useMemo(
+    () => pendingCallbacks.filter((t) => t.status === "open" && !t.acknowledgedAt),
+    [pendingCallbacks]
+  );
+
+  useEffect(() => {
+    if (unackCallbacks.length === 0) {
+      stopTicketSpeech();
+      return;
+    }
+    if (!voiceAlertEnabled) return;
+    const timer = setInterval(() => {
+      const latest = unackCallbacks[0];
+      if (!latest) return;
+      const count = repeatCountsRef.current.get(latest.id) || 0;
+      if (count >= 3) return;
+      repeatCountsRef.current.set(latest.id, count + 1);
+      announceCallbackTicket(latest, false);
+    }, 45_000);
+    return () => clearInterval(timer);
+  }, [unackCallbacks, voiceAlertEnabled, announceCallbackTicket]);
   const activeCallerRecord = useMemo(() => {
     if (selectedCallerPhone) {
       return callers.find((c) => c.phone === selectedCallerPhone) || callers[0] || null;
@@ -557,6 +711,16 @@ export default function ConsolePage() {
 
             <button
               type="button"
+              onClick={toggleVoiceAlert}
+              className={`cc-btn cc-btn--tone h-9 ${voiceAlertEnabled ? "tone-in" : "tone-idle"}`}
+              title={voiceAlertEnabled ? "ปิดเสียงเตือน + เสียงพูด Ticket" : "เปิดเสียงเตือน + เสียงพูด Ticket"}
+            >
+              {voiceAlertEnabled ? <BellRing className="h-3.5 w-3.5" /> : <BellOff className="h-3.5 w-3.5" />}
+              <span>เสียงเตือน Ticket</span>
+            </button>
+
+            <button
+              type="button"
               onClick={toggleTheme}
               className="cc-btn h-9"
               title={isDark ? "สลับเป็นโหมดสว่าง" : "สลับเป็นโหมดมืด"}
@@ -587,6 +751,20 @@ export default function ConsolePage() {
               โหมดผู้ชม (ดูได้อย่างเดียว) • หมายเลขโทรศัพท์ทั้งหมดถูกปกปิดเป็นความลับ กรุณาเข้าสู่ระบบผู้ดูแลด้วย Google เพื่อดูหมายเลขและควบคุมระบบ
             </span>
           </div>
+        )}
+
+        {pendingCallbacks.length > 0 && (
+          <CallbackAlertPanel
+            tickets={pendingCallbacks}
+            readOnly={isReadOnly}
+            voiceAlertEnabled={voiceAlertEnabled}
+            audioBlocked={audioBlocked}
+            onAcknowledgeTicket={handleAcknowledgeTicket}
+            onCloseTicket={handleCloseTicket}
+            onReplayVoice={handleReplayTicketVoice}
+            onUnlockAudio={handleUnlockAudio}
+            onOpenCrmTickets={handleOpenCrmTickets}
+          />
         )}
 
         {/* Command Center Alert Hero */}
@@ -627,6 +805,8 @@ export default function ConsolePage() {
             }
             callLogs={callLogs}
             initialPhone={crmFocusPhone}
+            initialSubTab={crmSubTab}
+            onSubTabChange={setCrmSubTab}
             readOnly={isReadOnly}
             onUpsertCustomer={(customer) => {
               sendCmd({ type: "crmUpsertCustomer", customer });
@@ -637,6 +817,8 @@ export default function ConsolePage() {
               if (!isReadOnly) setToast("สร้างเคสติดตามงานใหม่เรียบร้อยแล้ว");
             }}
             onUpdateTicket={(id, patch) => sendCmd({ type: "crmUpdateTicket", id, patch })}
+            onAcknowledgeTicket={handleAcknowledgeTicket}
+            onCloseTicket={handleCloseTicket}
             onDeleteTicket={(id) => sendCmd({ type: "crmDeleteTicket", id })}
             onOpenQaLog={(_phone, sessionId) => setSelectedLogId(sessionId)}
           />
@@ -647,7 +829,13 @@ export default function ConsolePage() {
               <KpiTile tone="in" label="คู่สายว่าง" value={idleCount} suffix={`/ ${state.lines.length}`} meter={idleCount} icon={<Phone className="h-4 w-4" />} />
               <KpiTile tone="live" label="กำลังให้บริการ" value={busyCount} meter={busyCount} icon={<PhoneCall className="h-4 w-4" />} />
               <KpiTile tone="ai" label="J.A.R.V.I.S ดูแล" value={aiCount} meter={aiCount} icon={<Bot className="h-4 w-4" />} />
-              <KpiTile tone="held" label="เคส CRM เปิดค้าง" value={state.crm?.stats.openTickets ?? 0} icon={<Briefcase className="h-4 w-4" />} />
+              <KpiTile
+                tone={(state.crm?.stats.openTickets ?? 0) > 0 ? "danger" : "held"}
+                label="เคส CRM เปิดค้าง"
+                value={state.crm?.stats.openTickets ?? 0}
+                icon={<Briefcase className="h-4 w-4" />}
+                onClick={handleOpenCrmTickets}
+              />
             </div>
 
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
@@ -715,20 +903,62 @@ export default function ConsolePage() {
               <aside className="space-y-4 lg:col-span-5">
                 <div className="cc-panel p-4">
                   <div className="cc-tabs mb-4" role="tablist">
-                    <TabButton active={rightTab === "qa"} tone="ai" onClick={() => setRightTab("qa")} icon={<Sparkles className="h-3.5 w-3.5" />}>
+                    <TabButton
+                      active={rightTab === "callbacks"}
+                      tone="danger"
+                      onClick={() => setRightTab("callbacks")}
+                      icon={<BellRing className="h-3.5 w-3.5 shrink-0" />}
+                      className="px-1.5 text-[11.5px]"
+                    >
+                      <span>โทรกลับ</span>
+                      {pendingCallbacks.length > 0 && (
+                        <span className="cc-chip tone-danger h-4 px-1.5 text-[10px] tabular-nums">
+                          {pendingCallbacks.length}
+                        </span>
+                      )}
+                    </TabButton>
+                    <TabButton
+                      active={rightTab === "qa"}
+                      tone="ai"
+                      onClick={() => setRightTab("qa")}
+                      icon={<Sparkles className="h-3.5 w-3.5 shrink-0" />}
+                      className="px-1.5 text-[11.5px]"
+                    >
                       <span>บันทึก QA</span>
                       <span className="tabular-nums">({callLogs.length})</span>
                     </TabButton>
-                    <TabButton active={rightTab === "callers"} tone="live" onClick={() => setRightTab("callers")} icon={<Users className="h-3.5 w-3.5" />}>
+                    <TabButton
+                      active={rightTab === "callers"}
+                      tone="live"
+                      onClick={() => setRightTab("callers")}
+                      icon={<Users className="h-3.5 w-3.5 shrink-0" />}
+                      className="px-1.5 text-[11.5px]"
+                    >
                       <span>รายเบอร์</span>
                       <span className="tabular-nums">({callers.length})</span>
                     </TabButton>
-                    <TabButton active={rightTab === "history"} tone="in" onClick={() => setRightTab("history")} icon={<History className="h-3.5 w-3.5" />}>
-                      <span>สายเข้าล่าสุด</span>
+                    <TabButton
+                      active={rightTab === "history"}
+                      tone="in"
+                      onClick={() => setRightTab("history")}
+                      icon={<History className="h-3.5 w-3.5 shrink-0" />}
+                      className="px-1.5 text-[11.5px]"
+                    >
+                      <span>สายเข้า</span>
                       <span className="tabular-nums">({state.history.length})</span>
                     </TabButton>
                   </div>
 
+                  {rightTab === "callbacks" && (
+                    <CallbackTicketList
+                      tickets={callbackTickets}
+                      readOnly={isReadOnly}
+                      onAcknowledgeTicket={handleAcknowledgeTicket}
+                      onCloseTicket={handleCloseTicket}
+                      onReplayVoice={handleReplayTicketVoice}
+                      onOpenCrmTickets={handleOpenCrmTickets}
+                    />
+                  )}
                   {rightTab === "qa" && <CallLogList logs={callLogs} onOpen={setSelectedLogId} />}
                   {rightTab === "callers" && (
                     <CallerMemory callers={callers} active={activeCallerRecord} onSelect={setSelectedCallerPhone} onOpenLog={setSelectedLogId} />
@@ -1022,17 +1252,19 @@ function KpiTile({
   suffix,
   meter,
   icon,
+  onClick,
 }: {
-  tone: "in" | "live" | "ai" | "held";
+  tone: "in" | "live" | "ai" | "held" | "danger";
   label: string;
   value: number;
   suffix?: string;
   meter?: number;
   icon: ReactNode;
+  onClick?: () => void;
 }) {
-  return (
-    <div className={`cc-panel tone-${tone} flex items-center justify-between gap-3 px-4 py-3`}>
-      <div className="min-w-0">
+  const inner = (
+    <>
+      <div className="min-w-0 text-left">
         <div className="text-xs leading-none cc-muted">{label}</div>
         <div className="mt-2 inline-flex items-baseline gap-1 font-mono leading-none tabular-nums">
           <span className="text-2xl font-bold cc-ink">{value}</span>
@@ -1047,6 +1279,22 @@ function KpiTile({
         )}
       </div>
       <span className="cc-icon-tile">{icon}</span>
+    </>
+  );
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className={`cc-panel tone-${tone} flex w-full cursor-pointer items-center justify-between gap-3 px-4 py-3 text-left transition hover:brightness-105`}
+      >
+        {inner}
+      </button>
+    );
+  }
+  return (
+    <div className={`cc-panel tone-${tone} flex items-center justify-between gap-3 px-4 py-3`}>
+      {inner}
     </div>
   );
 }
@@ -1056,16 +1304,18 @@ function TabButton({
   tone,
   onClick,
   icon,
+  className = "",
   children,
 }: {
   active: boolean;
-  tone: "ai" | "live" | "in";
+  tone: "ai" | "live" | "in" | "danger";
   onClick: () => void;
   icon: ReactNode;
+  className?: string;
   children: ReactNode;
 }) {
   return (
-    <button type="button" role="tab" aria-selected={active} onClick={onClick} className={`cc-tab tone-${tone} ${active ? "is-active" : ""}`}>
+    <button type="button" role="tab" aria-selected={active} onClick={onClick} className={`cc-tab tone-${tone} ${active ? "is-active" : ""} ${className}`}>
       {icon}
       {children}
     </button>

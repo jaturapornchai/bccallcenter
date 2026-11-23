@@ -215,30 +215,66 @@ def build_call_tools(ctx: CallCenterContext) -> list[Any]:
         summary = load_caller_summary(ctx.caller_phone)
         return summary or "ลูกค้าโทรมาเป็นครั้งแรก ยังไม่มีประวัติเดิมในระบบ"
 
-    @function_tool()
-    async def search_knowledge_base(query: str) -> str:
-        """ค้นหาข้อมูลสินค้า ราคา วิธีใช้งานโปรแกรมบัญชี BC Ai Account จากคลังความรู้."""
+    async def _call_bc_brain_mcp(tool_name: str, arguments: dict[str, Any], timeout: float = 8.0) -> str:
         mcp_url = os.getenv("BC_BRAIN_MCP_URL", "https://brain.bcsmethai.com/mcp")
         try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 res = await client.post(
                     mcp_url,
+                    headers={
+                        "Accept": "application/json, text/event-stream",
+                        "Content-Type": "application/json",
+                    },
                     json={
                         "jsonrpc": "2.0",
                         "id": 1,
                         "method": "tools/call",
-                        "params": {"name": "search_notes", "arguments": {"query": query, "limit": 3}},
+                        "params": {"name": tool_name, "arguments": arguments},
                     },
                 )
                 if res.status_code == 200:
-                    body = res.json()
+                    raw = res.text
+                    if "event-stream" in res.headers.get("content-type", ""):
+                        data_lines = [ln[5:] for ln in raw.splitlines() if ln.startswith("data:")]
+                        raw = data_lines[-1] if data_lines else raw
+                    body = json.loads(raw)
                     content = body.get("result", {}).get("content", [])
                     texts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("text")]
                     if texts:
-                        return "\n".join(texts)[:1200]
+                        joined = "\n".join(texts)
+                        if "🛑" in joined or "abstain" in joined.lower():
+                            return "ไม่พบข้อมูลยืนยันในระบบ (Abstain): ห้ามเดาหรือแต่งข้อมูลเอง ให้แจ้งลูกค้าตรงๆ ว่าไม่มีข้อมูลนี้ในระบบ และเสนอให้พนักงานโทรกลับช่วยตรวจสอบ"
+                        return joined[:1200]
         except Exception as exc:
-            logger.warning("Knowledge search failed: %s", exc)
+            logger.warning("BC Brain MCP %s failed: %s", tool_name, exc)
         return "ไม่สามารถดึงข้อมูลจากคลังความรู้ได้ชั่วคราว กรุณาแจ้งลูกค้าว่าสามารถฝากเรื่องหรือโอนสายให้เจ้าหน้าที่ช่วยดูแลได้ครับ"
+
+    @function_tool()
+    async def search_knowledge_base(query: str) -> str:
+        """ค้นหาข้อมูลสินค้า ราคา วิธีใช้งานโปรแกรมบัญชี BC Ai Account จากคลังความรู้ (quick_answer ultra / audience user)."""
+        return await _call_bc_brain_mcp(
+            "quick_answer",
+            {"question": query, "audience": "user", "mode": "ultra", "include_media": False},
+        )
+
+    @function_tool()
+    async def lookup_menu(query: str) -> str:
+        """ค้นหารหัสเมนู 4 หลัก (1001-9070) หรือชื่อเมนูของ BC Ai Account แบบทันที."""
+        return await _call_bc_brain_mcp(
+            "lookup_menu",
+            {"query": query, "audience": "user", "limit": 5},
+        )
+
+    @function_tool()
+    async def batch_ask_knowledge(questions: list[str]) -> str:
+        """ตอบคำถามหลายประเด็นพร้อมกันในรอบเดียว (สูงสุด 5 ข้อ) จาก BC Brain."""
+        clean_qs = [str(q).strip() for q in (questions or []) if str(q).strip()][:5]
+        if not clean_qs:
+            return "กรุณาระบุคำถามอย่างน้อย 1 ข้อ"
+        return await _call_bc_brain_mcp(
+            "batch_ask",
+            {"questions": clean_qs, "audience": "user", "mode": "ultra", "include_media": False},
+        )
 
     @function_tool()
     async def create_callback_ticket(
@@ -302,6 +338,8 @@ def build_call_tools(ctx: CallCenterContext) -> list[Any]:
     return [
         lookup_caller_history,
         search_knowledge_base,
+        lookup_menu,
+        batch_ask_knowledge,
         create_callback_ticket,
         set_conversation_language,
         transfer_to_human,

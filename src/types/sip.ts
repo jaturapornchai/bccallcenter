@@ -84,6 +84,8 @@ export interface CrmCustomer {
 export interface CrmTicket {
   id: string;
   phone: string;
+  callbackPhone?: string;
+  callerPhone?: string;
   customerName: string;
   company: string;
   subject: string;
@@ -91,8 +93,13 @@ export interface CrmTicket {
   status: TicketStatus;
   priority: TicketPriority;
   assignee: string;
-  source: "ai_auto" | "manual";
+  source: "ai_callback" | "ai_auto" | "manual";
   sessionId: string | null;
+  lineId?: number | null;
+  acknowledgedAt?: string | null;
+  acknowledgedBy?: string | null;
+  closedAt?: string | null;
+  closedBy?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -102,6 +109,8 @@ export interface CrmStats {
   vipOrRisk: number;
   openTickets: number;
   urgentTickets: number;
+  pendingCallbacks?: number;
+  unacknowledgedCallbacks?: number;
   avgCsat: number | null;
 }
 
