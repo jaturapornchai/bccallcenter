@@ -2942,6 +2942,17 @@ class BargeInReplyOnPause(ReplyOnPause):
         if not state.started_talking:
             if not chunks:
                 return False
+            if is_phone:
+                # Option A (2026-11-23): FastRTC's 100ms Silero VAD fires on phone line noise that Whisper's VAD later
+                # drops 100% (22.1% empty turns), clearing state.buffer and adding up to 0.8s lag + GPU contention.
+                # Confirm real foreground speech with STT's own VAD + dBFS gate before starting a turn, keeping
+                # state.buffer warm so genuine speech starts on the very next 100ms step without losing word 1.
+                try:
+                    onset_speech = voiced((sampling_rate, recent))
+                    if not onset_speech.size or _audio_dbfs(onset_speech) < C.SIP_MIN_SPEECH_DBFS:
+                        return False
+                except Exception:
+                    log.warning("phone turn-onset VAD check failed, allowing turn", exc_info=True)
             state.started_talking, state.stream, state.buffer = True, recent, None
             LIVE[id(self)] = {"t": 0.0, "fed": 0, "text": "", "busy": False,
                               "stream": stt.stream() if hasattr(stt, "stream") else None}
