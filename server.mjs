@@ -162,6 +162,33 @@ app.prepare().then(async () => {
 
   sip.on("state", broadcastState);
 
+  sip.on("meter", (levels) => {
+    if (wss.clients.size === 0) return;
+    const payload = JSON.stringify({ type: "meter", levels, ts: Date.now() });
+    for (const client of wss.clients) {
+      if (client.readyState === 1) {
+        client.send(payload);
+      }
+    }
+  });
+
+  // WebSocket keep-alive heartbeat (prevents Caddy / Reverse SSH Tunnel silent idle disconnects)
+  const wsHeartbeatTimer = setInterval(() => {
+    const hb = JSON.stringify({ type: "heartbeat", serverTime: Date.now() });
+    for (const client of wss.clients) {
+      if (client.isAlive === false) {
+        try { client.terminate(); } catch {}
+        continue;
+      }
+      client.isAlive = false;
+      try {
+        client.ping();
+        if (client.readyState === 1) client.send(hb);
+      } catch {}
+    }
+  }, 15000);
+  wsHeartbeatTimer.unref?.();
+
   sip.on("rtp", ({ lineId, payload }) => {
     if (sip.activeAudioLine !== lineId) return;
     const frame = Buffer.allocUnsafe(1 + payload.length);
@@ -179,6 +206,10 @@ app.prepare().then(async () => {
     const session = verifySessionFromCookieHeader(req.headers.cookie);
     ws.isAdmin = Boolean(session?.isAdmin);
     ws.userEmail = session?.email || null;
+    ws.isAlive = true;
+    ws.on("pong", () => {
+      ws.isAlive = true;
+    });
 
     const current = sip.publicState();
     ws.send(
@@ -186,10 +217,35 @@ app.prepare().then(async () => {
         type: "state",
         data: ws.isAdmin ? current : sanitizeStateForViewer(current),
         readOnly: !ws.isAdmin,
+        serverTime: Date.now(),
       })
     );
 
     ws.on("message", async (data, isBinary) => {
+      ws.isAlive = true;
+      // Allow lightweight ping/sync from all connected viewers for true realtime monitoring
+      if (!isBinary) {
+        try {
+          const probe = JSON.parse(data.toString("utf8"));
+          if (probe?.type === "ping") {
+            ws.send(JSON.stringify({ type: "pong", ts: probe.ts || Date.now(), serverTime: Date.now() }));
+            return;
+          }
+          if (probe?.type === "sync") {
+            const snap = sip.publicState();
+            ws.send(
+              JSON.stringify({
+                type: "state",
+                data: ws.isAdmin ? snap : sanitizeStateForViewer(snap),
+                readOnly: !ws.isAdmin,
+                serverTime: Date.now(),
+              })
+            );
+            return;
+          }
+        } catch {}
+      }
+
       // Strict server-side read-only enforcement for non-admin viewers
       if (!ws.isAdmin) {
         if (!isBinary) {

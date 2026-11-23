@@ -35,6 +35,7 @@ interface LineCardProps {
   onAttachAi: (lineId: number) => void;
   onViewCallerHistory?: (phone: string) => void;
   onChangeLanguage?: (lineId: number, language: string | null) => void;
+  meter?: { in: number; out: number };
   readOnly?: boolean;
 }
 
@@ -210,6 +211,7 @@ export function LineCard({
   onAttachAi,
   onViewCallerHistory,
   onChangeLanguage,
+  meter,
   readOnly = false,
 }: LineCardProps) {
   const tone = lineTone(line);
@@ -301,14 +303,53 @@ export function LineCard({
                     </span>
                   </span>
                   {(isConnected || isRingingIn) && <AudioEqualizer bars={9} className="h-4" />}
+                  {isConnected && meter && (
+                    <span className="inline-flex items-center gap-2 text-[10px] leading-none cc-dim" title="ระดับเสียงจริงแบบเรียลไทม์">
+                      <span className="inline-flex items-center gap-1">
+                        <span>ผู้โทร</span>
+                        <span className="inline-block h-1.5 w-10 overflow-hidden rounded-full bg-white/10">
+                          <span
+                            className="block h-full rounded-full bg-emerald-400 transition-[width] duration-100"
+                            style={{ width: `${Math.min(100, meter.in)}%` }}
+                          />
+                        </span>
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <span>AI</span>
+                        <span className="inline-block h-1.5 w-10 overflow-hidden rounded-full bg-white/10">
+                          <span
+                            className="block h-full rounded-full bg-cyan-400 transition-[width] duration-100"
+                            style={{ width: `${Math.min(100, meter.out)}%` }}
+                          />
+                        </span>
+                      </span>
+                    </span>
+                  )}
                 </>
               )}
             </div>
 
-            {line.aiActive && line.aiTranscript && (
-              <div className="cc-quote mt-2 flex items-center gap-2 px-2.5 py-1.5 text-xs leading-snug tone-ai" title={line.aiTranscript}>
-                <Bot className="h-3.5 w-3.5 shrink-0" />
-                <span className="truncate">{line.aiTranscript}</span>
+            {line.aiActive && (line.aiPartial || line.aiTranscript || line.aiStatus) && (
+              <div className="cc-quote mt-2 space-y-1 px-2.5 py-1.5 text-xs leading-snug tone-ai">
+                {line.aiStatus && (
+                  <div className="flex items-center gap-1.5 text-[11px] font-medium opacity-85">
+                    <span className="cc-led cc-led--blink" />
+                    <span>{line.aiStatus}</span>
+                  </div>
+                )}
+                {line.aiPartial ? (
+                  <div className="flex items-center gap-2 text-emerald-300" title={line.aiPartial}>
+                    <Mic className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">กำลังพูดสด: {line.aiPartial}</span>
+                  </div>
+                ) : (
+                  line.aiTranscript && (
+                    <div className="flex items-center gap-2" title={line.aiTranscript}>
+                      <Bot className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{line.aiTranscript}</span>
+                    </div>
+                  )
+                )}
               </div>
             )}
           </div>

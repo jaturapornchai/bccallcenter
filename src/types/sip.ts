@@ -18,6 +18,9 @@ export interface SipLine {
   held: boolean;
   aiActive: boolean;
   aiTranscript: string;
+  aiPartial?: string;
+  aiStatus?: string;
+  liveMessages?: CallerMessage[];
   callerTotalCalls?: number;
   callerHasHistory?: boolean;
   sessionId?: string | null;

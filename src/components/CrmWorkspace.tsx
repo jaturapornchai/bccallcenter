@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Bot,
@@ -97,6 +97,17 @@ export function CrmWorkspace({
   const [tierFilter, setTierFilter] = useState<CrmTier | "all">("all");
   const [statusFilter, setStatusFilter] = useState<TicketStatus | "all">("all");
   const [selectedPhone, setSelectedPhone] = useState<string | null>(initialPhone || crm.customers[0]?.phone || null);
+  useEffect(() => {
+    if (initialPhone) {
+      setSelectedPhone(initialPhone);
+      return;
+    }
+    if (!selectedPhone && crm.customers[0]?.phone) {
+      setSelectedPhone(crm.customers[0].phone);
+    } else if (selectedPhone && crm.customers.length > 0 && !crm.customers.some((c) => c.phone === selectedPhone)) {
+      setSelectedPhone(crm.customers[0].phone);
+    }
+  }, [initialPhone, crm.customers, selectedPhone]);
   const [showNewCustomer, setShowNewCustomer] = useState(false);
   const [showNewTicket, setShowNewTicket] = useState(false);
   const [showAllCustomers, setShowAllCustomers] = useState(false);

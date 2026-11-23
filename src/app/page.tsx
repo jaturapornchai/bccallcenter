@@ -116,6 +116,8 @@ export default function ConsolePage() {
   });
   const [wsReadOnly, setWsReadOnly] = useState(true);
   const [wsEpoch, setWsEpoch] = useState(0);
+  const [wsLatencyMs, setWsLatencyMs] = useState<number | null>(null);
+  const [meters, setMeters] = useState<Record<number, { in: number; out: number }>>({});
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioRef = useRef<AudioBridge | null>(null);
@@ -231,22 +233,41 @@ export default function ConsolePage() {
     });
 
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let pingTimer: ReturnType<typeof setInterval> | null = null;
+    let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+    let lastActivityAt = Date.now();
     let unmounted = false;
 
     const connect = () => {
       if (unmounted) return;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(`${proto}//${window.location.host}/ws/sip`);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
 
-      ws.onopen = () => setWsConnected(true);
+      ws.onopen = () => {
+        lastActivityAt = Date.now();
+        setWsConnected(true);
+        try {
+          ws.send(JSON.stringify({ type: "ping", ts: Date.now() }));
+        } catch {}
+      };
       ws.onclose = () => {
         setWsConnected(false);
-        if (!unmounted) reconnectTimer = setTimeout(connect, 2000);
+        setWsLatencyMs(null);
+        setMeters({});
+        if (!unmounted) reconnectTimer = setTimeout(connect, 900);
+      };
+      ws.onerror = () => {
+        try { ws.close(); } catch {}
       };
 
       ws.onmessage = (ev) => {
+        lastActivityAt = Date.now();
         if (ev.data instanceof ArrayBuffer) {
           const bytes = new Uint8Array(ev.data);
           if (bytes.length > 1) bridge.playIncomingPcmu(bytes.subarray(1));
@@ -257,6 +278,10 @@ export default function ConsolePage() {
           if (msg.type === "state") {
             setState(msg.data);
             setWsReadOnly(msg.readOnly !== false);
+          } else if (msg.type === "meter") {
+            setMeters(msg.levels || {});
+          } else if (msg.type === "pong" && typeof msg.ts === "number") {
+            setWsLatencyMs(Math.max(1, Date.now() - msg.ts));
           } else if (msg.type === "error") {
             setToast(msg.message);
           }
@@ -264,11 +289,50 @@ export default function ConsolePage() {
       };
     };
 
+    const forceSyncOrReconnect = () => {
+      if (unmounted) return;
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: "sync" }));
+          ws.send(JSON.stringify({ type: "ping", ts: Date.now() }));
+        } catch {}
+      } else if (!ws || ws.readyState === WebSocket.CLOSED) {
+        connect();
+      }
+    };
+
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") forceSyncOrReconnect();
+    };
+    window.addEventListener("online", forceSyncOrReconnect);
+    document.addEventListener("visibilitychange", onVisibility);
+
     connect();
+
+    pingTimer = setInterval(() => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: "ping", ts: Date.now() }));
+        } catch {}
+      }
+    }, 12000);
+
+    watchdogTimer = setInterval(() => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN && Date.now() - lastActivityAt > 26000) {
+        try { ws.close(); } catch {}
+      }
+    }, 5000);
 
     return () => {
       unmounted = true;
+      window.removeEventListener("online", forceSyncOrReconnect);
+      document.removeEventListener("visibilitychange", onVisibility);
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (pingTimer) clearInterval(pingTimer);
+      if (watchdogTimer) clearInterval(watchdogTimer);
       wsRef.current?.close();
       bridge.destroy();
     };
@@ -426,6 +490,11 @@ export default function ConsolePage() {
               </button>
             </div>
 
+            <span className={`cc-chip h-9 rounded-xl px-3 font-mono tabular-nums ${wsConnected ? "tone-in" : "tone-held"}`} title="สถานะเชื่อมต่อเรียลไทม์ (WebSocket)">
+              <span className={`cc-led ${wsConnected ? "cc-led--blink" : ""}`} />
+              <span>{wsConnected ? `LIVE${wsLatencyMs !== null ? ` ${wsLatencyMs}ms` : ""}` : "กำลังเชื่อมสด..."}</span>
+            </span>
+
             <span className="cc-chip tone-idle h-9 rounded-xl px-3 font-mono tabular-nums">
               <Clock3 className="h-3.5 w-3.5" />
               <span suppressHydrationWarning>{clock}</span>
@@ -517,6 +586,7 @@ export default function ConsolePage() {
             queuedCount={Math.max(0, ringingLines.length - 1)}
             autoAnswerAi={state.autoAnswerAi}
             nowMs={nowMs}
+            meter={meters[((ringingLine || activeAiLine) as SipLine).lineId]}
             readOnly={isReadOnly}
             onAnswer={handleAnswer}
             onReject={handleReject}
@@ -594,6 +664,7 @@ export default function ConsolePage() {
                       isDark={isDark}
                       isActiveAudio={state.activeAudioLine === line.lineId}
                       nowMs={nowMs}
+                      meter={meters[line.lineId]}
                       readOnly={isReadOnly}
                       onAnswer={handleAnswer}
                       onReject={handleReject}
@@ -711,6 +782,7 @@ function CommandAlertHero({
   queuedCount,
   autoAnswerAi,
   nowMs,
+  meter,
   readOnly = false,
   onAnswer,
   onReject,
@@ -721,6 +793,7 @@ function CommandAlertHero({
   queuedCount: number;
   autoAnswerAi: boolean;
   nowMs: number;
+  meter?: { in: number; out: number };
   readOnly?: boolean;
   onAnswer: (lineId: number) => void;
   onReject: (lineId: number) => void;
@@ -807,12 +880,49 @@ function CommandAlertHero({
                 <span>J.A.R.V.I.S จะรับสายอัตโนมัติ</span>
               </span>
             )}
+            {!isRinging && line.aiStatus && (
+              <span className="cc-chip tone-ai">
+                <span className="cc-led cc-led--blink" />
+                <span>{line.aiStatus}</span>
+              </span>
+            )}
+            {!isRinging && meter && (
+              <span className="cc-chip tone-idle gap-2 font-mono text-[11px]">
+                <span>ผู้โทร</span>
+                <span className="inline-block h-1.5 w-12 overflow-hidden rounded-full bg-white/10">
+                  <span className="block h-full rounded-full bg-emerald-400 transition-[width] duration-100" style={{ width: `${Math.min(100, meter.in)}%` }} />
+                </span>
+                <span>AI</span>
+                <span className="inline-block h-1.5 w-12 overflow-hidden rounded-full bg-white/10">
+                  <span className="block h-full rounded-full bg-cyan-400 transition-[width] duration-100" style={{ width: `${Math.min(100, meter.out)}%` }} />
+                </span>
+              </span>
+            )}
           </div>
 
-          {!isRinging && line.aiTranscript && (
-            <p className="cc-quote tone-ai mt-3 px-3 py-2 text-sm leading-relaxed">
-              <span className="cc-caret">{line.aiTranscript}</span>
-            </p>
+          {!isRinging && ((line.liveMessages && line.liveMessages.length > 0) || line.aiPartial || line.aiTranscript) && (
+            <div className="cc-inset mt-3 space-y-1.5 p-3 text-xs leading-relaxed">
+              {(line.liveMessages || []).slice(-5).map((m, idx) => (
+                <div
+                  key={`${m.at}-${idx}`}
+                  className={`px-2.5 py-1.5 ${m.role === "caller" ? "cc-bubble" : "cc-quote tone-ai"}`}
+                >
+                  <span className="font-semibold">{m.role === "caller" ? "ผู้โทร: " : "J.A.R.V.I.S: "}</span>
+                  <span>{m.text}</span>
+                </div>
+              ))}
+              {line.aiPartial && (
+                <div className="cc-bubble border border-emerald-400/40 px-2.5 py-1.5 text-emerald-300">
+                  <span className="font-semibold">กำลังฟังสด: </span>
+                  <span className="cc-caret">{line.aiPartial}</span>
+                </div>
+              )}
+              {!line.aiPartial && (!line.liveMessages || line.liveMessages.length === 0) && line.aiTranscript && (
+                <p className="cc-quote tone-ai px-2.5 py-1.5">
+                  <span className="cc-caret">{line.aiTranscript}</span>
+                </p>
+              )}
+            </div>
           )}
         </div>
 
