@@ -22,6 +22,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jarvis"))
 import config as C  # noqa: E402  the live agent's model id, compute type and local fallback dir
 
+import numpy as np  # noqa: E402
 from faster_whisper import WhisperModel  # noqa: E402
 from faster_whisper.audio import decode_audio  # noqa: E402
 from faster_whisper.vad import VadOptions, get_speech_timestamps  # noqa: E402
@@ -30,6 +31,11 @@ RATE = 16000
 MIN_SPEECH_MS = 160  # shorter bursts are clicks and line pops
 MIN_UTTERANCE_S = 0.3  # shorter chunks are breaths and backchannels; Whisper only invents words for them
 SLICE_PAD_S = 0.15  # the spans are tight for timing; Whisper wants a little air around the words
+# The recorder fills the gaps between turns with digital silence, which Silero never met in training: after a long
+# stretch of it the VAD reacts 0.5-2 s late to the next turn or misses a short one. Noise at -60 dBFS, added for
+# the VAD pass only, keeps it awake (measured on 4 calls: 60% -> 90% of the caller's speech found; louder noise
+# starts inventing speech).
+VAD_DITHER = 0.001
 # The model commits ~1.3 GB (measured on the live process). The rest is headroom, so a review never pushes the
 # live agent's copy out of VRAM.
 MIN_FREE_VRAM_MB = 3000
@@ -61,7 +67,8 @@ def load_model(device, threads):
 
 def speech_spans(audio):
     options = VadOptions(min_speech_duration_ms=MIN_SPEECH_MS, min_silence_duration_ms=500, speech_pad_ms=30)
-    return [(c["start"], c["end"]) for c in get_speech_timestamps(audio, options)]
+    noise = np.random.default_rng(0).normal(0, VAD_DITHER, audio.shape).astype(np.float32)  # seeded: a review repeats
+    return [(c["start"], c["end"]) for c in get_speech_timestamps(audio + noise, options)]
 
 
 def transcribe_spans(model, audio, spans):
