@@ -188,7 +188,7 @@ LANG_SWITCHED_ACK = {
     "km": "បាទ ខ្ញុំបានប្តូរទៅភាសាខ្មែរហើយ តើខ្ញុំអាចជួយអ្វីបាន?",
 }
 MULTILANG_FAST_CHAT = re.compile(
-    r"^(hi|hello|hey|good\s*(morning|afternoon|evening)|how\s*are\s*you|thank\s*you|thanks|ok|okay|yes|no|sure|bye|你好|谢谢|再见|こんにちは|ありがとう|안녕하세요)[\s!?.…]*$",
+    r"^(hi|hello|hey|good\s*(morning|afternoon|evening)|how\s*are\s*you|what\s*(do\s*you\s*do|can\s*you\s*do|is\s*your\s*name)|who\s*are\s*you|can\s*you\s*hear\s*me|thank\s*you|thanks|ok|okay|yes|no|sure|bye|ได้ยินไหม|ได้ยินมั้ย|สวัสดีได้ยินไหม|ฮัลโหล|ทดสอบ|เทส|สบายดีไหม|คุณคือใคร|ทำอะไรได้บ้าง|ขอบคุณครับ|ขอบคุณค่ะ|你好|听得到吗|谢谢|再见|こんにちは|ありがとう|안녕하세요)[\s!?.…]*$",
     re.I,
 )
 
@@ -523,7 +523,7 @@ def speak(text, lang_override=None):
     norm = normalize_text(_thai_pronounce(_say_numbers(text))).strip() if lang == "th" else re.sub(r"[#*_`~|]", " ", text or "").strip()
     if not norm:
         return np.zeros((1, C.TTS_SAMPLE_RATE // 10), np.float32)
-    steps = min(C.TTS_STEP, 6) if ("on_phone" in globals() and on_phone()) else C.TTS_STEP
+    steps = min(C.TTS_STEP, 4) if ("on_phone" in globals() and on_phone()) else C.TTS_STEP
     for _ in range(3):
         with TTS_LOCK:
             wav = model.generate(text=norm, language=lang, voice_clone_prompt=voice, speed=C.TTS_SPEED,
@@ -1434,9 +1434,11 @@ def not_talk(piece, tail, new):
 
 def judge(sources, piece, before):
     """ห้ามแต่งเรื่อง: True only if `piece` states nothing the sources lack (numbers have their own check).
-    The prompt alone did not hold: the boss added "ต้องระวังเรื่องการจัดส่งและรับชำระ" that no result had."""
-    # TALK_WORDS and the self-description pass words unjudged but are no SOURCES text (A/B 2026-11-10: small talk 4/5,
-    # must-cut 10/10). ponytail: the public self-description on the owner line too; its words are all true there
+    On phone calls (Ultra-Fast mode): skip expensive extra LLM judge when translating to non-Thai or for short conversational turns without numbers."""
+    if "on_phone" in globals() and on_phone():
+        cid = call_id() if "call_id" in globals() else ""
+        if (CALL_LANG.get(cid) and CALL_LANG.get(cid) != "th") or (not re.search(r"\d", piece) and len(piece) <= 120):
+            return True
     if not (new := grounding.new_words(piece, f"{sources}\n{before}\n{TALK_WORDS}\n{PUBLIC['prompt'].partition(ABOUT_ASK)[2]}")):
         return True  # every word is a source word: no model call, so most phrases cost nothing
     low = sources.lower()  # a claimed source word must really be there (code checks the model)
@@ -1789,27 +1791,30 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             now += f"\n(ผลจาก web_search ตอนนี้: {(yield from dispatch([('web_search', {'query': heard})], said, turn, tools))[0]})"
         elif heard and (FAST_CHAT.match(heard.strip()) or MULTILANG_FAST_CHAT.match(heard.strip())):  # bare hello/thanks/hold: answer right away (~0.9 s faster, no wasted search)
             pass
-        elif heard and not stay_topic and (wording := search_words(history, heard))[1] and not was:  # off the topic, maybe misheard: ask, search nothing
+        elif heard and not on_phone() and not stay_topic and (wording := search_words(history, heard))[1] and not was:  # off the topic, maybe misheard: ask, search nothing
             topic, new = wording[1]
             log.info("topic jump? %s -> %s", topic, new)  # the log watcher learns from these
             # a fixed line, no boss: it once added "เพย์โรล" and the judge cut the whole ask (eval 2026-11-08 r17)
             turn["ask"] = f"ขอถามให้ชัดก่อนครับ จะเปลี่ยนไปคุยเรื่อง{new} หรือยังคุยเรื่อง{topic}ต่อครับ"
         elif heard:  # Auto Swarm: fan out multi-angle BC brain + local docs searches in parallel, then read top notes in parallel
-            qs = [stay_topic] if stay_topic else swarm_queries(wording[0], heard, history)
+            phone_mode = on_phone()
+            if phone_mode:
+                qs = [stay_topic or heard]
+            else:
+                wording = search_words(history, heard) if not stay_topic else (heard, None)
+                qs = [stay_topic] if stay_topic else swarm_queries(wording[0], heard, history)
             query = " | ".join(qs)
             sql_ctx = " SQL" if history and "```sql" in history[-1]["content"].lower() else ""
             zone = brain_audience(public, f"{heard} {query}{sql_ctx}")  # a follow-up on a SQL answer stays in every zone
             calls = [*(("search_brain", {"query": q2, **zone}) for q in qs if "search_brain" in tools and (q2 := LONG_NUMBER.sub("", q).strip())),
-                     *(("search_docs", {"query": qs[0]}) for _ in (1,) if "search_docs" in tools)]
+                     *(("search_docs", {"query": qs[0]}) for _ in (1,) if "search_docs" in tools and not phone_mode)]
             texts = yield from dispatch(calls, said, turn, tools)
+            max_slugs = 2 if phone_mode else 4
             slugs = list(dict.fromkeys(s for (n, _), t in zip(calls, texts) if n == "search_brain"
-                                       for s in re.findall(r'"slug": "([^"]+)"', t)))[:4]
+                                       for s in re.findall(r'"slug": "([^"]+)"', t)))[:max_slugs]
             if "read_note" in tools and slugs:
-                # ลุงจืด 2026-11-18: no matching note brought a picture or video of its own (a sub-note): ask for the ones around
-                # it in the same round as the reads. Its JSON stays off the boss's sources: links live on the cards only.
-                # ponytail: limit 20, not the page's 6: the brain counts web pages and weak notes' media before the gate drops them
                 media = [("find_media", {"query": calls[0][1]["query"], "kind": "all", "limit": 20, "audience": zone.get("audience", "all")})
-                         for _ in (1,) if "find_media" in tools and not turn.get("media")]
+                         for _ in (1,) if "find_media" in tools and not turn.get("media") and not phone_mode]
                 notes = (yield from dispatch([*(("read_note", {"slug": s}) for s in slugs), *media], said, turn, tools))[:len(slugs)]
                 for k, note in enumerate(notes):
                     part = grounding.note_sections(note, f"{heard} {' '.join(qs)}{sql_ctx}")  # query: FIFO for a heard "ไฟโฟ"
@@ -1817,8 +1822,8 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                         part = NOTE_META.sub("", note).strip()[:1400]
                     if part:
                         calls.append(("read_note", {}))
-                        texts.append(part if k == 0 else part[:1200])
-                        if k == 0:
+                        texts.append(part if k == 0 else part[:900 if phone_mode else 1200])
+                        if k == 0 and not phone_mode:
                             turn["note"] = slugs[0]
                             log.info("note on screen: %s", slugs[0])
                             yield AdditionalOutputs({"kind": "panel", "text": note_panel(note, part)})

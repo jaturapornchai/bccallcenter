@@ -270,7 +270,7 @@ CARRY_MERGE_S = 5.0  # window (s) to merge a resumed phrase if barge-in stopped 
 # has no speaker leaking into the mic, so a shorter stop ends the turn and a shorter sound cuts the secretary off.
 # ponytail: 0.5 s ends the turn of a caller who stops to think again (the 2026-11-17 complaint), for sip calls only
 SIP_PREFIX = "sip-"
-SIP_PAUSE_SILENCE_S = 0.35
+SIP_PAUSE_SILENCE_S = 0.30
 SIP_BARGE_MIN_SPEECH_S = 0.22
 # added to the boss's system message on sip calls only, after everything setup_facts reads: no judge source, and no
 # facts in it (ลุงจืด's price example stays out: a number here would pass the judge without bcbrain)
