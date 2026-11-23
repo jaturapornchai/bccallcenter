@@ -720,7 +720,10 @@ TOOL_SPECS = [
 ]
 STATUS = {"web_search": "กำลังค้นหาในอินเทอร์เน็ต", "search_docs": "กำลังค้นเอกสารในเครื่อง",
           "calc": "กำลังคำนวณ", "general_knowledge": "กำลังถามความรู้ทั่วไป"}
-FILLER_TEXT = {"hello": "สวัสดีครับ"}  # pre-rendered greeting played as soon as a call connects
+FILLER_TEXT = {
+    "hello": "สวัสดีครับ",
+    "phone_intro": "ระบบบีซีคอลเซ็นเตอร์ เจาร์วิส ยินดีให้บริการครับ คุยได้ทุกภาษาเลยนะครับ วันนี้ให้ช่วยดูแลเรื่องอะไรดีครับ",
+}  # pre-rendered greeting played as soon as a call connects (0ms LLM/TTS wait)
 FILLERS = {}  # pre-rendered at warm-up so the hello plays instantly
 
 
@@ -1755,10 +1758,10 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             f"\n(ระบบภาษา: ลูกค้ากำลังคุยเป็น {lang_label} ให้แปลข้อมูลคำตอบจากฐานความรู้ภาษาไทยและตอบกลับลูกค้าเป็น {lang_label} "
             f"อย่างเป็นธรรมชาติ สั้นกระชับ 1-2 ประโยค)"
         )
-    elif CALL_NEW_CALLER.get(cid) and not active_lang:
+    elif CALL_NEW_CALLER.get(cid) and active_lang == "th":
         now += (
-            "\n(ระบบภาษา: เบอร์ลูกค้าใหม่ ยังไม่ทราบภาษา ให้ถามสั้นๆ ว่าต้องการคุยภาษาไทยหรือภาษาอื่น "
-            "และเมื่อทราบภาษาแล้วให้แปลคำตอบเป็นภาษาที่ลูกค้าเลือก)"
+            "\n(ระบบภาษา: สายลูกค้าใหม่ ใช้ภาษาไทยเป็นค่าเริ่มต้น แต่คุยได้ทุกภาษา "
+            "หากลูกค้าพูดภาษาอื่นเข้ามาให้ถามยืนยันด้วยภาษานั้นก่อนว่าจะเปลี่ยนภาษาหรือไม่)"
         )
 
     said, screen, turn = ([FILLER_TEXT["hello"]] if hello else []), [], {}  # the history keeps the hello too
@@ -1994,14 +1997,25 @@ brief = {"day": None}  # today's brief (calendar + unread mail) is given on the 
 
 
 def greet(*_, public=False):
-    """startup_fn: runs when a call connects. A short hello, plus today's brief once a day if Google is linked
-    (owner line only: the public line has no Google tools)."""
-    # ลุงจืด 2026-11-09 "เข้ามาครั้งแรก ต้องคุยเลย": the boss + voice took ~3 s to the first word; this plays at once
+    """startup_fn: runs when a call connects. For new phone callers, default to Thai and play instant
+    pre-rendered greeting stating that J.A.R.V.I.S can speak any language (0ms LLM/TTS delay)."""
     yield AdditionalOutputs({"kind": "user", "text": ""})  # clears the screen, no caller line
+    cid = call_id()
+    if cid and cid not in CALL_LANG:
+        CALL_LANG[cid] = "th"
+    cur_lang = CALL_LANG.get(cid) or "th"
+
+    # Ultra-fast instant phone greeting for Thai / new callers (0ms LLM/TTS latency!)
+    if on_phone() and cur_lang == "th" and not session(public)[1]:
+        yield bot_out(FILLER_TEXT["hello"], FILLERS["hello"], lead=0.18)
+        yield bot_out(FILLER_TEXT["phone_intro"], FILLERS["phone_intro"], lead=0.12)
+        yield AdditionalOutputs({"kind": "done"})
+        return
+
     yield bot_out(FILLER_TEXT["hello"], FILLERS["hello"], lead=0.25)
     back = "ผู้โทรคนนี้เคยคุยกันแล้ว ทักต่อแบบคนคุ้นเคยตามเรื่องก่อนหน้าได้เลย " if session(public)[1] else ""
     note = (f"{CALL_START} พูดว่า{FILLER_TEXT['hello']}ไปแล้ว ห้ามทักซ้ำ "
-            f"แนะนำตัวสั้นๆ แบบเพื่อนเป็นกันเองว่าผมเป็นพนักงานตอบคำถามบีซีเอไอแอคเคาท์ ถามได้ทุกเรื่องในระบบเลยครับ แล้วถามว่าอยากถามหรือให้ช่วยดูเรื่องไหน {back}"
+            f"แนะนำตัวสั้นๆ แบบเพื่อนเป็นกันเองว่าผมคือเจาร์วิสจากระบบบีซีคอลเซ็นเตอร์ คุยได้ทุกภาษาเลยนะครับ แล้วถามว่าอยากให้ช่วยดูแลเรื่องไหน {back}"
             "ห้ามพูดเรื่องอากาศ ข่าว หรือข้อเท็จจริงใดที่ไม่ได้มาจากผลค้น")  # it once invented sunny weather in a hello
     # ponytail: on the owner line the brief goes to whoever calls first that day (127.0.0.1 only)
     if not public and "calendar_events" in TOOLS and brief["day"] != datetime.date.today():

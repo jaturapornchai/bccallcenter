@@ -104,30 +104,31 @@ async def entrypoint(ctx: JobContext) -> None:
     prior_summary = load_caller_summary(caller_phone)
     saved_language = load_caller_language(caller_phone)
     is_new_caller = saved_language is None
+    active_language = saved_language or "th"
     logger.info(
         "Inbound call connected: room=%s participant=%s caller=%s lang=%s has_history=%s",
         ctx.room.name,
         sip_participant.identity,
         caller_phone,
-        saved_language or "auto(new)",
+        f"{active_language} (new)" if is_new_caller else active_language,
         bool(prior_summary),
     )
 
     lk_api = api.LiveKitAPI()
-    stt_engine = ThaiWhisperSTT(language=saved_language)
+    stt_engine = ThaiWhisperSTT(language=active_language)
     call_ctx = CallCenterContext(
         room_name=ctx.room.name,
         sip_participant_identity=sip_participant.identity,
         caller_phone=caller_phone,
         livekit_api=lk_api,
-        language=saved_language,
+        language=active_language,
         on_language_change=stt_engine.set_language,
     )
 
     instructions = build_callcenter_system_prompt(
         caller_phone,
         prior_summary,
-        preferred_language=saved_language,
+        preferred_language=active_language,
         is_new_caller=is_new_caller,
     )
     tools = build_call_tools(call_ctx)
@@ -193,19 +194,19 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await session.start(room=ctx.room, agent=agent)
 
-    # ทักทายรับสายตามภาษาของเบอร์เดิม หรือถามภาษาสำหรับเบอร์ใหม่
+    # ทักทายรับสาย: เบอร์ใหม่ default ภาษาไทยพร้อมบอกว่าคุยได้ทุกภาษา; เบอร์เดิมใช้ภาษาที่บันทึกไว้
     if is_new_caller:
         await session.say(
-            "สวัสดีครับ ระบบ บีซี คอลเซ็นเตอร์ เจาร์วิส ยินดีให้บริการครับ สะดวกคุยเป็นภาษาไทย หรือต้องการใช้ภาษาอื่นแจ้งได้เลยนะครับ Hello, BC Call Center, which language would you prefer?",
+            "สวัสดีครับ ระบบ บีซี คอลเซ็นเตอร์ เจาร์วิส ยินดีให้บริการครับ สามารถคุยได้ทุกภาษาเลยนะครับ วันนี้ให้ช่วยดูแลเรื่องอะไรดีครับ",
             allow_interruptions=True,
         )
-    elif prior_summary or (saved_language and saved_language != "th"):
+    elif prior_summary or active_language != "th":
         await session.generate_reply(
-            instructions=f"ทักทายลูกค้าเดิมเป็นภาษา {saved_language or 'th'} อย่างอบอุ่น แจ้งชื่อ J.A.R.V.I.S จาก BC Call Center และถามต่อเนื่องจากเรื่องเดิมสั้นกระชับ 1–2 ประโยค"
+            instructions=f"ทักทายลูกค้าเดิมเป็นภาษา {active_language} อย่างอบอุ่น แจ้งชื่อ J.A.R.V.I.S จาก BC Call Center และถามต่อเนื่องจากเรื่องเดิมสั้นกระชับ 1–2 ประโยค"
         )
     else:
         await session.say(
-            "สวัสดีครับ ระบบ บีซี คอลเซ็นเตอร์ เจาร์วิส ยินดีให้บริการครับ วันนี้ให้ช่วยดูแลเรื่องอะไรดีครับ",
+            "สวัสดีครับ ระบบ บีซี คอลเซ็นเตอร์ เจาร์วิส ยินดีให้บริการครับ สามารถคุยได้ทุกภาษาเลยนะครับ วันนี้ให้ช่วยดูแลเรื่องอะไรดีครับ",
             allow_interruptions=True,
         )
 
