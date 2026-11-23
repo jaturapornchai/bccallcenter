@@ -291,6 +291,31 @@ def test_config_and_source_invariants():
     assert "BRAIN_DOWN_BODY not in" in src
 
 
+def test_three_tier_search_planner():
+    scope = load_symbols({
+        "_FOLLOWUP_START_RE", "_stt_ears_diverge", "_needs_search_planner", "words_ask", "SEARCH_ASK",
+    }, extra_scope={"grounded": None})
+    needs = scope["_needs_search_planner"]
+    diverge = scope["_stt_ears_diverge"]
+    words_ask = scope["words_ask"]
+
+    # Tier 2 Fast-Path: clear question & agreeing ears -> skip search_words LLM call
+    assert not diverge("ราคาแพ็กเกจเท่าไหร่ครับ", ["ราคาแพ็กเกจเท่าไหร่"])
+    assert not needs("ราคาแพ็กเกจเท่าไหร่ครับ", ["ราคาแพ็กเกจเท่าไหร่"], [])
+
+    # Tier 3 Planner-Path: ears disagree (e.g. garbled e1 vs clean e2) -> run search_words with both ears
+    assert diverge("ต้นทุนที่ สินค้า ต้นนี้ ขายสิบใจ", ["ต้นทุนสินค้า"])
+    assert needs("ต้นทุนที่ สินค้า ต้นนี้ ขายสิบใจ", ["ต้นทุนสินค้า"], [])
+
+    # Tier 3 Planner-Path: short follow-up with history -> run search_words
+    hist = [{"role": "user", "content": "วิธีคิดต้นทุน FIFO"}, {"role": "assistant", "content": "ระบบรองรับ FIFO ครับ"}]
+    assert needs("แล้วแบบอื่นล่ะ", ["แล้วแบบอื่นล่ะ"], hist)
+
+    # words_ask includes alt_heard when provided so words_early and search_words share the exact same key
+    _, ask = words_ask(hist, "คำเพี้ยน", alt_heard=["ใบรับสินค้าเมนูอะไร"])
+    assert "อีกหูฟังได้ยิน: ใบรับสินค้าเมนูอะไร" in ask[1]["content"]
+
+
 TESTS = [
     test_caller_name_rejects_connectors_and_accepts_real_names,
     test_stt_stutter_detector_and_ear2_fallback,
@@ -298,6 +323,7 @@ TESTS = [
     test_process_audio_dedup_and_short_glitch_filter,
     test_legacy_mcp_tools_hidden_from_llm_when_fast_tools_present,
     test_config_and_source_invariants,
+    test_three_tier_search_planner,
 ]
 
 

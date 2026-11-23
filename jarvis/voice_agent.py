@@ -2170,19 +2170,53 @@ def swarm_queries(query, heard, history):
     return [" ".join([raw, *grounding.acronyms(raw)]).strip()[:150]]
 
 
-def words_ask(history, heard):
+_FOLLOWUP_START_RE = re.compile(r"^(?:แล้ว|อันนี้|อันนั้น|ตัวนี้|ตัวนั้น|มัน|แบบนั้น|ถ้าอย่างนั้น|ถ้าแบบ|งั้น|ส่วน)")
+
+
+def _stt_ears_diverge(heard: str, alt_heard: list[str]) -> bool:
+    """True when primary STT and secondary OpenThai ear heard meaningfully different words."""
+    if not heard or not alt_heard:
+        return False
+    a = re.sub(r"[\s.,!?…]+", "", heard).lower()
+    b = re.sub(r"[\s.,!?…]+", "", alt_heard[0]).lower()
+    if not a or not b or a == b or a in b or b in a:
+        return False
+    # Character bigram Jaccard similarity: < 0.50 means the ears heard different phrases
+    sa = {a[i : i + 2] for i in range(max(len(a) - 1, 1))}
+    sb = {b[i : i + 2] for i in range(max(len(b) - 1, 1))}
+    return len(sa & sb) / max(len(sa | sb), 1) < 0.50
+
+
+def _needs_search_planner(heard: str, alt_heard: list[str], history: list[dict]) -> bool:
+    """Tier-2 Fast-Path vs Tier-3 AI Search Planner:
+    Run search_words before quick_answer when ears disagree, utterance is vague/follow-up, or long/rambling."""
+    s = (heard or "").strip()
+    if not s:
+        return False
+    if _stt_ears_diverge(s, alt_heard):
+        return True
+    if len(s) > 38:
+        return True
+    if history and (len(s) < 10 or bool(_FOLLOWUP_START_RE.match(s))):
+        return True
+    return False
+
+
+def words_ask(history, heard, alt_heard=None):
     """(the talk so far, the messages) of search_words: built in one place, so an ask made early is the very same one."""
     talk = [f"{'ผู้โทร' if m['role'] == 'user' else 'เลขา'}: {m['content'].partition(C.SCREEN_MARK)[0].strip()[:150]}"
             for m in history[-4:] if m["content"] and not m["content"].startswith(("(", C.SILENT_MARK))]
+    alts = [t.strip() for t in (alt_heard or ()) if t and t.strip()]
+    latest = f"ผู้โทร (ล่าสุด): {heard}" + (f" (อีกหูฟังได้ยิน: {' | '.join(alts[:2])})" if alts else "")
     return talk, [{"role": "system", "content": SEARCH_ASK},
-                  {"role": "user", "content": "\n".join([*talk, f"ผู้โทร (ล่าสุด): {heard}"])}]
+                  {"role": "user", "content": "\n".join([*talk, latest])}]
 
 
-def search_words(history, heard):
+def search_words(history, heard, alt_heard=None):
     """The caller's words made into a search: misheard words fixed, Thai and English terms, a follow-up made whole.
     Returns (words, jump): jump is (the topic so far, the new one heard) when the words leave the topic unasked.
     ponytail: one more DeepSeek call before the first word; "" on failure, and the raw words are searched"""
-    talk, ask = words_ask(history, heard)
+    talk, ask = words_ask(history, heard, alt_heard=alt_heard)
     try:
         early, t = WORDS.pop(ask[1]["content"], None), time.perf_counter()  # words_early asked this already, before the turn ended
         text, _ = early.result() if early else worker_chat(ask, None)
@@ -2217,22 +2251,25 @@ WORDS = {}  # the caller part of an ask made early -> its DeepSeek job
 WORDS_POOL = ThreadPoolExecutor(8)
 
 
-def words_early(heard, history):
+def words_early(heard, history, cid="", phone=False):
     """Asks for a speech's search words before its turn ends, unless these words make no searched turn."""
     bare = re.sub(r"[\s.,!?…]+", "", heard)
     if not bare or bare in BargeInReplyOnPause.HESITATIONS or FAST_CHAT.match(heard.strip()):
         return
-    ask = words_ask(history, heard)[1]
+    alt_heard = list(LAST_ALT_HEARD.get(cid) or ()) if cid else []
+    if phone and not _needs_search_planner(heard, alt_heard, history):
+        return  # clear phone turn uses Fast-Path (~52ms quick_answer directly)
+    ask = words_ask(history, heard, alt_heard=alt_heard if phone else None)[1]
     if ask[1]["content"] not in WORDS:  # the same words again (the speech end moved a little): that ask is on its way
         WORDS[ask[1]["content"]] = WORDS_POOL.submit(worker_chat, ask, None)
     for old in list(WORDS)[:-8]:  # asks nobody took: the caller went on talking
         WORDS.pop(old, None)
 
 
-def words_transcribed(job, history):
+def words_transcribed(job, history, cid="", phone=False):
     """Done-callback of an early transcription."""
     if not job.cancelled() and not job.exception():
-        words_early(job.result(), history)
+        words_early(job.result(), history, cid=cid, phone=phone)
 
 
 def load_workers():
@@ -2519,10 +2556,18 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             phone_mode = on_phone()
             if phone_mode:
                 # Play instant pre-rendered "please hold" cue (0ms) so the caller immediately knows the line is live
-                # while search_brain + read_note + DeepSeek + TTS run behind the 1.8s filler audio!
+                # while search planner / quick_answer + DeepSeek + TTS run behind the filler audio!
                 if wait := _pick_wait_filler(active_lang):
                     yield bot_out(wait[0], wait[1], lead=0.05, filler=True)
-                qs = [stay_topic or heard]
+                if stay_topic:
+                    qs = [stay_topic]
+                elif _needs_search_planner(heard, alt_heard, history):
+                    planned_q, _ = search_words(history, heard, alt_heard=alt_heard)
+                    if planned_q:
+                        log.info("SEARCH-PLANNER: %s -> %s", masked(heard), masked(planned_q))
+                    qs = [planned_q or heard]
+                else:
+                    qs = [heard]
             else:
                 wording = search_words(history, heard) if not stay_topic else (heard, None)
                 qs = [stay_topic] if stay_topic else swarm_queries(wording[0], heard, history)
@@ -3052,7 +3097,8 @@ class BargeInReplyOnPause(ReplyOnPause):
         # the secretary neither thinks nor had a phrase on the caller's speaker during this speech (as just_filler counts it)
         if fresh and not state.responding and not any(e + 0.5 > now_m - state.stream.size / sampling_rate for _, e, _, _ in self.playing):
             history = session(self.fn is reply_public)[1]
-            early[1].add_done_callback(lambda job: words_transcribed(job, history))
+            cur_cid = call_id() if "call_id" in globals() else ""
+            early[1].add_done_callback(lambda job, h=history, c=cur_cid, p=is_phone: words_transcribed(job, h, cid=c, phone=p))
         return silence >= pause
 
     cut = False  # cut_off() stopped the answer for the speech now being heard; process_audio's turn check clears it
