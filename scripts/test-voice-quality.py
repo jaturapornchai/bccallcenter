@@ -353,6 +353,102 @@ def test_incomplete_tail_and_phone_fallback_queries():
     assert "สายนี้เป็นโทรศัพท์ ห้ามเขียน [จอ]" in src
 
 
+def test_first_call_ai_intro_name_capture_and_callback_confirm():
+    scope = load_symbols(
+        {
+            "_NAME_PREFIX_RE", "_NAME_SUFFIX_RE", "_NAME_SPLIT_RE", "_HONORIFIC_RE",
+            "_EXPLICIT_NAME_TH_RE", "_EXPLICIT_NAME_EN_RE", "_ASKED_NAME_BOT_RE",
+            "_BAD_CALLER_NAMES", "_clean_caller_name", "_extract_caller_name_py",
+            "FILLER_TEXT",
+        },
+        extra_scope={
+            "LANG_SWITCHED_ACK": {"th": "th", "en": "en"},
+            "LANG_CONFIRM_PROMPTS": {"th": "th", "en": "en"},
+        },
+    )
+    intro = scope["FILLER_TEXT"]["phone_intro"]
+    extract = scope["_extract_caller_name_py"]
+
+    for kw in ("เอไอ", "พนักงานจริง", "โทรกลับ", "ชื่อ"):
+        assert kw in intro, f"phone_intro missing required info {kw!r}: {intro!r}"
+
+    for raw_reply, want in (
+        ("แบงค์ครับ", "แบงค์"),
+        ("ผมแบงค์ครับ", "แบงค์"),
+        ("พี่ต่ายค่ะ", "ต่าย"),
+        ("คุณสมชายครับ", "สมชาย"),
+    ):
+        got, _ = extract(raw_reply, intro)
+        assert got == want, f"extract({raw_reply!r}, intro) -> {got!r}, want {want!r}"
+
+    for bad_reply in ("และ", "ครับ", "โอเค"):
+        got, _ = extract(bad_reply, intro)
+        assert got == "", f"extract({bad_reply!r}, intro) must stay empty, got {got!r}"
+
+    assert ("เบอร์นี้" in C.PHONE_PROMPT or "เบอร์ที่โทรเข้ามานี้" in C.PHONE_PROMPT) and "เบอร์อื่น" in C.PHONE_PROMPT
+    assert "ขอชื่อลูกค้าให้สำเร็จ" in C.PHONE_PROMPT
+    assert "ต้องการให้โทรกลับเรื่องอะไร" in C.PHONE_PROMPT
+    src = SOURCE.read_text(encoding="utf-8")
+    assert "เบอร์นี้หรือเบอร์อื่น" in src
+    assert "ครบสามอย่าง" in src and "has_prior_topic" in src
+
+
+def test_leave_message_requires_topic_when_no_continuity():
+    from collections import defaultdict
+    import datetime
+    import json
+    import os
+    import tempfile
+    import grounding
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        leads_path = os.path.join(tmpdir, "leads.jsonl")
+        fake_meta = {"c1": {"phone": "020000001", "name": "สมชาย"},
+                     "c2": {"phone": "020000002", "name": "สมชาย", "lastTopic": "ออกใบกำกับภาษีไม่ได้"}}
+        fake_c = types.SimpleNamespace(LEADS_PATH=leads_path, USER_NAME="ลุงจืด")
+        scope = load_symbols({
+            "_NAME_PREFIX_RE", "_NAME_SUFFIX_RE", "_NAME_SPLIT_RE", "_HONORIFIC_RE",
+            "_EXPLICIT_NAME_TH_RE", "_EXPLICIT_NAME_EN_RE", "_ASKED_NAME_BOT_RE",
+            "_BAD_CALLER_NAMES", "_clean_caller_name", "spoken_digits",
+            "LEAD_FIELDS", "_GENERIC_CB_MSG_RE", "_CB_STRIP_RE", "_has_continuous_topic",
+            "leave_message",
+        }, extra_scope={
+            "C": fake_c,
+            "grounding": grounding,
+            "defaultdict": defaultdict,
+            "datetime": datetime,
+            "json": json,
+            "LEAD_LOCK": threading.Lock(),
+            "LEAD_COUNT": defaultdict(int),
+            "CALL_CALLER_META": fake_meta,
+            "notify_owner": lambda: None,
+            "_sync_caller_profile": lambda p, m: m,
+        })
+        has_topic = scope["_has_continuous_topic"]
+        assert not has_topic("", [
+            {"role": "user", "content": "ผมชื่อสมชายครับ"},
+            {"role": "user", "content": "ต้องการคุยกับพนักงานจริง ให้โทรกลับเบอร์นี้ครับ"},
+        ])
+        assert has_topic("ปัญหาสต็อกติดลบ", [])
+        assert has_topic("", [{"role": "user", "content": "ออกบิลขายแล้วสต็อกไม่ตัดครับ"}])
+
+        leave_msg = scope["leave_message"]
+        _, res_empty = leave_msg("สมชาย", "", "020000001", "", heard="โทรกลับเบอร์ 020000001 ได้เลย", call="c1")
+        assert "ยังไม่ทราบเรื่องที่ต้องการให้โทรกลับ" in res_empty, f"unexpected: {res_empty}"
+        _, res_gen = leave_msg("สมชาย", "", "020000001", "ขอให้โทรกลับ", heard="โทรกลับเบอร์ 020000001 ได้เลย", call="c1")
+        assert "ยังไม่ทราบเรื่องที่ต้องการให้โทรกลับ" in res_gen, f"unexpected: {res_gen}"
+        _, res_bad_name = leave_msg("และ", "", "020000001", "ปัญหาสต็อกติดลบ", heard="โทรกลับเบอร์ 020000001 ได้เลย", call="c1")
+        assert "ต้องมีชื่อลูกค้าจริง" in res_bad_name, f"unexpected: {res_bad_name}"
+
+        _, res_ok = leave_msg("สมชาย", "", "020000001", "ปัญหาสต็อกติดลบ", heard="โทรกลับเบอร์ 020000001 ได้เลย", call="c1")
+        assert "บันทึก" in res_ok or "สมชาย" in res_ok, f"unexpected ok result: {res_ok}"
+        _, res_cont = leave_msg("สมชาย", "", "020000002", "", heard="โทรกลับเบอร์ 020000002 ได้เลย", call="c2")
+        assert "ออกใบกำกับภาษีไม่ได้" in res_cont, f"unexpected continuity result: {res_cont}"
+
+        rows = [json.loads(line) for line in Path(leads_path).read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert len(rows) == 2 and rows[0]["message"] == "ปัญหาสต็อกติดลบ" and rows[1]["message"] == "ออกใบกำกับภาษีไม่ได้"
+
+
 TESTS = [
     test_caller_name_rejects_connectors_and_accepts_real_names,
     test_stt_stutter_detector_and_ear2_fallback,
@@ -362,6 +458,8 @@ TESTS = [
     test_config_and_source_invariants,
     test_three_tier_search_planner,
     test_incomplete_tail_and_phone_fallback_queries,
+    test_first_call_ai_intro_name_capture_and_callback_confirm,
+    test_leave_message_requires_topic_when_no_continuity,
 ]
 
 
