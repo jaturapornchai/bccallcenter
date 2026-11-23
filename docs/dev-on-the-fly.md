@@ -47,7 +47,7 @@ node scripts/dev-on-the-fly-scan.mjs --jarvis-log <sessionId>
 เทียบหลักฐานเป็นคู่ เพื่อหาจุดที่ระบบทำพลาดจริง:
 
 1. **STT ฟังผิดหรือผิดภาษา** — เทียบ `messages` ที่ `role` เป็นผู้โทร (สิ่งที่ระบบได้ยินตอนสายจริง) กับ `transcript` ช่อง `caller` ดูทั้งข้อความ, `lang` และ `prob` ประโยคที่สั้นกว่า 1 วินาทีหรือ `prob` ต่ำกว่า 0.6 ถือว่ายังสรุปไม่ได้
-2. **สลับภาษาผิด** — ภาษาที่ AI ตอบ เทียบกับภาษาที่ผู้โทรพูดจริง
+2. **สลับภาษาผิด** — ภาษาที่ AI ตอบ เทียบกับภาษาที่ผู้โทรพูดจริง ภาษาของสายเปลี่ยนได้เฉพาะเมื่อ log มี `LANG-ASK` (ระบบถามยืนยัน) แล้วตามด้วย `LANG-SWITCH` (ลูกค้าตอบรับ) กติกาอยู่ที่ `_lang_turn` ใน `jarvis/voice_agent.py` แก้ส่วนนี้หรือส่วนเลือกหูหลัก (`_choose_triple_ear`) ต้องเพิ่มกรณีจากสายจริงลง `scripts/test-language-rules.py` แล้วรันให้ผ่าน
 3. **จังหวะ** — `flags`, `latency`, `greetingSec`, `bargeIns`, `aiTalkOvers`, `deadAir` เทียบกับเวลาใน log ว่าช้าที่ STT, LLM, เครื่องมือ หรือ TTS
 4. **ระดับเสียง** — `caller_quiet`, `ai_quiet`, `ai_loud`, `clipping`
 5. **คำตอบ** — AI ตอบถูกตามคลังความรู้หรือไม่, `analysis.resolved`, `analysis.aiCoachingTip`, คะแนน `csatScore` / `aiQualityScore`

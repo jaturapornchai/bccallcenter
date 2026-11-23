@@ -197,7 +197,6 @@ _DEFAULT_TRANSCRIBE = transcribe
 
 
 CALL_LANG: dict[str, str | None] = {}  # webrtc_id -> ISO lang code ("th","en","zh","ja","ko","lo","my","vi","km") or None (auto)
-CALL_NEW_CALLER: dict[str, bool] = {}  # webrtc_id -> True when caller is new and language is not yet known
 CALL_CONTEXT: dict[str, str] = {}  # webrtc_id -> initial CRM/caller context injected without extra LLM turn
 CALL_CALLER_META: dict[str, dict] = {}  # webrtc_id -> {"phone", "name", "company", "totalCalls", "lastTopic"}
 LAST_WAIT_AT: dict[str, float] = {}  # webrtc_id -> monotonic ts of last wait filler (avoid repetitive cues)
@@ -379,7 +378,7 @@ MULTILANG_FAST_CHAT = re.compile(
 
 
 CORE_MULTI_LANGS = {"th", "lo", "en", "zh", "ja", "ko"}
-CALL_LAST_STT_LANG: dict[str, tuple[str, float]] = {}  # webrtc_id -> (detected_lang, probability) from Whisper
+CALL_LAST_STT_LANG: dict[str, tuple[str | None, float]] = {}  # webrtc_id -> Whisper's (language, probability) for the turn being answered
 
 
 def _detect_explicit_lang_switch(text: str) -> str | None:
@@ -442,12 +441,55 @@ def _detect_script_lang(text: str) -> str | None:
     return None
 
 
+LANG_SURE_PROB = 0.80  # Thai misheard as a whole English sentence reached 0.68 ("He wore it out.", 2026-11-23)
+
+
+def _clearly_spoken_lang(text: str, stt_lang: str | None, stt_prob: float) -> str | None:
+    """The language this turn was clearly spoken in, else None. Thai speech on a phone line is often heard as a short
+    foreign phrase (2026-11-23: "Okay." en 91%, four Chinese characters zh 90%, a Vietnamese sentence 59%), so a turn
+    counts only when Whisper is sure, the script agrees with it and the phrase is long enough."""
+    lang = _detect_script_lang(text)
+    if lang not in CORE_MULTI_LANGS or stt_lang != lang or stt_prob < LANG_SURE_PROB:
+        return None
+    if lang == "en":
+        long_enough = len(re.findall(r"[A-Za-z]{2,}", text)) >= 3
+    else:  # characters, not words: these scripts are written without spaces
+        long_enough = len(re.sub(r"\s+", "", text)) >= 6
+    return lang if long_enough else None
+
+
+_LANG_YES_START = re.compile(r"(?:yes|yeah|yep|sure|ok|okay)(?![a-z])|ใช่(?!ไหม|มั้ย|หรือ|เหรอ)|ตกลง|โอเค|好(?![吗嗎])|是的|对(?!不)|可以|はい|네|예|ເຈົ້າ", re.I)
+# ครับ/ได้/ดี open most Thai sentences ("ได้ยินไหม"): they are a yes only as the whole reply ("ได้ครับ")
+_LANG_YES_WHOLE = re.compile(r"(?:ครับผม|ครับ|ค่ะ|ได้|ดี|เอา|เปลี่ยน|please|switch|ໄດ້)(?:ครับผม|ครับ|ค่ะ|คะ|เลย|นะ|ได้|please|switch)*", re.I)
+# "ไม่ทราบว่า..." only opens a polite question
+_LANG_NO_START = re.compile(r"(?:no|nope|nah|not|don'?t|cancel)(?![a-z])|ไม่(?!ทราบ)|อย่า|不(?:用|要|是|行|必)|不[\s,.!，。！]*$|いいえ|아니|ບໍ່", re.I)
+
+
 def _is_lang_confirm_yes(text: str) -> bool:
-    return bool(re.match(r"^(yes|yeah|yep|sure|ok|okay|please|switch|ใช่|ครับ|ค่ะ|ได้|ได้เลย|เปลี่ยน|ตกลง|ดี|好|好的|是的|对|はい|네|예|ເຈົ້າ|ໄດ້)", (text or "").strip(), re.I))
+    said = (text or "").strip()
+    return bool(_LANG_YES_START.match(said) or _LANG_YES_WHOLE.fullmatch(re.sub(r"[\s,.!?…]+", "", said)))
 
 
 def _is_lang_confirm_no(text: str) -> bool:
-    return bool(re.match(r"^(no|nope|nah|cancel|ไม่|ไม่ต้อง|ไม่เปลี่ยน|ไม่เป็นไร|不用|不|いいえ|아니요|ບໍ່)", (text or "").strip(), re.I))
+    return bool(_LANG_NO_START.match((text or "").strip()))
+
+
+def _lang_turn(heard: str, cur_lang: str | None, pending: str | None, stt: tuple[str | None, float]) -> tuple[str, str | None]:
+    """What one caller turn means for the call's language. The language changes only on the caller's yes to the
+    confirm question ("switch"); another language clearly spoken or asked for raises that question ("ask"), and weak
+    evidence changes nothing ("keep"). `pending` is the language asked about on the turn before: this turn answers it
+    or drops it. "adopt" is the first clear language of a call the operator set to auto."""
+    explicit = _detect_explicit_lang_switch(heard)
+    spoken = _clearly_spoken_lang(heard, *stt)
+    declined = bool(pending) and _is_lang_confirm_no(heard)
+    if pending and not declined and (_is_lang_confirm_yes(heard) or pending in (explicit, spoken)):
+        return "switch", pending
+    if not cur_lang and spoken:
+        return "adopt", spoken
+    wanted = explicit or spoken
+    if wanted and wanted != cur_lang and not (declined and wanted == pending):
+        return "ask", wanted
+    return ("declined", pending) if declined else ("keep", None)
 
 
 TRIPLE_EAR_POOL = ThreadPoolExecutor(3)
@@ -459,30 +501,20 @@ BC_STT_PROMPT = (
 )
 
 
-def _choose_triple_ear(ear1: str, ear2: str, ear3: str, lang: str | None, det_lang: str | None = None) -> tuple[str, list[str]]:
+def _choose_triple_ear(ear1: str, ear2: str, ear3: str, lang: str | None) -> tuple[str, list[str]]:
     """Select the primary transcript from Triple-Ear ASR (ear1=Whisper GPU, ear2=OpenThai th-TH, ear3=OpenThai th-mix)
     and collect distinct alternate hearings to pass to DeepSeek at 0ms extra latency."""
     cands = [t.strip() for t in (ear1, ear2, ear3)]
     e1, e2, e3 = cands
     if lang and lang != "th":
         picked = e1 or e3 or e2
-    elif e1:
-        # Prefer ear3 if caller explicitly spoke English / language switch phrase that Whisper missed
-        if e3 and _detect_explicit_lang_switch(e3) and not _detect_explicit_lang_switch(e1):
-            picked = e3
-        elif det_lang and det_lang != "th" and (e2 or e3):
-            # Thai call + Whisper guessed another language with low confidence (confident non-Thai already
-            # returned via TRIPLE-EAR-MULTI): its text is a garbled foreign hallucination ("Mình tôi này mặn"),
-            # so trust the Thai OpenThai ears instead.
-            picked = e2 or e3
-        else:
-            picked = e1
+    elif e3 and (_detect_explicit_lang_switch(e3) or re.search(r"[A-Za-z]{2,}", e3)):
+        picked = e3  # th-mix kept the English words or the language request that th-TH spells out in Thai
     else:
-        # GPU ear1 timed out or unavailable -> pick richer of ear3 (th-mix) vs ear2 (th-TH)
-        if e3 and (_detect_explicit_lang_switch(e3) or re.search(r"[A-Za-z]{2,}", e3)):
-            picked = e3
-        else:
-            picked = e2 or e3
+        # Thai call: the Thai-only ears lead and Whisper rides along as an alternate. On phone audio Whisper is the
+        # weakest ear for Thai (2026-11-23, 24 turns heard by both): they differed 18 times, the Thai ears had the
+        # sensible text in 15 and Whisper in none, at 92-97% confidence ("มีผ่านมันทีตัวอย่างไม่" for "มีแผนบัญชีตัวอย่างไหม")
+        picked = e2 or e3 or e1
     alts = []
     norm_pick = re.sub(r"\s+", "", picked).lower()
     for t in (e1, e2, e3):
@@ -568,8 +600,8 @@ def transcribe_final(audio):
     except Exception:
         log.info("TRIPLE-EAR: Ear1 GPU >%.1fs deadline, using fast CPU Ear2/3", deadline)
 
-    if cid and det_lang in LANG_NAMES:
-        CALL_LAST_STT_LANG[cid] = (det_lang, det_prob)
+    if cid:
+        CALL_LAST_STT_LANG[cid] = (det_lang, det_prob)  # every turn, also when Ear 1 gave no verdict: reply() must not judge this turn by the last one's
 
     # Check if CPU OpenThai caught an explicit Thai/Lao language-switch request (e.g. "ช่วยพูดภาษาเกาหลี", "ภาษาลาว")
     # that Whisper missed or misheard as a foreign word / hallucination ("Thank you." / "吹鋪得大夠力")
@@ -586,6 +618,18 @@ def transcribe_final(audio):
             )
             return cpu_switch_text
 
+    # The caller is answering "switch back to Thai?": Whisper hears a one-word Thai reply as foreign ("Bye."),
+    # so a yes/no heard by the Thai ears is the answer
+    if cid and PENDING_LANG_CONFIRM.get(cid) == "th":
+        thai_answer = next((t for t in (ear2, ear3) if _is_lang_confirm_yes(t) or _is_lang_confirm_no(t)), "")
+        if thai_answer:
+            LAST_ALT_HEARD[cid] = [ear1] if ear1 else []
+            log.info(
+                "TRIPLE-EAR-ANSWER (%.2fs | req=%s det=%s %.0f%%) picked=%s | e1=%s",
+                time.perf_counter() - t_stt, req_lang or "-", det_lang or "-", det_prob * 100, masked(thai_answer), masked(ear1 or "-"),
+            )
+            return thai_answer
+
     # When in a non-Thai call and Whisper confidently heard non-Thai (or current language), trust Ear 1 100%
     script_e1 = _detect_script_lang(ear1)
     is_non_thai = bool(
@@ -595,6 +639,10 @@ def transcribe_final(audio):
             or (script_e1 in (CORE_MULTI_LANGS - {"th"}) and det_prob >= 0.40)
         )
     )
+    if is_non_thai and req_lang == "th" and cid not in PENDING_LANG_CONFIRM:
+        # Thai call with no language question waiting for its answer: a short or unsure foreign guess is Thai misheard
+        # ("Okay." en 91%), so Ear 1 leads only on what reply() itself would raise the language question for
+        is_non_thai = bool(_clearly_spoken_lang(ear1, det_lang, det_prob) or _detect_explicit_lang_switch(ear1))
     if is_non_thai:
         picked = ear1
         if cid:
@@ -606,7 +654,7 @@ def transcribe_final(audio):
         )
         return picked
 
-    picked, alts = _choose_triple_ear(ear1, ear2, ear3, req_lang, det_lang)
+    picked, alts = _choose_triple_ear(ear1, ear2, ear3, req_lang)
     if cid:
         LAST_ALT_HEARD[cid] = alts
     dt = time.perf_counter() - t_stt
@@ -2158,73 +2206,34 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
     # date/time only when asked: the boss kept quoting the clock as a web price's "updated at" date and time, and
     # the number guard can't tell (the clock is a source); no clock in the turn = nothing to misquote
     now = asked + clock_note(heard)
-    # Multi-language per-caller tracking, other-language confirmation, & instant fast-path
+    # One language per call: only the caller's yes to the confirm question (or the operator's language button) changes it
     cid = call_id()
     cur_lang = CALL_LANG.get(cid)
     if cid and heard and not hello:
-        pending = PENDING_LANG_CONFIRM.get(cid)
-        explicit = _detect_explicit_lang_switch(heard)
-        script_lang = _detect_script_lang(heard)
-        stt_det_lang, stt_det_prob = CALL_LAST_STT_LANG.get(cid, (None, 0.0))
-        spoken = script_lang or (stt_det_lang if stt_det_lang in CORE_MULTI_LANGS and stt_det_prob >= 0.65 else None)
-        # Require real Whisper confidence (>= 0.65) before auto-switching languages on script alone,
-        # preventing low-prob mishearings (e.g. 35% prob "เบอบาสาดาวเดี๋ยว" or 37% hallucinated "Thank you.") from flipping languages!
-        is_strong_lang_turn = bool(
-            spoken
-            and spoken in CORE_MULTI_LANGS
-            and stt_det_prob >= 0.65
-            and (
-                (spoken == "en" and len(re.findall(r"[A-Za-z]{2,}", heard)) >= 3)
-                or (spoken in ("zh", "ja", "ko", "lo") and len(re.sub(r"\s+", "", heard)) >= 4)
-                or (spoken == "th" and len(re.findall(r"[\u0E00-\u0E7F]", heard)) >= 6)
-            )
-        )
-
-        if pending:
-            if _is_lang_confirm_yes(heard) or explicit == pending or spoken == pending:
-                PENDING_LANG_CONFIRM.pop(cid, None)
-                CALL_LANG[cid] = pending
-                CALL_NEW_CALLER[cid] = False
-                yield AdditionalOutputs({"kind": "lang", "language": pending})
-                if len(heard.strip()) <= 24 and not (spoken == pending and is_strong_lang_turn):
-                    yield AdditionalOutputs({"kind": "user", "text": heard})
-                    ack = LANG_SWITCHED_ACK.get(pending, LANG_SWITCHED_ACK["en"])
-                    yield bot_out(ack, _filler_or_speak(f"lang_ack_{pending}", ack, pending), lead=0.08)
-                    yield AdditionalOutputs({"kind": "done"})
-                    return
-            elif _is_lang_confirm_no(heard):
-                PENDING_LANG_CONFIRM.pop(cid, None)
-                now += f"\n(ระบบภาษา: ลูกค้าปฏิเสธการเปลี่ยนภาษา ให้คุยภาษาเดิม {LANG_NAMES.get(cur_lang or 'th', 'ภาษาไทย')} ต่อตามปกติ)"
-        elif explicit and explicit != cur_lang:
-            PENDING_LANG_CONFIRM.pop(cid, None)
-            CALL_LANG[cid] = explicit
-            CALL_NEW_CALLER[cid] = False
-            yield AdditionalOutputs({"kind": "lang", "language": explicit})
-            if len(heard.strip()) <= 36:
+        stt = CALL_LAST_STT_LANG.get(cid, (None, 0.0))
+        # the question lives for one turn: left waiting, a later misheard phrase in that language once counted as the yes
+        action, lang = _lang_turn(heard, cur_lang, PENDING_LANG_CONFIRM.pop(cid, None), stt)
+        if action in ("switch", "adopt"):
+            CALL_LANG[cid] = lang
+            log.info("LANG-SWITCH (%s): %s -> %s", cid, cur_lang or "-", lang)
+            yield AdditionalOutputs({"kind": "lang", "language": lang})
+            if action == "switch" and len(heard.strip()) <= 24 and _clearly_spoken_lang(heard, *stt) != lang:
+                # a bare yes: nothing in this turn to answer yet
                 yield AdditionalOutputs({"kind": "user", "text": heard})
-                ack = LANG_SWITCHED_ACK.get(explicit, LANG_SWITCHED_ACK["en"])
-                yield bot_out(ack, _filler_or_speak(f"lang_ack_{explicit}", ack, explicit), lead=0.08)
+                ack = LANG_SWITCHED_ACK.get(lang, LANG_SWITCHED_ACK["en"])
+                yield bot_out(ack, _filler_or_speak(f"lang_ack_{lang}", ack, lang), lead=0.08)
                 yield AdditionalOutputs({"kind": "done"})
                 return
-        elif not cur_lang and spoken:
-            CALL_LANG[cid] = spoken
-            CALL_NEW_CALLER[cid] = False
-            yield AdditionalOutputs({"kind": "lang", "language": spoken})
-        elif cur_lang and spoken and spoken != cur_lang:
-            if is_strong_lang_turn:
-                # Caller clearly spoke a full phrase in Thai/Lao/English/Chinese/Japanese/Korean -> auto-switch seamlessly!
-                PENDING_LANG_CONFIRM.pop(cid, None)
-                CALL_LANG[cid] = spoken
-                CALL_NEW_CALLER[cid] = False
-                yield AdditionalOutputs({"kind": "lang", "language": spoken})
-                log.info("AUTO-LANG-SWITCH (%s): %s -> %s (prob=%.0f%%)", cid, cur_lang, spoken, stt_det_prob * 100)
-            else:
-                PENDING_LANG_CONFIRM[cid] = spoken
-                yield AdditionalOutputs({"kind": "user", "text": heard})
-                q_text = LANG_CONFIRM_PROMPTS.get(spoken, LANG_CONFIRM_PROMPTS["en"])
-                yield bot_out(q_text, _filler_or_speak(f"lang_confirm_{spoken}", q_text, spoken), lead=0.08)
-                yield AdditionalOutputs({"kind": "done"})
-                return
+        elif action == "ask":
+            PENDING_LANG_CONFIRM[cid] = lang
+            log.info("LANG-ASK (%s): %s -> %s?", cid, cur_lang or "-", lang)
+            yield AdditionalOutputs({"kind": "user", "text": heard})
+            q_text = LANG_CONFIRM_PROMPTS.get(lang, LANG_CONFIRM_PROMPTS["en"])
+            yield bot_out(q_text, _filler_or_speak(f"lang_confirm_{lang}", q_text, lang), lead=0.08)
+            yield AdditionalOutputs({"kind": "done"})
+            return
+        elif action == "declined":
+            now += f"\n(ระบบภาษา: ลูกค้าปฏิเสธการเปลี่ยนภาษา ให้คุยภาษาเดิม {LANG_NAMES.get(cur_lang or 'th', 'ภาษาไทย')} ต่อตามปกติ)"
 
     if cid and heard and not hello:
         prev_bot_msg = history[-1]["content"] if history and history[-1].get("role") == "assistant" else ""
@@ -2283,10 +2292,11 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             f"ระบบเสียงของคุณรองรับการพูดเป็น {lang_label} ได้จริง 100% ห้ามพูดว่าพูดได้แค่ภาษาไทยหรือแปลไม่ได้เด็ดขาด! "
             f"ให้แปลข้อมูลคำตอบจากฐานความรู้ภาษาไทยและตอบกลับเป็นอักษรและภาษา {lang_label} แท้ๆ อย่างเป็นธรรมชาติ สั้นกระชับ 1-2 ประโยค)"
         )
-    elif CALL_NEW_CALLER.get(cid) and active_lang == "th":
+    elif active_lang == "th" and heard and _detect_script_lang(heard) != "th":
+        # the code above owns the language question; left to the LLM, a misheard English phrase got an English answer
         now += (
-            "\n(ระบบภาษา: สายลูกค้าใหม่ ใช้ภาษาไทยเป็นค่าเริ่มต้น แต่คุยได้ทุกภาษา "
-            "หากลูกค้าพูดภาษาอื่นเข้ามาให้ถามยืนยันด้วยภาษานั้นก่อนว่าจะเปลี่ยนภาษาหรือไม่)"
+            "\n(ระบบภาษา: สายนี้คุยภาษาไทย คำที่ได้ยินรอบนี้ไม่ใช่ภาษาไทยซึ่งอาจฟังเพี้ยน ให้ตอบเป็นภาษาไทยเท่านั้น "
+            "ห้ามเปลี่ยนภาษาหรือถามเรื่องเปลี่ยนภาษาเอง ระบบจะถามยืนยันกับลูกค้าเองเมื่อได้ยินภาษาอื่นชัดเจน)"
         )
 
     said, screen, turn = ([FILLER_TEXT["hello"]] if hello else []), [], {}  # the history keeps the hello too
@@ -3113,7 +3123,6 @@ def make_app(stream, public=False):
             CALL_LANG[call] = str(lang)
         else:
             return JSONResponse({"error": "unsupported language"}, status_code=400)
-        CALL_NEW_CALLER[call] = is_new
         if isinstance(init_ctx, str) and init_ctx.strip():
             CALL_CONTEXT[call] = init_ctx.strip()[:800]
         if isinstance(caller_meta, dict) or caller_phone:
