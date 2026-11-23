@@ -523,7 +523,8 @@ def speak(text, lang_override=None):
     norm = normalize_text(_thai_pronounce(_say_numbers(text))).strip() if lang == "th" else re.sub(r"[#*_`~|]", " ", text or "").strip()
     if not norm:
         return np.zeros((1, C.TTS_SAMPLE_RATE // 10), np.float32)
-    steps = min(C.TTS_STEP, 4) if ("on_phone" in globals() and on_phone()) else C.TTS_STEP
+    # Use full C.TTS_STEP (16 diffusion steps) on phone lines too; dropping to 4 steps causes slurred Thai speech.
+    steps = C.TTS_STEP
     for _ in range(3):
         with TTS_LOCK:
             wav = model.generate(text=norm, language=lang, voice_clone_prompt=voice, speed=C.TTS_SPEED,
