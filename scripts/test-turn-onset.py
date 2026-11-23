@@ -24,7 +24,7 @@ import config as C  # noqa: E402
 
 MODULE_NAMES = {"_audio_dbfs"}
 CLASS_NAME = "BargeInReplyOnPause"
-CLASS_NAMES = {"determine_pause", "_is_phone"}
+CLASS_NAMES = {"determine_pause", "_is_phone", "_checked_state_id"}
 SR = 16000
 
 
@@ -56,6 +56,7 @@ def build(phone, voiced_fn):
             submitted.append(args)
             return types.SimpleNamespace(cancel=lambda: None, add_done_callback=lambda cb: None)
 
+    pool = FakePool()
     scope = {
         "np": np,
         "time": time,
@@ -64,7 +65,8 @@ def build(phone, voiced_fn):
         "log": logging.getLogger("test-turn-onset"),
         "LIVE": {},
         "EARLY": {},
-        "EARLY_STT": FakePool(),
+        "EARLY_STT": pool,
+        "LIVE_STT_POOL": pool,
         "stt": types.SimpleNamespace(),
         "on_phone": lambda: phone,
         "voiced": voiced_fn,

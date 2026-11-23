@@ -252,8 +252,13 @@ _ASKED_NAME_BOT_RE = re.compile(r"(?:ขอเรียกชื่อ|ชื่
 _BAD_CALLER_NAMES = {
     "อะไร", "เล่น", "จริง", "โปรแกรม", "ระบบ", "บริษัท", "ร้าน", "ลูกค้า", "เมนู", "สินค้า",
     "ไม่", "ครับ", "ค่ะ", "คะ", "คับ", "ไม่สะดวก", "ไม่เป็นไร", "ไม่บอก", "ไม่ต้อง", "เบอร์",
-    "ราคา", "ใช่", "ไม่ใช่", "โอเค", "ได้เลย", "ดี", "ครับผม", "เปลี่ยนเลย", "เรื่องเดิม",
+    "ราคา", "ใช่", "ไม่ใช่", "โอเค", "ได้เลย", "ดี", "ครับผม", "นะครับ", "นะคะ", "เปลี่ยนเลย", "เรื่องเดิม",
+    "และ", "แล้ว", "ก็", "นะ", "นี้", "นั้น", "นี่", "นั่น", "อันนี้", "อันนั้น", "คือ", "หรือ", "แต่", "เพราะ", "ถ้า",
+    "กับ", "จาก", "เป็น", "อยู่", "ที่", "ใน", "มา", "ไป", "ได้", "เอา", "ดู", "ลอง", "ถาม", "พูด", "ฟัง", "ช่วย",
+    "เอ่อ", "อ่า", "อ้า", "อืม", "อือ", "ฮึ", "หึ", "อ๋อ", "อ้อ", "จ้า", "จ้ะ", "เหรอ", "หรอ", "เลย", "มาก", "หน่อย", "ด้วย",
+    "เดี๋ยว", "แป๊บ", "หยุด", "พอ", "เจ๊", "เฮีย", "พี่", "น้อง", "คุณ", "ผม", "ฉัน", "หนู", "ดิฉัน", "มัน", "เขา", "เรา",
     "calling", "asking", "looking", "trying", "interested", "using", "not", "here", "fine", "good", "okay",
+    "hello", "hi", "yes", "no", "thanks", "thank", "and",
 }
 
 
@@ -318,7 +323,11 @@ def _extract_caller_name_py(text: str, prev_bot: str = "") -> tuple[str, bool]:
     if prev_bot and _ASKED_NAME_BOT_RE.search(prev_bot):
         if m := re.match(r"^([ก-๙a-zA-Z]{2,18})(?:\s*(?:ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|คับ|ก็ได้))?$", s):
             cand = _clean_caller_name(m.group(1))
-            if len(cand) >= 2 and cand.lower() not in _BAD_CALLER_NAMES and not re.match(r"^(?:ไม่|ขอ|อยาก|มี|ทำ|ราคา|เบอร์)", cand):
+            if (
+                len(cand) >= 2
+                and cand.lower() not in _BAD_CALLER_NAMES
+                and not re.match(r"^(?:ไม่|ขอ|อยาก|มี|ทำ|ราคา|เบอร์|และ|แล้ว|แต่|หรือ|ถ้า|คือ|เอ่อ|อัน|มัน|นี่|นั่น|คุณ|เจ๊)", cand)
+            ):
                 return cand, False
     return "", False
 
@@ -530,13 +539,25 @@ def _lang_turn(heard: str, cur_lang: str | None, pending: str | None, stt: tuple
     return ("declined", pending) if declined else ("keep", None)
 
 
-TRIPLE_EAR_POOL = ThreadPoolExecutor(3)
+EAR1_GPU_POOL = ThreadPoolExecutor(2)
+EAR23_CPU_POOL = ThreadPoolExecutor(4)
+TRIPLE_EAR_POOL = EAR23_CPU_POOL  # backward-compatible alias
+_EAR1_GPU_SEM = threading.Semaphore(1)  # CTranslate2 runs 1 GPU job at a time: skip queuing if busy to prevent domino timeouts
 LAST_ALT_HEARD: dict[str, list[str]] = {}  # webrtc_id -> distinct alternate transcripts from secondary ears
 BC_STT_PROMPT = (
-    "โปรแกรมบัญชี BC Ai Account, บีซีเอไอแอคเคาท์, Express, เอ็กซ์เพรส, ต้นทุนสินค้า, FIFO, ถัวเฉลี่ย, "
-    "ภาษีมูลค่าเพิ่ม VAT, ภ.พ.30, ลูกหนี้, เจ้าหนี้, ขายสด, ขายเชื่อ, สต็อก, คลังสินค้า, "
-    "ผู้รับเหมา, ใบกำกับภาษี, ใบเสนอราคา, POS, API, SQL"
+    "โปรแกรมบัญชี BC Ai Account, บีซีเอไอแอคเคาท์, AI, เอไอ, Express, เอ็กซ์เพรส, "
+    "ต้นทุนสินค้า, FIFO, FEFO, LIFO, ถัวเฉลี่ย, แพ็กเกจ Starter สตาร์ทเตอร์, Standard สแตนดาร์ด, "
+    "Professional, Enterprise, โปรโมชัน, ส่วนลด, ภาษีมูลค่าเพิ่ม VAT, ภ.พ.30, ลูกหนี้, เจ้าหนี้, "
+    "ขายสด, ขายเชื่อ, สต็อก, คลังสินค้า, ผู้รับเหมา, ใบกำกับภาษี, ใบเสนอราคา, POS, API, SQL"
 )
+_STT_STUTTER_3_RE = re.compile(r"([\u0E00-\u0E7F]{3,})\1")
+_STT_STUTTER_2X3_RE = re.compile(r"([\u0E00-\u0E7F]{2,})\1\1")
+
+
+def _has_stt_stutter(text: str) -> bool:
+    """Detect Whisper syllable/phrase repetition loops without spaces (e.g. 'บาทบาทบาท', 'เท่าไหร่าไหร่')."""
+    s = (text or "").strip()
+    return bool(s and (_STT_STUTTER_3_RE.search(s) or _STT_STUTTER_2X3_RE.search(s)))
 
 
 def _choose_triple_ear(ear1: str, ear2: str, ear3: str, lang: str | None) -> tuple[str, list[str]]:
@@ -578,14 +599,21 @@ def transcribe_final(audio):
         model = get_multi_stt() if use_multi else final_stt
         if model is None:
             return "", None, 0.0
-        try:
-            if not use_multi:
+        if not use_multi:
+            # CTranslate2 executes one GPU job at a time: if a previous timed-out job still holds the GPU,
+            # fail fast instead of queueing behind it and causing a chain of 1.6s+ domino timeouts.
+            if not _EAR1_GPU_SEM.acquire(timeout=0.35):
+                log.info("TRIPLE-EAR: Ear1 GPU busy, using fast CPU Ear2/3")
+                return "", None, 0.0
+            try:
                 # Thai call -> Typhoon Whisper Turbo locked to Thai + BC accounting prompt (2.3% CER, zero English hallucinations!)
                 segments, info = model.transcribe(
                     data,
                     language="th",
                     beam_size=1 if phone_mode else 2,
                     initial_prompt=BC_STT_PROMPT,
+                    repetition_penalty=1.15,
+                    no_repeat_ngram_size=3,
                     vad_filter=True,
                     vad_parameters=C.STT_VAD_PARAMS,
                     without_timestamps=True,
@@ -593,13 +621,21 @@ def transcribe_final(audio):
                 )
                 txt = "".join(s.text for s in segments).strip()
                 return txt, "th", float(getattr(info, "language_probability", 0.95) or 0.95)
+            except Exception:
+                log.exception("Ear1 (Typhoon GPU) failed")
+                return "", None, 0.0
+            finally:
+                _EAR1_GPU_SEM.release()
 
+        try:
             # Non-Thai call (en/zh/ja/ko/lo) -> Multilingual Whisper Large-v3-Turbo on CPU (int8) locked to active call language
             segments, info = model.transcribe(
                 data,
                 language=req_lang if req_lang in LANG_NAMES else None,
                 beam_size=1,
                 initial_prompt=None,
+                repetition_penalty=1.1,
+                no_repeat_ngram_size=3,
                 vad_filter=True,
                 vad_parameters=C.STT_VAD_PARAMS,
                 without_timestamps=True,
@@ -610,7 +646,7 @@ def transcribe_final(audio):
             det_prob = float(getattr(info, "language_probability", 0.90) or 0.90)
             return txt, det_lang, det_prob
         except Exception:
-            log.exception("Ear1 (%s) failed", "Multilingual CPU" if use_multi else "Typhoon GPU")
+            log.exception("Ear1 (Multilingual CPU) failed")
             return "", None, 0.0
 
     def _run_ears23():
@@ -623,16 +659,15 @@ def transcribe_final(audio):
             log.exception("Ear2/3 (OpenThai B=2) failed")
             return "", ""
 
-    # Always run Ear 1 (GPU Multilingual Whisper) and Ear 2/3 (CPU OpenThai th-TH + th-mix) IN PARALLEL
-    # even during non-Thai calls! Why: if a caller in a ZH/JA/EN call speaks Thai ("ช่วยพูดภาษาเกาหลี" / "เว้าภาษาลาวได้บ่"),
-    # CPU OpenThai catches the Thai/Lao switch command accurately instead of Whisper hallucinating Chinese/English!
-    f_gpu = TRIPLE_EAR_POOL.submit(_run_ear1)
-    f_cpu = TRIPLE_EAR_POOL.submit(_run_ears23)
+    # Always run Ear 1 (GPU Typhoon / CPU Multilingual Whisper) and Ear 2/3 (CPU OpenThai th-TH + th-mix) IN PARALLEL
+    # on separate pools so a slow GPU job can never starve CPU OpenThai.
+    f_gpu = EAR1_GPU_POOL.submit(_run_ear1)
+    f_cpu = EAR23_CPU_POOL.submit(_run_ears23)
 
     ear2, ear3 = f_cpu.result()
     ear1, det_lang, det_prob = "", None, 0.0
     use_multi_call = bool(req_lang and req_lang != "th")
-    deadline = (3.5 if use_multi_call else 1.6) if phone_mode else 4.0
+    deadline = (3.5 if use_multi_call else 2.2) if phone_mode else 4.0
     rem = max(0.05, deadline - (time.perf_counter() - t_stt))
     try:
         ear1, det_lang, det_prob = f_gpu.result(timeout=rem)
@@ -700,17 +735,23 @@ def transcribe_final(audio):
 
     picked, alts = _choose_triple_ear(ear1, ear2, ear3, req_lang)
     # When Ear 1 is Thai-specialized Typhoon Whisper Turbo (2.3% CER vs OpenThai 17.6% CER) on a Thai call,
-    # let Typhoon lead unless OpenThai th-mix caught an explicit language-switch or a pure English sentence.
+    # let Typhoon lead unless OpenThai th-mix caught an explicit language-switch / pure English sentence,
+    # OR Typhoon fell into a syllable-repetition loop ("บาทบาทบาท", "เท่าไหร่าไหร่") that OpenThai heard cleanly.
     if (
         (not use_multi_call)
         and "typhoon" in C.FINAL_STT_MODEL.lower()
         and ear1
         and not (ear3 and (_detect_explicit_lang_switch(ear3) or _detect_script_lang(ear3) == "en"))
     ):
-        picked = ear1
+        if _has_stt_stutter(ear1) and ear2 and len(ear2.strip()) >= 4 and not _has_stt_stutter(ear2):
+            picked = ear2
+            alt_sources = (ear1, ear3)
+        else:
+            picked = ear1
+            alt_sources = (ear2, ear3)
         norm_p = re.sub(r"\s+", "", picked).lower()
         alts = []
-        for t in (ear2, ear3):
+        for t in alt_sources:
             if t and re.sub(r"\s+", "", t).lower() != norm_p and t not in alts:
                 alts.append(t)
     if cid:
@@ -726,6 +767,7 @@ def transcribe_final(audio):
 
 EARLY = {}  # handler -> (the speech so far, its transcription job), started in the silence before a turn ends
 EARLY_STT = ThreadPoolExecutor(2)  # ponytail: CTranslate2 runs one GPU job at a time anyway
+LIVE_STT_POOL = ThreadPoolExecutor(2)  # dedicated pool for OpenThai live_words so barge-in never queues behind early STT
 
 
 def early_words(data):
@@ -1519,6 +1561,9 @@ def connect_mcp(server, url):
     return None
 
 
+LEGACY_BRAIN_TOOLS = frozenset({"search_brain", "read_note", "ask_brain"})
+
+
 def load_mcp_tools():
     for server, url in C.MCP_SERVERS.items():
         connected = connect_mcp(server, url)
@@ -1526,9 +1571,14 @@ def load_mcp_tools():
             log.warning("MCP %s unavailable -> its tools are skipped", server)
             continue
         client, tools = connected
+        tool_names = {t["name"] for t in tools}
+        # When fast single-round-trip tools (quick_answer + batch_read) are available, hide slower legacy tools
+        # from the LLM schema to prevent 3-4 round duplicate searches while keeping them in TOOLS for internal use.
+        hide_from_llm = LEGACY_BRAIN_TOOLS if ("quick_answer" in tool_names and "batch_read" in tool_names) else frozenset()
         for t in tools:
             schema = {k: v for k, v in t["inputSchema"].items() if k != "$schema"}
-            TOOL_SPECS.append(tool_spec(t["name"], t.get("description", ""), schema))
+            if t["name"] not in hide_from_llm:
+                TOOL_SPECS.append(tool_spec(t["name"], t.get("description", ""), schema))
             TOOLS[t["name"]] = mcp_tool(server, client, t["name"])
             WORKER[t["name"]] = server
             STATUS[t["name"]] = f"กำลังค้นคลังความรู้ {server}"
@@ -1982,6 +2032,7 @@ TALK_ASK = (
 # an answer with some phrases kept now just ends on them (the panel still notes the cut), and this asks for more words
 CUT_ALL = "เรื่องนี้ผมยังหาข้อมูลที่แน่ใจไม่เจอครับ ช่วยเล่าเพิ่มอีกนิดได้ไหมครับ"
 BARE_ACK = re.compile(r"(?:ได้|ได้เลย|ครับ|ค่ะ|ครับผม|ใช่|เข้าใจ|รับทราบ|โอเค|อ๋อ)(?:\s*(?:ครับ|ค่ะ|เลยครับ|นะครับ))?")
+BARE_ADDRESS = re.compile(r"^(?:คุณ|พี่|ลุง|ป้า|น้า|อา|น้อง|เฮีย|เจ๊)[ก-๙a-zA-Z]{1,20}(?:\s*(?:ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ))?$")
 SCREEN_ONLY = "รายละเอียดผมแสดงไว้บนจอแล้วครับ"
 # DeepSeek at times ends a round on a promise ("ขอผมอ่านรายละเอียดก่อนนะครับ") with no tool call, and the turn went
 # quiet (javis 2026-11-07: 5 turns of one call, the first with no history). ponytail: a phrase list; a new wording
@@ -2481,7 +2532,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 calls = [("quick_answer", {
                     "question": clean_q0,
                     **zone,
-                    "max_chars": 1400 if phone_mode else 2600,
+                    "max_chars": 2200 if phone_mode else 2600,
                     "include_media": not phone_mode,
                 })]
                 if "lookup_menu" in tools and MENU_CODE_ASK.search(f"{heard} {clean_q0}"):
@@ -2536,10 +2587,15 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                            f"คำตอบที่อธิบายเรื่องใหม่ ต่อท้าย [จอ] ด้วยบรรทัด {C.SAMPLE_LABEL} แล้วเลือกวิธีแสดงตัวอย่างให้เหมาะกับบริบท "
                            "(ตารางคำนวณ แถบ [การ์ด]+กล่องเคส > ผังโครงสร้างย่อหน้า - /   - กล่องเคส >+[ขั้นตอน] หรือกรอบ ```sql+> พารามิเตอร์) "
                            "ห้ามครอบผังย่อหน้าด้วย ``` และห้ามใส่ตัวเลขสองหลักขึ้นไปหรือวันที่สมมติเองโดยไม่ผ่าน calc ถ้าไม่ได้เรียก calc ให้ใช้รหัสติดตัวอักษรเช่น WH01, A01, SKU01)")
+            reuse_hint = (
+                "ผลค้นจาก quick_answer ด้านบนมีข้อมูลพร้อมแล้ว ให้ใช้ตอบทันทีได้เลย ห้ามเรียก quick_answer ซ้ำด้วยคำถามเดิม "
+                "เรียก lookup_menu หรือ batch_read เพิ่มเฉพาะเมื่อข้อมูลด้านบนยังขาดรหัสเมนูหรือรายละเอียดสำคัญจริงๆ เท่านั้น "
+                if read else
+                "ถ้าไม่มีส่วนไหนตรง ให้สั่งลูกทีมค้นสมองในรอบเดียวก่อน (quick_answer / lookup_menu / batch_read หรือ web_search) "
+            )
             now += (f"\n(ระบบ: คำพูดนี้น่าจะหมายถึง {query} ลูกทีม Swarm ค้นสมองให้แล้ว {found} "
                     "ใช้เฉพาะข้อมูลที่มีอยู่จริงในผลค้นสมองนี้เท่านั้น ห้ามเดาหรือแต่งเติมเองเด็ดขาด เวลาพูดให้คุยเป็นกันเองเหมือนเพื่อนโดยไม่ต้องพูดคำว่า จากคลังความรู้บีซี "
-                    # 2026-11-08 04:08 call: "ไม่พบเรื่อง…ในคลังความรู้บีซีครับ หมายถึงอะไรครับ" 4 times, never a second search
-                    "ถ้าไม่มีส่วนไหนตรง ให้สั่งลูกทีมค้นสมองในรอบเดียวก่อน (quick_answer / lookup_menu / batch_read หรือ web_search) "
+                    + reuse_hint +
                     # 2026-11-08 05:16: asked for a worked example, it said "ยังไม่มีในคลัง" twice
                     "ถ้ายังไม่เจอและเป็นความรู้ทั่วไปที่ไม่ใช่เรื่อง BC ให้ถาม general_knowledge ถ้าเป็นเรื่อง BC จึงบอกสั้นๆ ว่ายังไม่มีข้อมูล "
                     "แล้วถามว่าหมายถึงเรื่องไหน ถ้าขอตัวอย่างหรือให้คิดเลข ให้ตั้งตัวเลขสมมติตามสูตรในผลค้นแล้วคิดด้วย calc ห้ามตอบจากความจำ "
@@ -2553,7 +2609,8 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             said.append(ask)
             turn["voiced"] = True
             yield bot_out(ask, speak(ask), lead=0.18)
-        for rnd in range(0 if ask else C.MAX_TOOL_ROUNDS + 1):
+        max_rounds = C.SIP_MAX_TOOL_ROUNDS if on_phone() else C.MAX_TOOL_ROUNDS
+        for rnd in range(0 if ask else max_rounds + 1):
             calls = []
             # what the judge may accept: this turn's question, prefetch and tool results, earlier turns, and what
             # load_workers said is true of this setup (Google not connected, the team); fixed within a round so
@@ -2569,7 +2626,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                           or (read and CALC_ASK.search(heard if prev_kb else f"{heard} {query}")))
             )
             choice = {"type": "function", "function": {"name": "calc"}} if rnd == 0 and "calc" in tools and need_calc else None
-            last = rnd == C.MAX_TOOL_ROUNDS  # the note rides on this call only, never kept in the history
+            last = rnd == max_rounds  # the note rides on this call only, never kept in the history
             tokens = llm_tokens(plain_turn(messages + [LAST_ROUND]) if last else messages, calls, None if last else specs, choice)
             said_before, mark = len(said), time.perf_counter()  # mark: where each phrase's own time starts
             words, shown, side = beside(tokens, screen, known, sources, turn, stop)
@@ -2599,8 +2656,9 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                         if len(stripped_oh) >= 6:
                             text = stripped_oh
                     # log 2026-11-14 05:44..06:08: "ได้ครับ" went out alone, then the real sentence was cut and the
-                    # turn ended on a bare "ได้ครับ" 3 times. Hold a lone ack to join the real sentence smoothly.
-                    if not said and BARE_ACK.fullmatch(text):
+                    # turn ended on a bare "ได้ครับ" 3 times. Hold a lone ack or bare caller address ("คุณ...ครับ")
+                    # to join the real sentence smoothly instead of speaking it alone between tool rounds.
+                    if not said and (BARE_ACK.fullmatch(text) or BARE_ADDRESS.fullmatch(text)):
                         turn["ack"] = text
                         continue
                     if not said and turn.get("cut") and DANGLING_HEAD.search(text):  # log 2026-11-14 11:06:55: opener cut, "แต่ที่มีคือ..." spoke mid-thought
@@ -2637,7 +2695,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             if turn.get("silent"):
                 break
             yield from showing(shown, side)  # the rest of the screen, each line as it passes
-            if not calls and rnd < C.MAX_TOOL_ROUNDS and not turn.get("nudged") and STALL.search(" ".join(said[said_before:])):
+            if not calls and rnd < max_rounds and not turn.get("nudged") and STALL.search(" ".join(said[said_before:])):
                 turn["nudged"] = True  # once: a second bare promise just ends the turn
                 messages += [{"role": "assistant", "content": " ".join(said[said_before:])}, {"role": "user", "content": STALL_NUDGE}]
                 continue
@@ -2653,7 +2711,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                     and 9 <= len(spoken_digits((CALL_CALLER_META.get(cid) or {}).get("phone") or "")) <= 15
                 )
             )
-            if (not calls and rnd < C.MAX_TOOL_ROUNDS and not turn.get("lead_nudged") and "leave_message" in tools
+            if (not calls and rnd < max_rounds and not turn.get("lead_nudged") and "leave_message" in tools
                     and has_callback_phone and LEAD_PROMISE.search(" ".join(said))
                     and not any(c["function"]["name"] == "leave_message" for m in messages for c in m.get("tool_calls", ()))):
                 turn["lead_nudged"] = True
@@ -2664,7 +2722,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             # with every spoken sentence cut, and the boss asked general_knowledge in 7. When nothing it said stood,
             # code asks that worker once: the answer is a source for the next round, said as general knowledge.
             # ponytail: asked with the caller's bare words, so a "แล้วอันนี้ล่ะ" gets a vague answer and the old fallback
-            if (not calls and heard and not said and turn.get("cut") and rnd < C.MAX_TOOL_ROUNDS and "general_knowledge" in tools
+            if (not calls and heard and not said and turn.get("cut") and rnd < max_rounds and "general_knowledge" in tools
                     and not any(c["function"]["name"] == "general_knowledge" for m in messages for c in m.get("tool_calls", ()))):
                 calls, turn["cut_open"] = [{"id": "general", "name": "general_knowledge", "args": {"question": heard}}], False
             if not calls:
@@ -2849,6 +2907,8 @@ class BargeInReplyOnPause(ReplyOnPause):
     def reset(self):
         old = self.state
         super().reset()
+        self._checked_state_id = 0
+        self._checked_stream_len = 0
         for field in ("stream", "buffer", "sampling_rate", "started_talking"):
             setattr(self.state, field, getattr(old, field))
         if not self.state.started_talking:
@@ -2925,6 +2985,8 @@ class BargeInReplyOnPause(ReplyOnPause):
         0.6-1.2 s late; this checks the last second every PAUSE_STEP_S, and the turn ends PAUSE_SILENCE_S after the
         last word. At EARLY_STT_SILENCE_S the speech so far is transcribed already; reply() takes those words if the
         caller said nothing more (LiveKit's preemptive generation, the STT part only: the boss's tools can act)."""
+        if self._checked_state_id == id(state):
+            return True  # pause already verified for this state; keep pause_detected=True until emit() consumes it
         is_phone = on_phone()
         if is_phone:
             self._is_phone = True
@@ -2970,7 +3032,7 @@ class BargeInReplyOnPause(ReplyOnPause):
             delta = state.stream[fed:].copy() if live.get("stream") is not None else state.stream[-15 * sampling_rate:].copy()
             live["busy"], live["t"], live["fed"] = True, now_m, state.stream.size
             ctx = contextvars.copy_context()
-            EARLY_STT.submit(ctx.run, self.live_words, sampling_rate, delta, state, is_phone)
+            LIVE_STT_POOL.submit(ctx.run, self.live_words, sampling_rate, delta, state, is_phone)
         # speech past what was transcribed early makes it out of date; a speech end the sliding VAD merely moves a
         # little (through Opus it does) inside the transcribed audio does not. No speech in the window: the speech
         # end did not move, `silence` is just capped at the window. Without `chunks` every 0.9 s of quiet counted as
@@ -2991,6 +3053,7 @@ class BargeInReplyOnPause(ReplyOnPause):
 
     cut = False  # cut_off() stopped the answer for the speech now being heard; process_audio's turn check clears it
     _checked_stream_len = 0
+    _checked_state_id = 0
 
     def cut_off(self, reason: str = "the caller started talking"):
         """Stop the active answer and flush outbound RTP audio only after foreground speech is confirmed."""
@@ -3002,6 +3065,10 @@ class BargeInReplyOnPause(ReplyOnPause):
         self.send_message_sync(create_message("log", "barge_in_confirmed"))
 
     def process_audio(self, audio, state):
+        if self._checked_state_id == id(state):
+            # Log 2026-11-23 20:43:12: queued 20ms frames after a pause caused 23 duplicate voiced()+STT checks
+            # in 300ms before emit() consumed state.stream and created state.new().
+            return
         checked = state.pause_detected  # 2026-11-08 23:03: this pause was checked on the frame that found it; every frame
         super().process_audio(audio, state)  # until the reply starts finds it again (3-8 times a turn)
         # 2026-11-04 15:51:55: 1.2 s of echo or noise passed fastrtc's VAD (100 ms of speech is enough there), its
@@ -3015,18 +3082,27 @@ class BargeInReplyOnPause(ReplyOnPause):
         phone = on_phone()
         try:  # an STT/GPU error raised here ended listening for the rest of the call
             speech = voiced((state.sampling_rate, state.stream))
+            speech_s = speech.size / 16000
             dbfs = _audio_dbfs(speech) if speech.size else -100.0
             too_quiet = phone and speech.size > 0 and dbfs < C.SIP_MIN_SPEECH_DBFS
+            too_short_turn = False
+            if phone and 0 < speech_s < C.SIP_MIN_TURN_SPEECH_S:
+                # Log 2026-11-23 20:43:10: a 0.06s phone glitch ("และ") slipped through while idle and was captured as caller name.
+                early = EARLY.get(id(self))
+                short_heard = re.sub(r"[\s.,!?…]+", "", early[1].result()) if early else ""
+                if short_heard not in self.SIP_CUT_INS:
+                    too_short_turn = True
             noise = (
                 not speech.size
                 or too_quiet
+                or too_short_turn
                 or self.hears_itself(state)
                 or self.just_filler(state)
-                or self.no_cut_in(state, speech.size / 16000)
+                or self.no_cut_in(state, speech_s)
             )
             if speech.size:  # how loud each turn is: the numbers a gate for far-off voices (TV, other people) needs
-                reason_tag = ", background noise" if too_quiet else (", not a turn" if noise else "")
-                log.info("heard %.2fs of speech at %.0f dBFS%s", speech.size / 16000, dbfs, reason_tag)
+                reason_tag = ", background noise" if too_quiet else (", too short" if too_short_turn else (", not a turn" if noise else ""))
+                log.info("heard %.2fs of speech at %.0f dBFS%s", speech_s, dbfs, reason_tag)
         except Exception:
             log.exception("turn check failed, taking the speech as a turn")
             noise = False
@@ -3034,6 +3110,7 @@ class BargeInReplyOnPause(ReplyOnPause):
             state.pause_detected = state.started_talking = False
             state.stream = None
             self._checked_stream_len = 0
+            self._checked_state_id = 0
             EARLY.pop(id(self), None)
             LIVE.pop(id(self), None)
             self.send_message_sync(create_message("log", "noise"))  # the page turns the secretary back up
@@ -3042,10 +3119,12 @@ class BargeInReplyOnPause(ReplyOnPause):
                 log.info("the answer stopped for a sound that is no turn (phone line)")
             if PENDING[call_id()]["text"]:  # typed while this noise played: /chat left it to this turn, so start it now
                 self.push_turn(interrupt=False)
-        elif phone and not self.cut and any(e > time.monotonic() and not is_f for _, e, _, is_f in self.playing):
-            # Fallback barge-in for non-Thai foreground speech verified at pause end
-            self.cut_off("confirmed turn barge-in")
-            state.responding = False
+        else:
+            self._checked_state_id = id(state)
+            if phone and not self.cut and any(e > time.monotonic() and not is_f for _, e, _, is_f in self.playing):
+                # Fallback barge-in for non-Thai foreground speech verified at pause end
+                self.cut_off("confirmed turn barge-in")
+                state.responding = False
         self.cut = False
 
     playing = ()  # (start, end, text, is_filler) of the secretary's phrases on the caller's speaker, as emit() hands them out
@@ -3399,8 +3478,13 @@ if __name__ == "__main__":
     tts = load_tts()
     load_mcp_tools()
     load_workers()
-    log.info("STT=%s (gpu %s, final words) + %s (cpu-onnx, live) BOSS=%s JUDGE=%s TTS=%s (%s)", C.FINAL_STT_MODEL,
-             C.FINAL_STT_COMPUTE_TYPE, C.STT_MODEL, C.DEEPSEEK_MODEL, C.JUDGE_MODEL, C.TTS_MODEL, C.DEVICE)
+    tts_label = (
+        f"elevenlabs/{C.ELEVENLABS_MODEL_ID} (0 GPU VRAM)"
+        if isinstance(tts, tuple) and tts[0] == "elevenlabs"
+        else f"{C.TTS_MODEL} ({C.DEVICE})"
+    )
+    log.info("STT=%s (gpu %s, final words) + %s (cpu-onnx, live) BOSS=%s JUDGE=%s TTS=%s", C.FINAL_STT_MODEL,
+             C.FINAL_STT_COMPUTE_TYPE, C.STT_MODEL, C.DEEPSEEK_MODEL, C.JUDGE_MODEL, tts_label)
     warm_up()
     if C.PUBLIC_SSH:
         threading.Thread(target=tunnel, daemon=True).start()

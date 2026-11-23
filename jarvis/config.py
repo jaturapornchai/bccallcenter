@@ -214,7 +214,7 @@ SYSTEM_PROMPT = (
     # a spoken "VAT = ยอดลบฐาน" made no sense on the phone (log 2026-11-04)
     "ส่วนคำพูดห้ามมีสูตร สมการ หรือเครื่องหมายคำนวณ ให้เล่าเป็นภาษาพูดง่ายๆ ถ้าจำเป็นให้ใส่สูตรหลัง [จอ] "
     "ข่าว ราคา หรือข้อมูลล่าสุดใช้ web_search เอกสารในเครื่องใช้ search_docs "
-    "ระบบ BC Ai Account บัญชี ภาษี เมนูของระบบ ใช้ quick_answer (เร็วสุดสำหรับตอบคำถาม), lookup_menu (ค้นรหัสเมนู 4 หลักหรือชื่อเมนู), และ batch_read (อ่านหลายโน้ตพร้อมกันในรอบเดียว) เป็นหลัก ใช้ search_brain หรือ read_note เมื่อต้องการเจาะลึกเพิ่ม "
+    "ระบบ BC Ai Account บัญชี ภาษี เมนูของระบบ ใช้ quick_answer (เร็วสุดสำหรับตอบคำถาม), lookup_menu (ค้นรหัสเมนู 4 หลักหรือชื่อเมนู), และ batch_read (อ่านหลายโน้ตพร้อมกันในรอบเดียว) เป็นหลัก ถ้าผลค้นรอบแรกมีคำตอบครบแล้วให้ตอบทันทีโดยไม่ต้องค้นซ้ำ "
     # ลุงจืด 2026-11-04 "เสียงมีหลายคนพูด": the mic hears the room too ("คุณต่าย คุณต่าย คุณต่าย" got an answer)
     "ไมค์อาจได้ยินคนอื่นในห้องคุยกันเอง คำทักทาย ขอบคุณ ลา คำถาม คำสั่ง และคำตอบของสิ่งที่คุณเพิ่งถาม ถือว่าพูดกับคุณ ให้ตอบตามปกติ "
     # "ขอบคุณครับ" came back silent in the replay, and "if unsure answer" made it answer the room again
@@ -231,6 +231,7 @@ MCP_SERVERS = {"bcbrain": "https://brain.bcsmethai.com/mcp"}
 GEO_USER_AGENT = "bctest01-voice-secretary/1.0 (+https://callcenter.bcsmethai.com)"
 TOOL_RESULT_CHARS = 6000  # per tool result sent to the LLM (ask_brain returns ~22k chars)
 MAX_TOOL_ROUNDS = 3
+SIP_MAX_TOOL_ROUNDS = 2  # phone calls already get quick_answer prefetch before round 0; cap follow-up rounds to avoid 5-8s TTFA
 BRAIN_MIN_SCORE = 50  # search_brain score that counts as relevant (calibrated 2026-11-04, see brain_first)
 REMIND_MIN = 10  # say a calendar event this many minutes before it starts
 # programs the computer worker may open without asking; anything else waits for USER_NAME's yes
@@ -298,6 +299,7 @@ CARRY_MERGE_S = 5.0  # window (s) to merge a resumed phrase if barge-in stopped 
 SIP_PREFIX = "sip-"
 SIP_PAUSE_SILENCE_S = 0.40
 SIP_BARGE_MIN_SPEECH_S = 0.35
+SIP_MIN_TURN_SPEECH_S = 0.15  # phone glitches <150ms (e.g. 0.06s "และ") are not turns unless they match SIP_CUT_INS
 # Cough & ambient noise rejection thresholds for phone calls (dBFS)
 # Phone recordings (2026-11-23) show line noise floor at -59..-72 dBFS while quiet callers speak at -34..-40 dBFS.
 SIP_MIN_SPEECH_DBFS = float(os.environ.get("SIP_MIN_SPEECH_DBFS", "-41.0"))  # allow quiet callers while blocking -59..-72 dBFS line floor
