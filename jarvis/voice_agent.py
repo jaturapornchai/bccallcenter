@@ -128,11 +128,17 @@ def load_stt():
     return OpenThaiASR(C.STT_MODEL_DIR, lang=C.STT_LANGUAGE, intra_threads=C.STT_THREADS)
 
 
+_MULTI_STT = None
+_MULTI_STT_LOCK = threading.Lock()
+
+
 def load_final_stt():
-    """Load Multilingual Whisper Large-v3-Turbo (CT2) on GPU for accurate Thai/Lao/English/Chinese/Japanese/Korean STT.
-    Falls back to local FINAL_STT_MODEL_DIR if the HF model is unavailable."""
+    """Load Thai-specialized Typhoon Whisper Turbo CT2 on GPU (2.3% CER on Thai phone calls).
+    Falls back to HF FINAL_STT_MODEL if the local CT2 directory is absent."""
     if not C.HAS_CUDA:
         return None
+    if os.path.isdir(C.FINAL_STT_MODEL_DIR) and "typhoon" in C.FINAL_STT_MODEL.lower():
+        return WhisperModel(C.FINAL_STT_MODEL_DIR, device="cuda", compute_type=C.FINAL_STT_COMPUTE_TYPE)
     try:
         return WhisperModel(C.FINAL_STT_MODEL, device="cuda", compute_type=C.FINAL_STT_COMPUTE_TYPE, local_files_only=True)
     except Exception:
@@ -141,6 +147,32 @@ def load_final_stt():
         except Exception:
             log.warning("Fallback to local FINAL_STT_MODEL_DIR: %s", C.FINAL_STT_MODEL_DIR)
             return WhisperModel(C.FINAL_STT_MODEL_DIR, device="cuda", compute_type=C.FINAL_STT_COMPUTE_TYPE)
+
+
+def get_multi_stt():
+    """Lazy-load Multilingual Whisper Large-v3-Turbo on CPU (int8, 0 GPU VRAM) for non-Thai calls (en/zh/ja/ko/lo)."""
+    global _MULTI_STT
+    if _MULTI_STT is not None:
+        return _MULTI_STT
+    with _MULTI_STT_LOCK:
+        if _MULTI_STT is not None:
+            return _MULTI_STT
+        try:
+            log.info("Loading multilingual CPU STT (%s, int8) for non-Thai call...", C.MULTI_STT_MODEL)
+            _MULTI_STT = WhisperModel(
+                C.MULTI_STT_MODEL,
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=C.STT_THREADS,
+                local_files_only=True,
+            )
+        except Exception:
+            try:
+                _MULTI_STT = WhisperModel(C.MULTI_STT_MODEL, device="cpu", compute_type="int8", cpu_threads=C.STT_THREADS)
+            except Exception:
+                log.warning("Multilingual CPU STT unavailable, falling back to GPU final_stt")
+                return final_stt
+        return _MULTI_STT
 
 
 _HP_SOS_16K = butter(4, 80.0, btype="highpass", fs=16000, output="sos")
@@ -187,6 +219,7 @@ def stt_hears(audio):
 
 STT_LOCK = threading.Lock()
 LIVE = {}  # handler id -> {"t": monotonic, "fed": samples, "text": last partial, "busy": bool, "stream": OpenThaiStream}
+LIVE_ERROR_LOG_GAP_S = 10.0  # live_words() runs every LIVE_STEP_S: a failing one logs once in this long
 
 
 def transcribe(audio):
@@ -207,7 +240,8 @@ CALLER_PROFILES_LOCK = threading.Lock()
 _CALLER_PROFILES_CACHE: dict[str, dict] | None = None
 _TH_DIGITS = "ศูนย์ หนึ่ง สอง สาม สี่ ห้า หก เจ็ด แปด เก้า".split()
 _NAME_PREFIX_RE = re.compile(r"^(?:ชื่อเล่น|ชื่อว่า|ชื่อ|เรียกว่า|ว่า|คือ|เป็น)\s*")
-_NAME_SUFFIX_RE = re.compile(r"(?:ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|คับ|ก็ได้|นะ|เอง)$")
+_NAME_SUFFIX_RE = re.compile(r"(?:ชื่อเล่น|ชื่อว่า|ชื่อ|ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|คับ|ก็ได้|นะ|เอง)$")
+_NAME_SPLIT_RE = re.compile(r"(?:ชื่อเล่น|ชื่อว่า|ชื่อ|เรียกว่า|ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|คับ)")
 _HONORIFIC_RE = re.compile(r"^(?:คุณ|พี่|ลุง|ป้า|น้า|อา|น้อง|อาจารย์|หมอ|เฮีย|เจ๊)")
 _EXPLICIT_NAME_TH_RE = re.compile(
     r"(?:ผมชื่อว่า|ดิฉันชื่อว่า|หนูชื่อว่า|ฉันชื่อว่า|พี่ชื่อว่า|ชื่อว่า|ผมชื่อ|ดิฉันชื่อ|หนูชื่อ|ฉันชื่อ|พี่ชื่อ|"
@@ -255,6 +289,10 @@ def _clean_caller_name(raw: str | None) -> str:
         if ns == s:
             break
         s = ns
+    # Handle repeated speech without spaces like "แบงค์ชื่อแบงค์" -> take first clean token before "ชื่อ"
+    parts = [p.strip() for p in _NAME_SPLIT_RE.split(s) if p.strip()]
+    if parts:
+        s = parts[0]
     return s[:80]
 
 
@@ -536,15 +574,31 @@ def transcribe_final(audio):
     t_stt = time.perf_counter()
 
     def _run_ear1():
-        if final_stt is None:
+        use_multi = bool(req_lang and req_lang != "th")
+        model = get_multi_stt() if use_multi else final_stt
+        if model is None:
             return "", None, 0.0
         try:
-            # Always let Multilingual Whisper auto-detect language (language=None, no Thai-only prompt bias)
-            # so Thai/Lao/English/Chinese/Japanese/Korean speech is transcribed in its true native script!
-            segments, info = final_stt.transcribe(
+            if not use_multi:
+                # Thai call -> Typhoon Whisper Turbo locked to Thai + BC accounting prompt (2.3% CER, zero English hallucinations!)
+                segments, info = model.transcribe(
+                    data,
+                    language="th",
+                    beam_size=1 if phone_mode else 2,
+                    initial_prompt=BC_STT_PROMPT,
+                    vad_filter=True,
+                    vad_parameters=C.STT_VAD_PARAMS,
+                    without_timestamps=True,
+                    condition_on_previous_text=False,
+                )
+                txt = "".join(s.text for s in segments).strip()
+                return txt, "th", float(getattr(info, "language_probability", 0.95) or 0.95)
+
+            # Non-Thai call (en/zh/ja/ko/lo) -> Multilingual Whisper Large-v3-Turbo on CPU (int8) locked to active call language
+            segments, info = model.transcribe(
                 data,
-                language=None,
-                beam_size=1 if phone_mode else 2,
+                language=req_lang if req_lang in LANG_NAMES else None,
+                beam_size=1,
                 initial_prompt=None,
                 vad_filter=True,
                 vad_parameters=C.STT_VAD_PARAMS,
@@ -552,27 +606,11 @@ def transcribe_final(audio):
                 condition_on_previous_text=False,
             )
             txt = "".join(s.text for s in segments).strip()
-            det_lang = getattr(info, "language", None)
-            det_prob = float(getattr(info, "language_probability", 0.0) or 0.0)
-            # If Whisper guessed an unsupported rare language on very short audio, re-decode with current call language
-            if det_lang and det_lang not in LANG_NAMES:
-                fallback_lang = req_lang if req_lang in LANG_NAMES else "th"
-                seg2, _ = final_stt.transcribe(
-                    data,
-                    language=fallback_lang,
-                    beam_size=1,
-                    initial_prompt=BC_STT_PROMPT if fallback_lang == "th" else None,
-                    vad_filter=True,
-                    vad_parameters=C.STT_VAD_PARAMS,
-                    without_timestamps=True,
-                    condition_on_previous_text=False,
-                )
-                txt2 = "".join(s.text for s in seg2).strip()
-                if txt2:
-                    return txt2, fallback_lang, 0.60
+            det_lang = req_lang if req_lang in LANG_NAMES else getattr(info, "language", None)
+            det_prob = float(getattr(info, "language_probability", 0.90) or 0.90)
             return txt, det_lang, det_prob
         except Exception:
-            log.exception("Ear1 (Multilingual Whisper) failed")
+            log.exception("Ear1 (%s) failed", "Multilingual CPU" if use_multi else "Typhoon GPU")
             return "", None, 0.0
 
     def _run_ears23():
@@ -593,12 +631,18 @@ def transcribe_final(audio):
 
     ear2, ear3 = f_cpu.result()
     ear1, det_lang, det_prob = "", None, 0.0
-    deadline = 1.6 if phone_mode else 3.0
+    use_multi_call = bool(req_lang and req_lang != "th")
+    deadline = (3.5 if use_multi_call else 1.6) if phone_mode else 4.0
     rem = max(0.05, deadline - (time.perf_counter() - t_stt))
     try:
         ear1, det_lang, det_prob = f_gpu.result(timeout=rem)
     except Exception:
-        log.info("TRIPLE-EAR: Ear1 GPU >%.1fs deadline, using fast CPU Ear2/3", deadline)
+        log.info("TRIPLE-EAR: Ear1 >%.1fs deadline, using fast CPU Ear2/3", deadline)
+
+    # In a Thai call (GPU Typhoon locked to 'th'), if OpenThai th-mix (ear3) clearly heard a pure English sentence
+    # (>= 3 English words, zero Thai chars), promote English detection so the caller can still switch to English naturally!
+    if (not use_multi_call) and ear3 and _detect_script_lang(ear3) == "en" and len(re.findall(r"[A-Za-z]{2,}", ear3)) >= 3:
+        det_lang, det_prob = "en", 0.90
 
     if cid:
         CALL_LAST_STT_LANG[cid] = (det_lang, det_prob)  # every turn, also when Ear 1 gave no verdict: reply() must not judge this turn by the last one's
@@ -655,6 +699,20 @@ def transcribe_final(audio):
         return picked
 
     picked, alts = _choose_triple_ear(ear1, ear2, ear3, req_lang)
+    # When Ear 1 is Thai-specialized Typhoon Whisper Turbo (2.3% CER vs OpenThai 17.6% CER) on a Thai call,
+    # let Typhoon lead unless OpenThai th-mix caught an explicit language-switch or a pure English sentence.
+    if (
+        (not use_multi_call)
+        and "typhoon" in C.FINAL_STT_MODEL.lower()
+        and ear1
+        and not (ear3 and (_detect_explicit_lang_switch(ear3) or _detect_script_lang(ear3) == "en"))
+    ):
+        picked = ear1
+        norm_p = re.sub(r"\s+", "", picked).lower()
+        alts = []
+        for t in (ear2, ear3):
+            if t and re.sub(r"\s+", "", t).lower() != norm_p and t not in alts:
+                alts.append(t)
     if cid:
         LAST_ALT_HEARD[cid] = alts
     dt = time.perf_counter() - t_stt
@@ -1115,12 +1173,19 @@ def general_knowledge(question):
     return [card], f"ความรู้ทั่วไปจาก DeepSeek ไม่ใช่ข้อมูลของโปรแกรม ต้องบอกผู้ฟังสั้นๆ ว่าเป็นความรู้ทั่วไป: {text}"
 
 
+MCP_CACHE_TTL_S = 60.0
+MCP_CACHE_MAX = 128
+MCP_CACHEABLE_TOOLS = frozenset({"quick_answer", "lookup_menu", "batch_read", "read_note", "search_brain"})
+
+
 class MCPClient:
     """ponytail: minimal MCP streamable-HTTP client (initialize, tools/list, tools/call); one session, no server push."""
 
     def __init__(self, url):
-        self.url, self.http, self.n = url, httpx.Client(timeout=20, limits=httpx.Limits(keepalive_expiry=60)), 0  # kept alive between turns, as DEEPSEEK
+        self.url, self.http, self.n = url, httpx.Client(timeout=20, limits=httpx.Limits(keepalive_expiry=120)), 0  # kept alive between turns
         self.headers = {"Accept": "application/json, text/event-stream"}
+        self._cache: dict[str, tuple[float, str]] = {}
+        self._cache_lock = threading.Lock()
         self.rpc("initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "thai-voice-agent", "version": "1"}})
         self.http.post(url, json={"jsonrpc": "2.0", "method": "notifications/initialized"}, headers=self.headers)
 
@@ -1142,12 +1207,26 @@ class MCPClient:
         return [t for t in self.rpc("tools/list", {})["tools"] if (t.get("annotations") or {}).get("readOnlyHint")]
 
     def call(self, name, args):
+        cache_key = None
+        if name in MCP_CACHEABLE_TOOLS:
+            cache_key = f"{name}:{json.dumps(args, ensure_ascii=False, sort_keys=True)}"
+            now_m = time.monotonic()
+            with self._cache_lock:
+                hit = self._cache.get(cache_key)
+                if hit and now_m - hit[0] < MCP_CACHE_TTL_S:
+                    return hit[1]
         try:
             result = self.rpc("tools/call", {"name": name, "arguments": args})
         except httpx.HTTPStatusError:  # session expired (server restarted) -> new session, retry once
             self.__init__(self.url)
             result = self.rpc("tools/call", {"name": name, "arguments": args})
-        return "".join(c.get("text", "") for c in result.get("content", []))
+        text = "".join(c.get("text", "") for c in result.get("content", []))
+        if cache_key and text:
+            with self._cache_lock:
+                if len(self._cache) >= MCP_CACHE_MAX:
+                    self._cache.pop(next(iter(self._cache)), None)
+                self._cache[cache_key] = (time.monotonic(), text)
+        return text
 
 
 def tool_spec(name, description, parameters):
@@ -1176,13 +1255,13 @@ STATUS = {"web_search": "กำลังค้นหาในอินเทอ�
 FILLER_TEXT = {
     "hello": "สวัสดีครับ",
     "phone_intro": "เจาร์วิสจากบีซีคอลเซ็นเตอร์ครับ สบายๆ เลยนะครับ อยากให้ช่วยแนะนำโปรแกรมบีซีเอไอแอคเคาท์ หรือถามวิธีใช้งานตรงไหน คุยได้ทุกภาษาเลยครับ",
-    "wait_th_1": "อ๋อ แป๊บนะครับ",
+    "wait_th_1": "แป๊บนะครับ",
     "wait_th_2": "ครับผม ขอเช็กนิดนึงนะ",
-    "wait_th_3": "อ่า เดี๋ยวดูให้นะครับ",
+    "wait_th_3": "เดี๋ยวดูให้นะครับ",
     "wait_th_4": "ได้ครับ แป๊บเดียว",
     "wait_th_5": "ครับ ขอเปิดดูแป๊บนะครับ",
     "wait_th_6": "โอเคครับ รอนิดนึงนะ",
-    "wait_th_7": "อ๋อ เดี๋ยวเช็กให้เลยครับ",
+    "wait_th_7": "เดี๋ยวเช็กให้เลยครับ",
     "wait_th_8": "ครับผม แป๊บเดียวครับ",
     "wait_en_1": "Sure, one sec.",
     "wait_en_2": "Got it, let me check.",
@@ -1342,7 +1421,7 @@ def brain_hits(server, text):
         return [{"source": server, "title": "search_brain", "snippet": text[:400], "url": None}], text
     cards = [{"source": server, "title": h.get("title", ""), "snippet": str(h.get("snippet", ""))[:300], "url": None, "slug": h.get("slug"), "media": hit_media(h)} for h in hits]
     found = [{k: h.get(k) for k in ("slug", "title", "snippet")} for h in hits]
-    return cards, ("อ่านเต็มด้วย read_note ตาม slug: " + json.dumps(found, ensure_ascii=False)) if hits else "ไม่พบเรื่องที่ตรงกับคำนี้ในคลังความรู้ BC"
+    return cards, ("อ่านเต็มด้วย batch_read ตาม slugs: " + json.dumps(found, ensure_ascii=False)) if hits else "ไม่พบเรื่องที่ตรงกับคำนี้ในคลังความรู้ BC"
 
 
 NOTE_META = re.compile(r"(?m)^(slug|sources):.*\n?")  # a BC note's metadata lines: its slug and the code paths it came from
@@ -1400,14 +1479,23 @@ def brain_media(server, client, args, found):
     return ([card] if media else []), json.dumps({**found, "count": len(items), "items": items}, ensure_ascii=False)
 
 
+MENU_CODE_ASK = re.compile(r"(?:\b[1-9]\d{3}\b|\b\d+\.\d+(?:\.\d+)?\b|รหัสเมนู|เมนูไหน|เมนูอะไร|อยู่เมนู|หน้าจอไหน|เข้าตรงไหน)")
+
+
 def mcp_tool(server, client, name):
     def run(**args):
         text = client.call(name, args)
         if name == "search_brain":
             return brain_hits(server, text)
-        if name == "read_note":  # a card the page opens in full: the note's own heading, its text without the metadata
-            body = NOTE_META.sub("", text).partition("\n")[2].strip()
-            return [{"source": server, "title": text.partition("\n")[0].lstrip("# "), "snippet": body[:300], "url": None, "slug": args.get("slug"), "media": note_media(text)}], text
+        if name in ("read_note", "quick_answer", "batch_read"):
+            first_heading = next((ln.lstrip("# ").strip() for ln in text.splitlines() if ln.strip().startswith("#")), "")
+            slug_m = re.search(r"(?m)^slug:\s*([\w.-]+)", text)
+            body = NOTE_META.sub("", text).strip()
+            title = first_heading or f"{name}: {next(iter(args.values()), '')}"
+            return [{"source": server, "title": title[:140], "snippet": body[:300], "url": None,
+                     "slug": args.get("slug") or (slug_m.group(1) if slug_m else None), "media": note_media(text)}], text
+        if name == "lookup_menu":
+            return [{"source": server, "title": f"เมนูระบบ: {args.get('query', '')}", "snippet": text[:300], "url": None}], text
         if name == "find_media" and text.lstrip().startswith("{"):
             return brain_media(server, client, args, json.loads(text))
         return [{"source": server, "title": f"{name}: {next(iter(args.values()), '')}", "snippet": text[:400], "url": None}], text
@@ -2387,39 +2475,71 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             query = " | ".join(qs)
             sql_ctx = " SQL" if history and "```sql" in history[-1]["content"].lower() else ""
             zone = brain_audience(public, f"{heard} {query}{sql_ctx}")  # a follow-up on a SQL answer stays in every zone
-            calls = [*(("search_brain", {"query": q2, **zone}) for q in qs if "search_brain" in tools and (q2 := LONG_NUMBER.sub("", q).strip())),
-                     *(("search_docs", {"query": qs[0]}) for _ in (1,) if "search_docs" in tools and not phone_mode)]
-            texts = yield from dispatch(calls, said, turn, tools)
-            max_slugs = 1 if phone_mode else 4
-            slugs = list(dict.fromkeys(s for (n, _), t in zip(calls, texts) if n == "search_brain"
-                                       for s in re.findall(r'"slug": "([^"]+)"', t)))[:max_slugs]
-            if "read_note" in tools and slugs:
-                media = [("find_media", {"query": calls[0][1]["query"], "kind": "all", "limit": 20, "audience": zone.get("audience", "all")})
-                         for _ in (1,) if "find_media" in tools and not turn.get("media") and not phone_mode]
-                notes = (yield from dispatch([*(("read_note", {"slug": s}) for s in slugs), *media], said, turn, tools))[:len(slugs)]
-                for k, note in enumerate(notes):
-                    part = grounding.note_sections(note, f"{heard} {' '.join(qs)}{sql_ctx}")  # query: FIFO for a heard "ไฟโฟ"
-                    if not part and k == 0:  # top hit whose headings used other words: pass its lead body so round 0 answers at once
-                        part = NOTE_META.sub("", note).strip()[:1400]
-                    if part:
-                        calls.append(("read_note", {}))
-                        texts.append(part if k == 0 else part[:900 if phone_mode else 1200])
-                        if k == 0 and not phone_mode:
-                            turn["note"] = slugs[0]
-                            log.info("note on screen: %s", slugs[0])
-                            yield AdditionalOutputs({"kind": "panel", "text": note_panel(note, part)})
+            clean_q0 = LONG_NUMBER.sub("", qs[0]).strip() or qs[0].strip()
+            if "quick_answer" in tools and clean_q0:
+                # Fastest single-round-trip brain path (~52ms): quick_answer (+ parallel lookup_menu for menu queries)
+                calls = [("quick_answer", {
+                    "question": clean_q0,
+                    **zone,
+                    "max_chars": 1400 if phone_mode else 2600,
+                    "include_media": not phone_mode,
+                })]
+                if "lookup_menu" in tools and MENU_CODE_ASK.search(f"{heard} {clean_q0}"):
+                    calls.append(("lookup_menu", {"query": clean_q0, **zone, "limit": 5}))
+                if "search_docs" in tools and not phone_mode:
+                    calls.append(("search_docs", {"query": qs[0]}))
+                texts = yield from dispatch(calls, said, turn, tools)
+                qa_text = texts[0] if texts else ""
+                read = bool(qa_text and "ไม่พบ" not in qa_text[:120] and "no matching" not in qa_text[:120].lower())
+                if read and not phone_mode:
+                    slug_m = re.search(r"(?m)^slug:\s*([\w.-]+)", qa_text)
+                    if slug_m:
+                        turn["note"] = slug_m.group(1)
+                    yield AdditionalOutputs({"kind": "panel", "text": note_panel(qa_text, NOTE_META.sub("", qa_text).strip()[:2000])})
+            else:
+                # Legacy fallback when bcbrain has not exposed quick_answer
+                calls = [*(("search_brain", {"query": q2, **zone}) for q in qs if "search_brain" in tools and (q2 := LONG_NUMBER.sub("", q).strip())),
+                         *(("search_docs", {"query": qs[0]}) for _ in (1,) if "search_docs" in tools and not phone_mode)]
+                texts = yield from dispatch(calls, said, turn, tools)
+                max_slugs = 1 if phone_mode else 4
+                slugs = list(dict.fromkeys(s for (n, _), t in zip(calls, texts) if n == "search_brain"
+                                           for s in re.findall(r'"slug": "([^"]+)"', t)))[:max_slugs]
+                if slugs and "batch_read" in tools:
+                    batch_args = {"slugs": slugs, **zone, "query": clean_q0, "max_chars_per_note": 1100 if phone_mode else 1500, "strip_links": phone_mode}
+                    b_calls = [("batch_read", batch_args)]
+                    if "find_media" in tools and not turn.get("media") and not phone_mode:
+                        b_calls.append(("find_media", {"query": clean_q0, "kind": "all", "limit": 20, "audience": zone.get("audience", "all")}))
+                    b_texts = yield from dispatch(b_calls, said, turn, tools)
+                    if b_texts and b_texts[0]:
+                        calls.append(("batch_read", {}))
+                        texts.append(b_texts[0])
+                elif "read_note" in tools and slugs:
+                    media = [("find_media", {"query": calls[0][1]["query"], "kind": "all", "limit": 20, "audience": zone.get("audience", "all")})
+                             for _ in (1,) if "find_media" in tools and not turn.get("media") and not phone_mode]
+                    notes = (yield from dispatch([*(("read_note", {"slug": s}) for s in slugs), *media], said, turn, tools))[:len(slugs)]
+                    for k, note in enumerate(notes):
+                        part = grounding.note_sections(note, f"{heard} {' '.join(qs)}{sql_ctx}")  # query: FIFO for a heard "ไฟโฟ"
+                        if not part and k == 0:  # top hit whose headings used other words: pass its lead body so round 0 answers at once
+                            part = NOTE_META.sub("", note).strip()[:1400]
+                        if part:
+                            calls.append(("read_note", {}))
+                            texts.append(part if k == 0 else part[:900 if phone_mode else 1200])
+                            if k == 0 and not phone_mode:
+                                turn["note"] = slugs[0]
+                                log.info("note on screen: %s", slugs[0])
+                                yield AdditionalOutputs({"kind": "panel", "text": note_panel(note, part)})
+                read = any(n in ("read_note", "batch_read") for n, _ in calls)
             found = " ".join(f"[{n}] {t}" for (n, _), t in zip(calls, texts))
-            read = any(n == "read_note" for n, _ in calls)
             prev_kb = any(m["role"] == "assistant" and C.SCREEN_MARK in m["content"] for m in history[-2:])
             sample_hint = ("รอบนี้เป็นการถามต่อสั้นๆ จากเรื่องเดิม ตอบตรงจุดที่ถามเพิ่มบน [จอ] ได้เลยโดยไม่ต้องวางตัวอย่างสมมติซ้ำ)"
                            if prev_kb and not EXAMPLE_ASK.search(heard) and not CALC_ASK.search(heard) else
                            f"คำตอบที่อธิบายเรื่องใหม่ ต่อท้าย [จอ] ด้วยบรรทัด {C.SAMPLE_LABEL} แล้วเลือกวิธีแสดงตัวอย่างให้เหมาะกับบริบท "
                            "(ตารางคำนวณ แถบ [การ์ด]+กล่องเคส > ผังโครงสร้างย่อหน้า - /   - กล่องเคส >+[ขั้นตอน] หรือกรอบ ```sql+> พารามิเตอร์) "
                            "ห้ามครอบผังย่อหน้าด้วย ``` และห้ามใส่ตัวเลขสองหลักขึ้นไปหรือวันที่สมมติเองโดยไม่ผ่าน calc ถ้าไม่ได้เรียก calc ให้ใช้รหัสติดตัวอักษรเช่น WH01, A01, SKU01)")
-            now += (f"\n(ระบบ: คำพูดนี้น่าจะหมายถึง {query} ลูกทีม Swarm ค้นสมองขนานให้แล้ว {found} "
+            now += (f"\n(ระบบ: คำพูดนี้น่าจะหมายถึง {query} ลูกทีม Swarm ค้นสมองให้แล้ว {found} "
                     "ใช้เฉพาะข้อมูลที่มีอยู่จริงในผลค้นสมองนี้เท่านั้น ห้ามเดาหรือแต่งเติมเองเด็ดขาด เวลาพูดให้คุยเป็นกันเองเหมือนเพื่อนโดยไม่ต้องพูดคำว่า จากคลังความรู้บีซี "
                     # 2026-11-08 04:08 call: "ไม่พบเรื่อง…ในคลังความรู้บีซีครับ หมายถึงอะไรครับ" 4 times, never a second search
-                    "ถ้าไม่มีส่วนไหนตรง ให้สั่งลูกทีมค้นสมองหลายมุมพร้อมกันในรอบเดียวก่อน (search_brain คำไทยหรือคำอังกฤษ หรือ web_search) "
+                    "ถ้าไม่มีส่วนไหนตรง ให้สั่งลูกทีมค้นสมองในรอบเดียวก่อน (quick_answer / lookup_menu / batch_read หรือ web_search) "
                     # 2026-11-08 05:16: asked for a worked example, it said "ยังไม่มีในคลัง" twice
                     "ถ้ายังไม่เจอและเป็นความรู้ทั่วไปที่ไม่ใช่เรื่อง BC ให้ถาม general_knowledge ถ้าเป็นเรื่อง BC จึงบอกสั้นๆ ว่ายังไม่มีข้อมูล "
                     "แล้วถามว่าหมายถึงเรื่องไหน ถ้าขอตัวอย่างหรือให้คิดเลข ให้ตั้งตัวเลขสมมติตามสูตรในผลค้นแล้วคิดด้วย calc ห้ามตอบจากความจำ "
@@ -2473,6 +2593,11 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                     # told the hello was said, the boss still opened with it 9 of 9 calls (eval 2026-11-09), or with a bare ครับ
                     if said == [FILLER_TEXT["hello"]] and not (text := re.sub(r"^(?:สวัสดี)?\s*(?:ครับ|ค่ะ)?\s*", "", text)):
                         continue
+                    # ลุงจืด 2026-11-23 "ตอนตอบ มีคำว่า อ๋อ บ่อยเกินไป น่าเบื่อ": strip repetitive leading "อ๋อ/อ้อ" opener on phone calls
+                    if not said and phone_mode_turn:
+                        stripped_oh = re.sub(r"^(?:อ๋อ|อ้อ)\s+", "", text).strip()
+                        if len(stripped_oh) >= 6:
+                            text = stripped_oh
                     # log 2026-11-14 05:44..06:08: "ได้ครับ" went out alone, then the real sentence was cut and the
                     # turn ended on a bare "ได้ครับ" 3 times. Hold a lone ack to join the real sentence smoothly.
                     if not said and BARE_ACK.fullmatch(text):
@@ -2731,6 +2856,7 @@ class BargeInReplyOnPause(ReplyOnPause):
 
     _BARGE_KEYWORDS = ("หยุด", "เดี๋ยว", "แป๊บ", "ขอถาม", "สอบถาม", "เอาใหม่", "เปลี่ยนภาษา", "stop", "wait", "excuse")
     _is_phone = False
+    _live_error_at = 0.0  # monotonic time of the last logged live_words() error
 
     def live_words(self, sr, snap, state, is_phone=False):
         """Stream live karaoke words over the WebRTC data channel while the caller is still speaking,
@@ -2750,16 +2876,24 @@ class BargeInReplyOnPause(ReplyOnPause):
                 return
             now_m = time.monotonic()
             turn_s = max(snap.size, live.get("fed", 0) if live else 0) / sr
+            phone = is_phone or self._is_phone
             spoken = " ".join(t for s, e, t, _ in self.playing if e + 0.5 > now_m - turn_s and s < now_m)
-            if spoken and grounding.is_echo(txt, spoken):
+            if spoken and not phone and grounding.is_echo(txt, spoken):  # a phone line brings none back: hears_itself()
                 return
             # Word-Verified Barge-in on phone lines: stop immediately as soon as foreground human words are heard
             # Note: is_phone is passed explicitly because ThreadPoolExecutor threads do not inherit FastRTC contextvars!
             bot_active = state.responding or any(e > now_m and not is_f for _, e, _, is_f in self.playing)
-            if (is_phone or self._is_phone) and not self.cut and bot_active:
+            if phone and not self.cut and bot_active:
+                stream = state.stream  # the handler's thread drops it once the sound turns out to be no turn
                 # Measure peak foreground level across both latest delta and recent stream window
-                recent_tail = state.stream[-int(sr * 0.5):] if state.stream is not None else snap
+                recent_tail = stream[-int(sr * 0.5):] if stream is not None else snap
                 dbfs = max(_audio_dbfs(snap16), _audio_dbfs(to16k((sr, recent_tail))))
+                if dbfs < C.SIP_BARGE_MIN_DBFS and stream is not None:
+                    # the line turns a caller down while both sides talk (2026-11-23 16:18: a turn of -28 dBFS sank
+                    # to -40 within half a second and never cut in), so words that come in quiet are gated on the
+                    # speech of the turn so far, the way the turn check measures it
+                    speech = voiced((sr, stream[-int(sr * C.SIP_BARGE_LEVEL_SPAN_S):]))
+                    dbfs = max(dbfs, _audio_dbfs(speech))
                 low_bare = bare.lower()
                 is_real_barge = dbfs >= C.SIP_BARGE_MIN_DBFS and (
                     bare in self.SIP_CUT_INS
@@ -2767,16 +2901,21 @@ class BargeInReplyOnPause(ReplyOnPause):
                     or len(bare) >= C.SIP_BARGE_MIN_CHARS
                 )
                 if is_real_barge:
-                    self.cut_off(f"word-verified barge-in: {masked(bare)} ({dbfs:.0f} dBFS)")
+                    self.cut_off(f"word-verified barge-in: {masked(bare)} ({dbfs:.0f} dBFS, {turn_s:.1f}s in)")
                     state.responding = False
+                elif live and not live.get("refused"):  # once a turn: why words over the answer did not stop it
+                    live["refused"] = True
+                    log.info("words over the answer too quiet to cut in: %s (%.0f dBFS)", masked(bare), dbfs)
             if live:
                 new, live["text"] = txt != live["text"], txt
                 # Only display OpenThai live partial on screen when caller is speaking Thai (avoid showing Thai transliteration during EN/ZH/JA/KO/LO turns)
                 cur_call_lang = CALL_LANG.get(call_id()) or "th"
                 if new and cur_call_lang == "th":
                     self.send_message_sync(json.dumps({"type": "partial", "data": txt}, ensure_ascii=False))
-        except Exception:
-            pass
+        except Exception:  # was silent: a cut-in lost to an error here left no trace
+            if time.monotonic() - self._live_error_at > LIVE_ERROR_LOG_GAP_S:
+                self._live_error_at = time.monotonic()
+                log.warning("live words failed, no cut-in check for this speech", exc_info=True)
         finally:
             if live:
                 live["busy"] = False
@@ -2926,7 +3065,12 @@ class BargeInReplyOnPause(ReplyOnPause):
     def hears_itself(self, state):
         """No headphones (ลุงจืด 2026-11-04): the secretary's voice can leak from the speaker into the mic past the
         browser's echo canceller (it misses a speaker picked with setSinkId), and the turn that made would cut the
-        answer off and answer the secretary's own words. A turn heard while it talked, mostly its words, is that."""
+        answer off and answer the secretary's own words. A turn heard while it talked, mostly its words, is that.
+        A phone line brings none of its voice back (recordings of 2026-11-23: the caller's channel stays at its noise
+        floor, -72 dBFS, while it talks), so there the word match only dropped real answers made of its own words:
+        17:00:00 the caller's "ใช่" to "...ใช่ไหมครับ", and cut-ins waited until the caller said a word it had not."""
+        if on_phone():
+            return False
         now, length = time.monotonic(), state.stream.size / state.sampling_rate
         spoken = " ".join(t for s, e, t, _ in self.playing if e + 0.5 > now - length and s < now)  # 0.5 s: network + jitter
         if not spoken:

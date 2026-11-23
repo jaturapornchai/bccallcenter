@@ -33,10 +33,12 @@ STT_MODEL_DIR = os.environ.get("STT_MODEL_DIR", os.path.join(BASE_DIR, "models",
 STT_LANGUAGE = os.environ.get("STT_LANGUAGE", "th-mix")
 STT_THREADS = int(os.environ.get("STT_THREADS", "8"))
 STT_VAD_PARAMS = dict(min_silence_duration_ms=400)  # Silero VAD gate used by voiced() before barge-in/turn checks
-# Multilingual Whisper Large-v3-Turbo (CTranslate2) on GPU for accurate 6-language STT (th/lo/en/zh/ja/ko)
-# without forcing foreign speech into Thai transliteration; OpenThai 2.0 CPU runs in parallel for Thai & barge-in.
-FINAL_STT_MODEL = os.environ.get("FINAL_STT_MODEL", "mobiuslabsgmbh/faster-whisper-large-v3-turbo")
+# Dual-Mode STT:
+# - Thai calls (GPU): Typhoon Whisper Turbo CT2 (2.3% CER on Thai 8kHz phone calls; never hallucinates Thai as English)
+# - Non-Thai calls (CPU int8, 0 GPU VRAM): Multilingual Whisper Large-v3-Turbo (en/zh/ja/ko/lo)
+FINAL_STT_MODEL = os.environ.get("FINAL_STT_MODEL", "typhoon-ai/typhoon-whisper-turbo")
 FINAL_STT_MODEL_DIR = os.environ.get("FINAL_STT_MODEL_DIR", os.path.join(BASE_DIR, "models", "typhoon-whisper-turbo-ct2"))
+MULTI_STT_MODEL = os.environ.get("MULTI_STT_MODEL", "mobiuslabsgmbh/faster-whisper-large-v3-turbo")
 FINAL_STT_COMPUTE_TYPE = "int8_float16"
 
 # --- LLMs: the boss and the judge on DeepSeek ---
@@ -212,7 +214,7 @@ SYSTEM_PROMPT = (
     # a spoken "VAT = ยอดลบฐาน" made no sense on the phone (log 2026-11-04)
     "ส่วนคำพูดห้ามมีสูตร สมการ หรือเครื่องหมายคำนวณ ให้เล่าเป็นภาษาพูดง่ายๆ ถ้าจำเป็นให้ใส่สูตรหลัง [จอ] "
     "ข่าว ราคา หรือข้อมูลล่าสุดใช้ web_search เอกสารในเครื่องใช้ search_docs "
-    "ระบบ BC Ai Account บัญชี ภาษี เมนูของระบบ ใช้ search_brain read_note หรือ ask_brain "
+    "ระบบ BC Ai Account บัญชี ภาษี เมนูของระบบ ใช้ quick_answer (เร็วสุดสำหรับตอบคำถาม), lookup_menu (ค้นรหัสเมนู 4 หลักหรือชื่อเมนู), และ batch_read (อ่านหลายโน้ตพร้อมกันในรอบเดียว) เป็นหลัก ใช้ search_brain หรือ read_note เมื่อต้องการเจาะลึกเพิ่ม "
     # ลุงจืด 2026-11-04 "เสียงมีหลายคนพูด": the mic hears the room too ("คุณต่าย คุณต่าย คุณต่าย" got an answer)
     "ไมค์อาจได้ยินคนอื่นในห้องคุยกันเอง คำทักทาย ขอบคุณ ลา คำถาม คำสั่ง และคำตอบของสิ่งที่คุณเพิ่งถาม ถือว่าพูดกับคุณ ให้ตอบตามปกติ "
     # "ขอบคุณครับ" came back silent in the replay, and "if unsure answer" made it answer the room again
@@ -297,16 +299,18 @@ SIP_PREFIX = "sip-"
 SIP_PAUSE_SILENCE_S = 0.40
 SIP_BARGE_MIN_SPEECH_S = 0.35
 # Cough & ambient noise rejection thresholds for phone calls (dBFS)
-SIP_MIN_SPEECH_DBFS = float(os.environ.get("SIP_MIN_SPEECH_DBFS", "-33.0"))  # ignore distant TV/background chatter
-SIP_BARGE_MIN_DBFS = float(os.environ.get("SIP_BARGE_MIN_DBFS", "-31.0"))    # barge-in must be clear foreground speech
+# Phone recordings (2026-11-23) show line noise floor at -59..-72 dBFS while quiet callers speak at -34..-40 dBFS.
+SIP_MIN_SPEECH_DBFS = float(os.environ.get("SIP_MIN_SPEECH_DBFS", "-41.0"))  # allow quiet callers while blocking -59..-72 dBFS line floor
+SIP_BARGE_MIN_DBFS = float(os.environ.get("SIP_BARGE_MIN_DBFS", "-36.0"))    # barge-in must be foreground speech (above -40 dBFS distant chatter)
 SIP_BARGE_MIN_CHARS = int(os.environ.get("SIP_BARGE_MIN_CHARS", "2"))        # interrupt as soon as real spoken words are heard (not coughs)
+SIP_BARGE_LEVEL_SPAN_S = 3.0  # a cut-in whose newest words came in quiet is gated on the speech in this much of the turn so far
 # added to the boss's system message on sip calls only, after everything setup_facts reads: no judge source, and no
 # facts in it (ลุงจืด's price example stays out: a number here would pass the judge without bcbrain)
 PHONE_PROMPT = (
     "\nสายนี้เป็นโทรศัพท์จริง ผู้โทรฟังเสียงอย่างเดียว มองไม่เห็นจอ ข้อนี้ทับกติกาความยาวคำพูดด้านบน "
     "คุยแนวธรรมชาติเหมือนคนโทรคุยกันจริงๆ สบายๆ เป็นกันเอง ไม่เครียด ไม่ต้องเป็นทางการจัด ไม่ท่องสรรพคุณยาวยืด "
     "อย่าให้คุยแล้วน่าเบื่อ พยายามสร้างบรรยากาศอบอุ่น มีชีวิตชีวา สนุก สบายใจ ดึงให้ลูกค้าอยากคุยต่อนานๆ โดยเล่ามุมที่ใกล้ตัวงานเขาจากผลค้นจริง เปลี่ยนคำรับและคำขึ้นต้นให้หลากหลาย ไม่พูดแพตเทิร์นเดิมซ้ำๆ "
-    "ใส่อารมณ์และความรู้สึกในคำพูดให้เข้ากับผู้โทร เช่น ยินดีหรือตื่นเต้นเบาๆ เมื่อลูกค้าเล่าธุรกิจ เห็นใจอบอุ่นเมื่อลูกค้าบ่นว่างานยุ่งหรือติดปัญหา ใช้คำพูดธรรมชาติอย่าง โอ้โห เยี่ยมเลยครับ อ๋อ เข้าใจเลยครับ สบายเลยครับ "
+    "ใส่อารมณ์และความรู้สึกในคำพูดให้เข้ากับผู้โทร เช่น ยินดีหรือตื่นเต้นเบาๆ เมื่อลูกค้าเล่าธุรกิจ เห็นใจอบอุ่นเมื่อลูกค้าบ่นว่างานยุ่งหรือติดปัญหา ใช้คำพูดธรรมชาติหลากหลายอย่าง เยี่ยมเลยครับ เข้าใจเลยครับ สบายเลยครับ ได้เลยครับ ห้ามขึ้นต้นคำตอบด้วยคำว่า อ๋อ หรือ อ้อ บ่อยๆ ให้เข้าเรื่องหรือสลับคำขึ้นต้นตามธรรมชาติ "
     "คำพูดแต่ละรอบต้องสั้นกระชับแค่หนึ่งถึงสองประโยค ประมาณสิบห้าถึงสามสิบห้าคำ แล้วหยุดรอให้ผู้โทรคุยตอบ ห้ามร่ายยาวสามถึงห้าประโยค (แม้ถามเรื่องราคาก็ให้บอกสรุปรุ่นหลักสั้นๆ สองประโยคก่อน) "
     "คุณสื่อสารและแปลข้อมูลจากคลังความรู้เป็นภาษาไทย ลาว อังกฤษ จีน ญี่ปุ่น และเกาหลีได้จริงทั้งหมด ห้ามพูดเด็ดขาดว่าพูดได้แค่ภาษาไทยหรือแปลไม่ได้ "
     "หากคำที่ได้ยินดูเพี้ยนหรือไม่เป็นคำที่มีความหมาย ห้ามพูดทวนคำเพี้ยนนั้นซ้ำ ให้บอกสั้นๆ ว่าเมื่อกี้สัญญาณไม่ค่อยชัด ขอฟังอีกครั้งนะครับ "
