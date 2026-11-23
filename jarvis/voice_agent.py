@@ -182,6 +182,8 @@ _DEFAULT_TRANSCRIBE = transcribe
 CALL_LANG: dict[str, str | None] = {}  # webrtc_id -> ISO lang code ("th","en","zh","ja","ko","lo","my","vi","km") or None (auto)
 CALL_NEW_CALLER: dict[str, bool] = {}  # webrtc_id -> True when caller is new and language is not yet known
 CALL_CONTEXT: dict[str, str] = {}  # webrtc_id -> initial CRM/caller context injected without extra LLM turn
+CALL_CALLER_META: dict[str, dict] = {}  # webrtc_id -> {"name", "company", "totalCalls", "lastTopic"} from CRM
+LAST_WAIT_AT: dict[str, float] = {}  # webrtc_id -> monotonic ts of last wait filler (avoid repetitive cues)
 PENDING_LANG_CONFIRM: dict[str, str] = {}  # webrtc_id -> detected other language awaiting caller confirmation
 LANG_NAMES = {
     "th": "ภาษาไทย (Thai)",
@@ -885,24 +887,41 @@ STATUS = {"web_search": "กำลังค้นหาในอินเทอ�
 FILLER_TEXT = {
     "hello": "สวัสดีครับ",
     "phone_intro": "เจาร์วิสจากบีซีคอลเซ็นเตอร์ครับ สบายๆ เลยนะครับ อยากให้ช่วยแนะนำโปรแกรมบีซีเอไอแอคเคาท์ หรือถามวิธีใช้งานตรงไหน คุยได้ทุกภาษาเลยครับ",
-    "wait_th_1": "รอสักครู่นะครับ ขอเช็กข้อมูลให้ครับ",
-    "wait_th_2": "ครับผม รอสักครู่นะครับ",
-    "wait_th_3": "ขอเวลาเช็กข้อมูลสักครู่นะครับ",
-    "wait_en": "One moment please, let me check that for you.",
+    "wait_th_1": "อ๋อ แป๊บนะครับ",
+    "wait_th_2": "ครับผม ขอเช็กนิดนึงนะ",
+    "wait_th_3": "อ่า เดี๋ยวดูให้นะครับ",
+    "wait_th_4": "ได้ครับ แป๊บเดียว",
+    "wait_th_5": "ครับ ขอเปิดดูแป๊บนะครับ",
+    "wait_th_6": "โอเคครับ รอนิดนึงนะ",
+    "wait_th_7": "อ๋อ เดี๋ยวเช็กให้เลยครับ",
+    "wait_th_8": "ครับผม แป๊บเดียวครับ",
+    "wait_en_1": "Sure, one sec.",
+    "wait_en_2": "Got it, let me check.",
+    "wait_en_3": "Just a moment.",
     "lang_ack_th": LANG_SWITCHED_ACK["th"],
     "lang_ack_en": LANG_SWITCHED_ACK["en"],
     "lang_confirm_th": LANG_CONFIRM_PROMPTS["th"],
     "lang_confirm_en": LANG_CONFIRM_PROMPTS["en"],
-}  # pre-rendered greeting & instant "please hold" fillers (0ms LLM/TTS wait)
-FILLERS = {}  # pre-rendered at warm-up so greetings & wait cues play instantly
-_WAIT_CYCLE = itertools.cycle(("wait_th_1", "wait_th_2", "wait_th_3"))
+}  # pre-rendered greeting & short, varied natural cues (0ms LLM/TTS wait)
+FILLERS = {}  # pre-rendered at warm-up (served from disk cache at 0 credits)
+_WAIT_CYCLE_TH = itertools.cycle(
+    ("wait_th_1", "wait_th_2", "wait_th_3", "wait_th_4", "wait_th_5", "wait_th_6", "wait_th_7", "wait_th_8")
+)
+_WAIT_CYCLE_EN = itertools.cycle(("wait_en_1", "wait_en_2", "wait_en_3"))
 
 
 def _pick_wait_filler(lang: str | None) -> tuple[str, np.ndarray] | None:
-    key = "wait_en" if lang == "en" else next(_WAIT_CYCLE)
+    cid = call_id() if "call_id" in globals() else ""
+    now_m = time.monotonic()
+    # Cooldown 9s so we never repeat wait fillers back-to-back on rapid turns
+    if cid and now_m - LAST_WAIT_AT.get(cid, 0.0) < 9.0:
+        return None
+    key = next(_WAIT_CYCLE_EN) if lang == "en" else next(_WAIT_CYCLE_TH)
     wav = FILLERS.get(key)
     if wav is None:
         return None
+    if cid:
+        LAST_WAIT_AT[cid] = now_m
     return FILLER_TEXT[key], wav
 
 
@@ -1937,6 +1956,16 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
 
     if cid and CALL_CONTEXT.get(cid):
         now += f"\n{CALL_CONTEXT.pop(cid)}"
+    if cid and (meta := CALL_CALLER_META.get(cid)):
+        c_name = str(meta.get("name") or "").strip()
+        c_comp = str(meta.get("company") or "").strip()
+        c_calls = int(meta.get("totalCalls") or 0)
+        if c_name:
+            now += f"\n(ข้อมูลลูกค้าจากเบอร์โทร: ชื่อ {c_name}{f' ({c_comp})' if c_comp else ''} โทรมาครั้งที่ {max(c_calls, 1)} — เรียกชื่อลูกค้าอย่างเป็นกันเองได้เลย ห้ามถามชื่อซ้ำ)"
+        elif c_calls > 1:
+            now += f"\n(ข้อมูลลูกค้าจากเบอร์โทร: ลูกค้าเก่าโทรมาครั้งที่ {c_calls}{f' ({c_comp})' if c_comp else ''} แต่ยังไม่มีชื่อในระบบ — ถามชื่อเล่นแบบสบายๆ ไม่บังคับได้แค่ครั้งเดียวตามจังหวะ)"
+        else:
+            now += "\n(ข้อมูลลูกค้าจากเบอร์โทร: ลูกค้าใหม่ยังไม่มีชื่อในระบบ — ตอบคำถามให้สบายใจก่อน ค่อยถามชื่อเล่นแบบไม่บังคับแค่ครั้งเดียวตามจังหวะ)"
     if cid and (alt_heard := LAST_ALT_HEARD.pop(cid, [])):
         now += f"\n(ระบบฟัง 3 หู — คำจากหูสำรองเผื่อหูหลักเพี้ยน: {' | '.join(alt_heard[:2])})"
 
@@ -2243,8 +2272,25 @@ def greet(*_, public=False):
         CALL_LANG[cid] = "th"
     cur_lang = CALL_LANG.get(cid) or "th"
 
-    # Ultra-fast instant phone greeting for Thai / new callers (0ms LLM/TTS latency!)
+    # Returning phone caller: greet warmly by name & last topic from CRM phone lookup!
+    meta = CALL_CALLER_META.get(cid) or {}
+    c_name = str(meta.get("name") or "").strip()
+    c_calls = int(meta.get("totalCalls") or 0)
+    last_topic = str(meta.get("lastTopic") or "").strip()
+
     if on_phone() and cur_lang == "th" and not session(public)[1]:
+        if c_name or (c_calls > 1 and last_topic):
+            if c_name:
+                addressed = c_name if re.match(r"^(คุณ|พี่|ลุง|น้อง|อาจารย์|หมอ|เฮีย|เจ๊)", c_name) else f"คุณ{c_name}"
+                if last_topic:
+                    greeting = f"สวัสดีครับ{addressed} เจาร์วิสครับ คราวก่อนเราคุยเรื่อง{last_topic}กันไว้ วันนี้คุยต่อเรื่องเดิมหรือมีเรื่องไหนให้ช่วยดูครับ"
+                else:
+                    greeting = f"สวัสดีครับ{addressed} เจาร์วิสครับ ดีใจที่ได้คุยกันอีกนะครับ วันนี้มีเรื่องไหนให้ผมช่วยดูดีครับ"
+            else:
+                greeting = f"สวัสดีครับ ยินดีต้อนรับกลับมาครับ เจาร์วิสครับ คราวก่อนเราคุยเรื่อง{last_topic}กันไว้ วันนี้คุยต่อได้เลยนะครับ"
+            yield bot_out(greeting, speak(greeting, lang_override="th"), lead=0.14)
+            yield AdditionalOutputs({"kind": "done"})
+            return
         yield bot_out(FILLER_TEXT["hello"], FILLERS["hello"], lead=0.18)
         yield bot_out(FILLER_TEXT["phone_intro"], FILLERS["phone_intro"], lead=0.12)
         yield AdditionalOutputs({"kind": "done"})
@@ -2308,7 +2354,7 @@ def warm_up():
     hello = [{"role": "system", "content": C.SYSTEM_PROMPT}, {"role": "user", "content": "สวัสดี"}]
     list(llm_tokens(hello, [], TOOL_SPECS))
     FILLERS.update({
-        name: speak(text, lang_override="en" if name.endswith("_en") else "th")
+        name: speak(text, lang_override="en" if "_en" in name else "th")
         for name, text in FILLER_TEXT.items()
     })
     log.info("warm-up done in %.1fs (%d pre-rendered fillers)", time.perf_counter() - t0, len(FILLERS))
@@ -2705,6 +2751,7 @@ def make_app(stream, public=False):
         is_new = bool(body.get("is_new_caller", False))
         init_ctx = body.get("initial_context")
         pending_confirm = body.get("pending_confirm")
+        caller_meta = body.get("caller_meta")
         if not call:
             return JSONResponse({"error": "webrtc_id is required"}, status_code=400)
         if lang is None or lang == "" or lang == "auto":
@@ -2715,7 +2762,14 @@ def make_app(stream, public=False):
             return JSONResponse({"error": "unsupported language"}, status_code=400)
         CALL_NEW_CALLER[call] = is_new
         if isinstance(init_ctx, str) and init_ctx.strip():
-            CALL_CONTEXT[call] = init_ctx.strip()[:600]
+            CALL_CONTEXT[call] = init_ctx.strip()[:800]
+        if isinstance(caller_meta, dict):
+            CALL_CALLER_META[call] = {
+                "name": str(caller_meta.get("name") or "").strip()[:80],
+                "company": str(caller_meta.get("company") or "").strip()[:120],
+                "totalCalls": int(caller_meta.get("totalCalls") or 0),
+                "lastTopic": str(caller_meta.get("lastTopic") or "").strip()[:80],
+            }
         if pending_confirm and str(pending_confirm) in LANG_NAMES:
             PENDING_LANG_CONFIRM[call] = str(pending_confirm)
         elif pending_confirm is None and "pending_confirm" in body:
