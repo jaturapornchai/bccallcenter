@@ -64,6 +64,9 @@ from elevenlabs_tts import ElevenLabsTTS, SPEAKABLE_RE  # noqa: E402
 import grounding  # noqa: E402
 import google_tools  # noqa: E402
 from openthai_asr import OpenThaiASR  # noqa: E402
+from qa_cache import QACache  # noqa: E402
+
+QA_CACHE = QACache(C.QA_CACHE_PATH, ttl_s=C.QA_CACHE_TTL_S, max_entries=C.QA_CACHE_MAX_ENTRIES)
 
 # Thai log lines on a cp1252 console/pipe on Windows would raise UnicodeEncodeError.
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -595,8 +598,13 @@ def load_tts():
             voice_id=C.ELEVENLABS_VOICE_ID,
             model_id=C.ELEVENLABS_MODEL_ID,
             speed=C.ELEVENLABS_SPEED,
+            cache_dir=C.TTS_CACHE_DIR,
+            max_cache_mb=C.TTS_CACHE_MAX_MB,
         )
-        log.info("TTS engine: ElevenLabs Streaming (%s, voice=%s, 0 GPU VRAM)", C.ELEVENLABS_MODEL_ID, C.ELEVENLABS_VOICE_ID)
+        log.info(
+            "TTS engine: ElevenLabs Streaming (%s, voice=%s, 0 GPU VRAM, disk cache=%s)",
+            C.ELEVENLABS_MODEL_ID, C.ELEVENLABS_VOICE_ID, C.TTS_CACHE_DIR,
+        )
         return ("elevenlabs", el)
     kw = dict(device_map="cuda:0" if C.HAS_CUDA else "cpu", dtype=torch.float16 if C.HAS_CUDA else torch.float32)
     try:
@@ -1956,6 +1964,27 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
     try:
         if not hello:
             yield AdditionalOutputs({"kind": "user", "text": heard})  # "" for a system turn: clears the screen, no caller line
+        # Local FAQ / DeepSeek QA Cache lookup: saves DeepSeek LLM + Judge tokens & answers in ~10ms (0ms hold filler)
+        can_qa_cache = (
+            bool(heard)
+            and not hello
+            and not note
+            and not LATEST_ASK.search(heard)
+            and not TIME_ASK.search(heard)
+            and not DATE_ASK.search(heard)
+            and not SUM_ASK.search(masked(heard))
+            and not (history and TOPIC_ASK.search(history[-1]["content"]))
+        )
+        if can_qa_cache and (cached_qa := QA_CACHE.lookup(heard, lang=active_lang or "th", phone_mode=on_phone())):
+            cached_sents = cached_qa["sentences"]
+            log.info("QA-CACHE HIT (0 DeepSeek tokens, %.3fs): %s -> %d sentences", time.perf_counter() - t0, masked(heard), len(cached_sents))
+            for idx_s, sent in enumerate(cached_sents):
+                turn["voiced"] = True
+                said.append(sent)
+                yield from stream_bot_out(sent, lead=0.05 if idx_s == 0 else C.SENTENCE_GAP_S)
+            answered = True
+            yield AdditionalOutputs({"kind": "done"})
+            return
         # the caller answers the topic ask: "ไม่ใช่ครับ ยังเรื่องเดิม" got the new topic back (eval 2026-11-08 r18); and no second ask in a row
         stay_topic = None
         if was := history and TOPIC_ASK.search(history[-1]["content"]):
@@ -2186,6 +2215,24 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             history.extend([{"role": "user", "content": asked}, {"role": "assistant", "content": answer}])
             del history[: -2 * C.HISTORY_TURNS]
             save_session(sid, history)
+            # Persist verified, uninterrupted FAQ answers into local QA cache to save future DeepSeek tokens
+            used_lead = any(
+                c.get("function", {}).get("name") == "leave_message"
+                for m in (locals().get("messages") or ())
+                for c in m.get("tool_calls", ())
+            )
+            if (
+                locals().get("can_qa_cache")
+                and not interrupted
+                and not turn.get("silent")
+                and not turn.get("cut")
+                and not used_lead
+                and said
+                and said[0] not in (CUT_ALL, SCREEN_ONLY)
+                and not locals().get("cached_qa")
+            ):
+                if QA_CACHE.store(heard, said, lang=active_lang or "th", phone_mode=on_phone()):
+                    log.info("QA-CACHE SAVED (%d sentences): %s", len(said), masked(heard))
     yield AdditionalOutputs({"kind": "done"})
 
 
@@ -2606,6 +2653,11 @@ def make_app(stream, public=False):
     @app.get("/team")  # who is on the team right now
     def team():
         return {"boss": C.DEEPSEEK_MODEL, "workers": sorted(set(WORKER.get(n, "other") for n in tools))}
+
+    @app.get("/cache/stats")  # inspect local TTS & DeepSeek QA cache savings
+    def cache_stats():
+        tts_stats = tts[1].stats() if isinstance(tts, tuple) and tts[0] == "elevenlabs" else {"enabled": False}
+        return {"tts": tts_stats, "qa": QA_CACHE.stats()}
 
     @app.get("/outputs")  # subtitles, status, info cards, panel (Server-Sent Events)
     async def outputs(webrtc_id: str):
