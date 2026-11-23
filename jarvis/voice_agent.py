@@ -245,7 +245,7 @@ _NAME_SPLIT_RE = re.compile(r"(?:ชื่อเล่น|ชื่อว่า|
 _HONORIFIC_RE = re.compile(r"^(?:คุณ|พี่|ลุง|ป้า|น้า|อา|น้อง|อาจารย์|หมอ|เฮีย|เจ๊)")
 _EXPLICIT_NAME_TH_RE = re.compile(
     r"(?:ผมชื่อว่า|ดิฉันชื่อว่า|หนูชื่อว่า|ฉันชื่อว่า|พี่ชื่อว่า|ชื่อว่า|ผมชื่อ|ดิฉันชื่อ|หนูชื่อ|ฉันชื่อ|พี่ชื่อ|"
-    r"เรียกผมว่า|เรียกพี่ว่า|เรียกหนูว่า|เรียกฉันว่า|เรียกว่า|ชื่อเล่นว่า|ชื่อเล่น|ชื่อ)\s*([ก-๙a-zA-Z]{2,20})"
+    r"เรียกผมว่า|เรียกพี่ว่า|เรียกหนูว่า|เรียกฉันว่า|เรียกว่า|ชื่อเล่นว่า|ชื่อเล่น|(?<![ก-๙])ชื่อ)\s*([ก-๙a-zA-Z]{2,20})"
 )
 _EXPLICIT_NAME_EN_RE = re.compile(r"(?:my name is|i am|i'm|call me)\s+([A-Za-z]{2,20})", re.I)
 _ASKED_NAME_BOT_RE = re.compile(r"(?:ขอเรียกชื่อ|ชื่อเล่นว่าอะไร|ชื่ออะไรดี|may i have your name|what(?:'s| is) your name)", re.I)
@@ -257,6 +257,7 @@ _BAD_CALLER_NAMES = {
     "กับ", "จาก", "เป็น", "อยู่", "ที่", "ใน", "มา", "ไป", "ได้", "เอา", "ดู", "ลอง", "ถาม", "พูด", "ฟัง", "ช่วย",
     "เอ่อ", "อ่า", "อ้า", "อืม", "อือ", "ฮึ", "หึ", "อ๋อ", "อ้อ", "จ้า", "จ้ะ", "เหรอ", "หรอ", "เลย", "มาก", "หน่อย", "ด้วย",
     "เดี๋ยว", "แป๊บ", "หยุด", "พอ", "เจ๊", "เฮีย", "พี่", "น้อง", "คุณ", "ผม", "ฉัน", "หนู", "ดิฉัน", "มัน", "เขา", "เรา",
+    "ไหม", "มั้ย", "หรือ", "อะไร", "ยังไง", "เท่าไหร่", "กี่", "บ้าง", "รึเปล่า", "เปล่า", "เหรอครับ", "เหรอคะ",
     "calling", "asking", "looking", "trying", "interested", "using", "not", "here", "fine", "good", "okay",
     "hello", "hi", "yes", "no", "thanks", "thank", "and",
 }
@@ -1700,11 +1701,11 @@ def dsml_calls(markup):
 
 
 def deepseek_tokens(messages, calls, tools, choice=None):
-    """The boss on DeepSeek (OpenAI-style SSE). A tool call arrives in pieces (id and name first, then bits of
-    its JSON arguments), so calls are put together when the stream ends."""
+    """The boss on Ollama Cloud / DeepSeek (OpenAI-style SSE). A tool call arrives in pieces (id and name first,
+    then bits of its JSON arguments), so calls are put together when the stream ends."""
     body = {"model": C.DEEPSEEK_MODEL, "messages": messages, "stream": True, "temperature": C.LLM_TEMPERATURE,
-            "thinking": {"type": "disabled"}, **({"tools": tools} if tools else {}),  # thinking: +seconds per turn
-            **({"tool_choice": choice} if tools and choice else {})}  # "none", or a named tool; needs thinking off
+            "reasoning_effort": "none", **({"tools": tools} if tools else {}),  # disable reasoning: +seconds per turn
+            **({"tool_choice": choice} if tools and choice else {})}  # "none", or a named tool
     parts, held, markup = {}, "", ""  # held: a tail that may be the start of DSML; markup: the DSML itself
     with DEEPSEEK.stream("POST", f"{C.DEEPSEEK_URL}/chat/completions", json=body, timeout=C.DEEPSEEK_TIMEOUT,
                       headers={"Authorization": f"Bearer {C.DEEPSEEK_API_KEY}"}) as r:
@@ -1955,7 +1956,7 @@ class DeepSeekJudge:
                          for k, v in item.items())
         told = f'\n\nReply with JSON only: {{"words": [{{{keys}}}]}} with exactly one entry for each listed word.'
         body = {"model": model, "messages": [*messages[:-1], {**messages[-1], "content": messages[-1]["content"] + told}],
-                "stream": False, "temperature": 0, "thinking": {"type": "disabled"}, "response_format": {"type": "json_object"}}
+                "stream": False, "temperature": 0, "reasoning_effort": "none", "response_format": {"type": "json_object"}}
         r = DEEPSEEK.post(f"{C.DEEPSEEK_URL}/chat/completions", json=body, timeout=C.DEEPSEEK_TIMEOUT,
                           headers={"Authorization": f"Bearer {C.DEEPSEEK_API_KEY}"})
         r.raise_for_status()
@@ -2062,7 +2063,8 @@ def plain_turn(messages):
     return out
 
 
-BRAIN_DOWN = "ขอโทษครับ ตอนนี้ระบบตอบไม่ได้ชั่วคราว รบกวนถามใหม่อีกครั้งนะครับ"
+BRAIN_DOWN_BODY = "ตอนนี้ระบบตอบไม่ได้ชั่วคราว รบกวนถามใหม่อีกครั้งนะครับ"
+BRAIN_DOWN = f"ขอโทษครับ {BRAIN_DOWN_BODY}"
 # the secretary's own fixed lines: words from its greeting or status talk are no new claim
 OWN_WORDS = "\n".join([SAY_WORDS, BRAIN_DOWN, *FILLER_TEXT.values()])
 # talk about the talk itself (log 2026-11-09..10: 44 sentences cut by the judge, half of them "ช่วยสะกดหรือบอกอีกนิด
@@ -2776,7 +2778,8 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 and not turn.get("cut")
                 and not used_lead
                 and said
-                and said[0] not in (CUT_ALL, SCREEN_ONLY)
+                and said[0] not in (CUT_ALL, SCREEN_ONLY, BRAIN_DOWN, BRAIN_DOWN_BODY)
+                and BRAIN_DOWN_BODY not in " ".join(said)
                 and not locals().get("cached_qa")
             ):
                 if QA_CACHE.store(heard, said, lang=active_lang or "th", phone_mode=on_phone(), caller_name=c_name):
@@ -3086,8 +3089,9 @@ class BargeInReplyOnPause(ReplyOnPause):
             dbfs = _audio_dbfs(speech) if speech.size else -100.0
             too_quiet = phone and speech.size > 0 and dbfs < C.SIP_MIN_SPEECH_DBFS
             too_short_turn = False
-            if phone and 0 < speech_s < C.SIP_MIN_TURN_SPEECH_S:
-                # Log 2026-11-23 20:43:10: a 0.06s phone glitch ("และ") slipped through while idle and was captured as caller name.
+            min_turn_s = C.SIP_MIN_TURN_SPEECH_S if phone else 0.08
+            if 0 < speech_s < min_turn_s:
+                # Log 2026-11-23 20:43:10 & 21:47:26: 0.03s-0.06s glitches ("และ") slipped through and polluted transcripts.
                 early = EARLY.get(id(self))
                 short_heard = re.sub(r"[\s.,!?…]+", "", early[1].result()) if early else ""
                 if short_heard not in self.SIP_CUT_INS:
@@ -3474,7 +3478,7 @@ if __name__ == "__main__":
     stt = load_stt()
     final_stt = load_final_stt()
     if not C.DEEPSEEK_API_KEY:
-        raise SystemExit("DEEPSEEK_API_KEY is not set: put it in .env (the boss runs on DeepSeek)")
+        raise SystemExit("OLLAMA_API_KEY is not set: put it in .env.local (J.A.R.V.I.S uses Ollama Cloud)")
     tts = load_tts()
     load_mcp_tools()
     load_workers()

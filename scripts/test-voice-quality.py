@@ -74,9 +74,13 @@ def test_caller_name_rejects_connectors_and_accepts_real_names():
     extract = scope["_extract_caller_name_py"]
     asked = "ไม่ทราบว่าขอเรียกชื่อเล่นว่าอะไรดีครับ"
 
-    for bad in ("และ", "แล้ว", "อันนี้", "เจ๊", "ครับผม", "โอเค", "คือ", "เอ่อ", "ค่ะ", "หรือ", "ถ้า"):
+    for bad in ("และ", "แล้ว", "อันนี้", "เจ๊", "ครับผม", "โอเค", "คือ", "เอ่อ", "ค่ะ", "หรือ", "ถ้า", "ไหม"):
         got, _ = extract(bad, asked)
         assert got == "", f"expected bad token {bad!r} to be rejected, got {got!r}"
+
+    # "ขายเชื่อไหม" contains "เชื่อ" (เ + ชื่อ): must NOT extract "ไหม" as caller name
+    got_credit, _ = extract("สินค้า ที่ ขายเชื่อไหม", "")
+    assert got_credit == "", f"expected 'ขายเชื่อไหม' not to extract name, got {got_credit!r}"
 
     for good_in, want in (
         ("แบงค์ครับ", "แบงค์"),
@@ -272,10 +276,14 @@ def test_legacy_mcp_tools_hidden_from_llm_when_fast_tools_present():
 def test_config_and_source_invariants():
     assert C.SIP_MAX_TOOL_ROUNDS == 2
     assert C.SIP_MIN_TURN_SPEECH_S == 0.15
+    assert "ollama.com" in C.DEEPSEEK_URL, f"expected Ollama Cloud URL, got {C.DEEPSEEK_URL}"
+    assert "deepseek" in C.DEEPSEEK_MODEL.lower(), f"expected DeepSeek model on Ollama Cloud, got {C.DEEPSEEK_MODEL}"
     src = SOURCE.read_text(encoding="utf-8")
     assert "repetition_penalty=1.15" in src
     assert "no_repeat_ngram_size=3" in src
     assert "elevenlabs/{C.ELEVENLABS_MODEL_ID}" in src
+    assert '"reasoning_effort": "none"' in src
+    assert "BRAIN_DOWN_BODY not in" in src
 
 
 TESTS = [

@@ -13,7 +13,10 @@ if os.path.exists(_env := os.path.join(BASE_DIR, ".env")):
                 os.environ.setdefault(_k, _v)
 
 # Also load ONLY shared AI/TTS keys from root ../.env.local (never pull Next.js PORT=3000!)
-_SHARED_ROOT_KEYS = {"ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "ELEVENLABS_MODEL_ID", "TTS_PROVIDER", "DEEPSEEK_API_KEY"}
+_SHARED_ROOT_KEYS = {
+    "ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "ELEVENLABS_MODEL_ID", "TTS_PROVIDER",
+    "OLLAMA_BASE_URL", "OLLAMA_MODEL", "OLLAMA_API_KEY",
+}
 _root_env = os.path.join(os.path.dirname(BASE_DIR), ".env.local")
 if os.path.exists(_root_env):
     with open(_root_env, encoding="utf-8") as _f:
@@ -41,14 +44,14 @@ FINAL_STT_MODEL_DIR = os.environ.get("FINAL_STT_MODEL_DIR", os.path.join(BASE_DI
 MULTI_STT_MODEL = os.environ.get("MULTI_STT_MODEL", "mobiuslabsgmbh/faster-whisper-large-v3-turbo")
 FINAL_STT_COMPUTE_TYPE = "int8_float16"
 
-# --- LLMs: the boss and the judge on DeepSeek ---
-# The boss (talks, picks the workers) and the computer worker run on DeepSeek only (ลุงจืด 2026-11-04). The local
-# Typhoon 30B-A3B fallback is gone: mostly on CPU it took up to 17 s and lost the thread, and it held GPU memory
-# beside STT, TTS and the vision model. DeepSeek down -> the caller hears an apology, never a guess.
-# STT and TTS always stay local; the judge moved to DeepSeek too (ลุงจืด 2026-11-19, JUDGE_MODEL).
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-DEEPSEEK_URL = "https://api.deepseek.com"
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
+# --- LLMs: the boss and the judge on Ollama Cloud (DeepSeek latest) ---
+# ลุงจืด 2026-11-24: use Ollama Cloud only (https://ollama.com/v1, OLLAMA_MODEL / OLLAMA_API_KEY from .env.local).
+OLLAMA_BASE_URL = (os.environ.get("OLLAMA_BASE_URL") or "https://ollama.com").strip().rstrip("/")
+OLLAMA_MODEL = (os.environ.get("OLLAMA_MODEL") or "deepseek-v4.1-flash").strip()
+OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "").strip()
+DEEPSEEK_API_KEY = OLLAMA_API_KEY
+DEEPSEEK_URL = OLLAMA_BASE_URL if OLLAMA_BASE_URL.endswith("/v1") else f"{OLLAMA_BASE_URL}/v1"
+DEEPSEEK_MODEL = OLLAMA_MODEL
 DEEPSEEK_TIMEOUT = 15  # seconds without a byte before the turn gives up
 # low = stick to the sources: a model default of 0.6 gave a different, partly invented gold price on every run
 LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.2"))
