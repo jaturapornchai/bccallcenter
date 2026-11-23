@@ -24,6 +24,8 @@ const LOG_PATH = path.join(DATA_DIR, "dev-on-the-fly-log.jsonl");
 const LOCK_PATH = path.join(DATA_DIR, "dev-on-the-fly.lock");
 const LOCK_STALE_MS = 100 * 60_000; // a run that died without --mark-done/--unlock must not block reviews forever
 const JARVIS_LOG_DIR = path.join(ROOT, "jarvis", "logs");
+// aioice logs every address pair it probes, ~35 lines per call that bury the conversation and carry IP addresses
+const ICE_PROBE = /Connection\(\d+\) (?:Check CandidatePair|Could not bind)/;
 
 function maskPhone(raw) {
   const s = String(raw || "");
@@ -90,7 +92,9 @@ function jarvisLogLines(fromMs, toMs) {
         const at = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], +m[7]).getTime();
         inWindow = at >= fromMs && at <= toMs;
       }
-      if (inWindow && line) picked.push(maskTextPhones(line).slice(0, 400));
+      if (!inWindow || !line || ICE_PROBE.test(line)) continue;
+      const stamp = m ? m[0] : ""; // kept out of the phone mask, which reads the date as a phone number
+      picked.push((stamp + maskTextPhones(line.slice(stamp.length))).slice(0, 400));
     }
   }
   return picked;
