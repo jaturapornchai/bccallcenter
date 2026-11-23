@@ -320,6 +320,39 @@ def test_three_tier_search_planner():
     assert "อีกหูฟังได้ยิน: ใบรับสินค้าเมนูอะไร" in ask[1]["content"]
 
 
+def test_incomplete_tail_and_phone_fallback_queries():
+    scope = load_symbols({
+        "_INCOMPLETE_TAIL_RE", "_is_incomplete_thai_tail", "_FOLLOWUP_START_RE",
+        "_VAGUE_FOLLOWUP_RE", "_stt_ears_diverge", "_build_phone_fallback_queries", "BC_STT_PROMPT",
+    })
+    incomplete = scope["_is_incomplete_thai_tail"]
+    fallback = scope["_build_phone_fallback_queries"]
+
+    for cut_mid in ("ผมอยากจะรู้ว่า", "อยากรู้ว่าถ้าเช็คคืนแล้ว", "รับของเข้าคลังแล้วก็"):
+        assert incomplete(cut_mid), f"expected incomplete=True for {cut_mid!r}"
+    for complete in ("รายงานอยู่ไหน", "ราคาเท่าไหร่ครับ", "แล้วมีรายงานให้ดูไหม"):
+        assert not incomplete(complete), f"expected incomplete=False for {complete!r}"
+
+    # Case L5651: "แรงงาน" (e1) vs "รายงาน" (e2) while discussing PO overdue report -> parallel queries with context
+    hist_po = [{"role": "assistant", "content": "ในกลุ่มรายงานจัดซื้อมีรายงานค้างรับของตามพีโอ"}]
+    qs_po = fallback("แรงงาน", ["รายงาน"], hist_po)
+    assert len(qs_po) == 2 and any("แรงงาน" in q for q in qs_po) and any("รายงาน" in q for q in qs_po)
+    assert all("รายงานจัดซื้อ" in q for q in qs_po), f"context anchor missing: {qs_po}"
+
+    # Case L5724: long continuation (>20 chars) "แล้วมีแรงงานมีรายงานให้ดูไหม" while discussing booking order
+    hist_bk = [{"role": "assistant", "content": "ใบสั่งจองสินค้าจะหักยอดพร้อมขาย"}]
+    qs_bk = fallback("แล้วมีแรงงานมีรายงานให้ดูไหม", [], hist_bk)
+    assert len(qs_bk) == 1 and "ใบสั่งจองสินค้า" in qs_bk[0], f"continuation context missing: {qs_bk}"
+
+    # Plan invariants
+    assert C.SIP_PAUSE_SILENCE_S == 0.55
+    assert C.SIP_INCOMPLETE_PAUSE_S == 0.95
+    assert "รายงาน" in scope["BC_STT_PROMPT"]
+    src = SOURCE.read_text(encoding="utf-8")
+    assert "max_chars=75 if phone_mode_turn" in src
+    assert "สายนี้เป็นโทรศัพท์ ห้ามเขียน [จอ]" in src
+
+
 TESTS = [
     test_caller_name_rejects_connectors_and_accepts_real_names,
     test_stt_stutter_detector_and_ear2_fallback,
@@ -328,6 +361,7 @@ TESTS = [
     test_legacy_mcp_tools_hidden_from_llm_when_fast_tools_present,
     test_config_and_source_invariants,
     test_three_tier_search_planner,
+    test_incomplete_tail_and_phone_fallback_queries,
 ]
 
 

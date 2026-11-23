@@ -545,7 +545,7 @@ EAR23_CPU_POOL = ThreadPoolExecutor(4)
 TRIPLE_EAR_POOL = EAR23_CPU_POOL  # backward-compatible alias
 _EAR1_GPU_SEM = threading.Semaphore(1)  # CTranslate2 runs 1 GPU job at a time: skip queuing if busy to prevent domino timeouts
 LAST_ALT_HEARD: dict[str, list[str]] = {}  # webrtc_id -> distinct alternate transcripts from secondary ears
-BC_STT_PROMPT = "BC Ai Account, บีซีเอไอแอคเคาท์, FIFO, FEFO, VAT, ใบรับสินค้า, ต้นทุนสินค้า, แพ็กเกจ"
+BC_STT_PROMPT = "BC Ai Account, บีซีเอไอแอคเคาท์, รายงาน, ใบสั่งซื้อ, ใบสั่งจอง, ใบรับสินค้า, ต้นทุนสินค้า, FIFO, FEFO, VAT, แพ็กเกจ"
 _STT_STUTTER_3_RE = re.compile(r"([\u0E00-\u0E7F]{3,})\1")
 _STT_STUTTER_2X3_RE = re.compile(r"([\u0E00-\u0E7F]{2,})\1\1")
 
@@ -2216,16 +2216,65 @@ def words_ask(history, heard, alt_heard=None):
                   {"role": "user", "content": "\n".join([*talk, latest])}]
 
 
-def search_words(history, heard, alt_heard=None):
+_INCOMPLETE_TAIL_RE = re.compile(
+    r"(?:อยากจะรู้ว่า|อยากรู้ว่า|หมายถึงว่า|แต่ว่า|หรือว่า|ถ้าเกิด|พอดี|เพราะว่า|"
+    r"ว่า|แล้ว|ที่|และ|กับ|ถ้า|คือ|แต่|หรือ|เป็น|จะ|ก็|แบบ|ซึ่ง|เรื่อง|ของ|ใน|จาก|เพื่อ)[\s.!?…]*$"
+)
+
+
+def _is_incomplete_thai_tail(text: str) -> bool:
+    """True when a live Thai partial clearly ends mid-clause on a trailing connector/conjunction."""
+    s = (text or "").strip()
+    if len(s) < 4:
+        return False
+    if re.search(r"(?:ครับ|ค่ะ|คะ|ไหม|มั้ย|เปล่า|ไหน|เท่าไหร่|ยังไง|อย่างไร|บ้าง)[\s.!?…]*$", s):
+        return False
+    return bool(_INCOMPLETE_TAIL_RE.search(s))
+
+
+def _build_phone_fallback_queries(heard: str, alt_heard: list[str], history: list[dict]) -> list[str]:
+    """Zero-latency (0ms) multi-ear + context query builder when early search_words is absent or skipped."""
+    base = (heard or "").strip()
+    if not base:
+        return []
+    # Attach recent topic context whenever the turn is short OR opens with a continuation word (e.g. "แล้วมีรายงานให้ดูไหม")
+    ctx_anchor = ""
+    if history and (len(base) <= 20 or bool(_FOLLOWUP_START_RE.match(base)) or bool(_VAGUE_FOLLOWUP_RE.search(base))):
+        for m in reversed(history[-4:]):
+            c = (m.get("content") or "").partition(C.SCREEN_MARK)[0].strip()
+            if c and not c.startswith(("(", C.SILENT_MARK)):
+                ctx_anchor = c[:60]
+                break
+    queries: list[str] = []
+    q_primary = f"{base} {ctx_anchor}".strip()[:120] if ctx_anchor and ctx_anchor not in base else base[:120]
+    queries.append(q_primary)
+    # If secondary OpenThai ear heard a different word (e.g. e1="แรงงาน" vs e2="รายงาน"), search it in parallel (~52ms)
+    for alt in (alt_heard or ())[:1]:
+        a = (alt or "").strip()
+        if a and a != base and _stt_ears_diverge(base, [a]):
+            q_alt = f"{a} {ctx_anchor}".strip()[:120] if ctx_anchor and ctx_anchor not in a else a[:120]
+            if q_alt not in queries:
+                queries.append(q_alt)
+    return queries
+
+
+def search_words(history, heard, alt_heard=None, allow_sync=True):
     """The caller's words made into a search: misheard words fixed, Thai and English terms, a follow-up made whole.
     Returns (words, jump): jump is (the topic so far, the new one heard) when the words leave the topic unasked.
     ponytail: one more DeepSeek call before the first word; "" on failure, and the raw words are searched"""
     talk, ask = words_ask(history, heard, alt_heard=alt_heard)
     try:
         early, t = WORDS.pop(ask[1]["content"], None), time.perf_counter()  # words_early asked this already, before the turn ended
+        if early is None and not allow_sync:
+            return "", None
         phone_now = "on_phone" in globals() and on_phone()
         job = early or (WORDS_POOL.submit(worker_chat, ask, None) if phone_now else None)
-        text, _ = job.result(timeout=0.90 if phone_now else None) if job else worker_chat(ask, None)
+        if early:
+            text, _ = early.result(timeout=0.75 if phone_now else None)
+        elif job is not None:
+            text, _ = job.result(timeout=1.15)
+        else:
+            text, _ = worker_chat(ask, None)
         log.info("search words: %s, waited %.2fs", "asked early" if early else "asked now", time.perf_counter() - t)
     except (httpx.HTTPError, ValueError, KeyError, TimeoutError) as e:
         log.warning("search words skipped (%s)", type(e).__name__)
@@ -2568,10 +2617,13 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 if stay_topic:
                     qs = [stay_topic]
                 elif _needs_search_planner(heard, alt_heard, history):
-                    planned_q, _ = search_words(history, heard, alt_heard=alt_heard)
+                    allow_sync = len(heard.strip()) > 35
+                    planned_q, _ = search_words(history, heard, alt_heard=alt_heard, allow_sync=allow_sync)
                     if planned_q:
                         log.info("SEARCH-PLANNER: %s -> %s", masked(heard), masked(planned_q))
-                    qs = [planned_q or heard]
+                        qs = [planned_q]
+                    else:
+                        qs = _build_phone_fallback_queries(heard, alt_heard, history)
                 else:
                     qs = [heard]
             else:
@@ -2582,14 +2634,23 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             zone = brain_audience(public, f"{heard} {query}{sql_ctx}")  # a follow-up on a SQL answer stays in every zone
             clean_q0 = LONG_NUMBER.sub("", qs[0]).strip() or qs[0].strip()
             if "quick_answer" in tools and clean_q0:
-                # Fastest single-round-trip brain path (~52ms): quick_answer (+ parallel lookup_menu for menu queries)
+                # Fastest single-round-trip brain path (~52ms): quick_answer (+ parallel alt-ear / lookup_menu)
                 calls = [("quick_answer", {
                     "question": clean_q0,
                     **zone,
                     "max_chars": 2200 if phone_mode else 2600,
                     "include_media": not phone_mode,
                 })]
-                if "lookup_menu" in tools and MENU_CODE_ASK.search(f"{heard} {clean_q0} {' '.join(alt_heard)}"):
+                if phone_mode and len(qs) > 1:
+                    clean_q1 = LONG_NUMBER.sub("", qs[1]).strip() or qs[1].strip()
+                    if clean_q1 and clean_q1 != clean_q0:
+                        calls.append(("quick_answer", {
+                            "question": clean_q1,
+                            **zone,
+                            "max_chars": 1600,
+                            "include_media": False,
+                        }))
+                if "lookup_menu" in tools and MENU_CODE_ASK.search(f"{heard} {query} {' '.join(alt_heard)}"):
                     calls.append(("lookup_menu", {"query": clean_q0, **zone, "limit": 5}))
                 if "search_docs" in tools and not phone_mode:
                     calls.append(("search_docs", {"query": qs[0]}))
@@ -2636,11 +2697,15 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 read = any(n in ("read_note", "batch_read") for n, _ in calls)
             found = " ".join(f"[{n}] {t}" for (n, _), t in zip(calls, texts))
             prev_kb = any(m["role"] == "assistant" and C.SCREEN_MARK in m["content"] for m in history[-2:])
-            sample_hint = ("รอบนี้เป็นการถามต่อสั้นๆ จากเรื่องเดิม ตอบตรงจุดที่ถามเพิ่มบน [จอ] ได้เลยโดยไม่ต้องวางตัวอย่างสมมติซ้ำ)"
-                           if prev_kb and not EXAMPLE_ASK.search(heard) and not CALC_ASK.search(heard) else
-                           f"คำตอบที่อธิบายเรื่องใหม่ ต่อท้าย [จอ] ด้วยบรรทัด {C.SAMPLE_LABEL} แล้วเลือกวิธีแสดงตัวอย่างให้เหมาะกับบริบท "
-                           "(ตารางคำนวณ แถบ [การ์ด]+กล่องเคส > ผังโครงสร้างย่อหน้า - /   - กล่องเคส >+[ขั้นตอน] หรือกรอบ ```sql+> พารามิเตอร์) "
-                           "ห้ามครอบผังย่อหน้าด้วย ``` และห้ามใส่ตัวเลขสองหลักขึ้นไปหรือวันที่สมมติเองโดยไม่ผ่าน calc ถ้าไม่ได้เรียก calc ให้ใช้รหัสติดตัวอักษรเช่น WH01, A01, SKU01)")
+            sample_hint = (
+                "สายนี้เป็นโทรศัพท์ ห้ามเขียน [จอ] ตาราง หรือรายละเอียดต่อท้ายเด็ดขาด ให้พูดสั้นกระชับ ประโยคแรกไม่เกินสิบห้าคำแล้วจบด้วยครับทันที)"
+                if phone_mode else
+                ("รอบนี้เป็นการถามต่อสั้นๆ จากเรื่องเดิม ตอบตรงจุดที่ถามเพิ่มบน [จอ] ได้เลยโดยไม่ต้องวางตัวอย่างสมมติซ้ำ)"
+                 if prev_kb and not EXAMPLE_ASK.search(heard) and not CALC_ASK.search(heard) else
+                 f"คำตอบที่อธิบายเรื่องใหม่ ต่อท้าย [จอ] ด้วยบรรทัด {C.SAMPLE_LABEL} แล้วเลือกวิธีแสดงตัวอย่างให้เหมาะกับบริบท "
+                 "(ตารางคำนวณ แถบ [การ์ด]+กล่องเคส > ผังโครงสร้างย่อหน้า - /   - กล่องเคส >+[ขั้นตอน] หรือกรอบ ```sql+> พารามิเตอร์) "
+                 "ห้ามครอบผังย่อหน้าด้วย ``` และห้ามใส่ตัวเลขสองหลักขึ้นไปหรือวันที่สมมติเองโดยไม่ผ่าน calc ถ้าไม่ได้เรียก calc ให้ใช้รหัสติดตัวอักษรเช่น WH01, A01, SKU01)")
+            )
             reuse_hint = (
                 "ผลค้นจาก quick_answer ด้านบนมีข้อมูลพร้อมแล้ว ให้ใช้ตอบทันทีได้เลย ห้ามเรียก quick_answer ซ้ำด้วยคำถามเดิม "
                 "เรียก lookup_menu หรือ batch_read เพิ่มเฉพาะเมื่อข้อมูลด้านบนยังขาดรหัสเมนูหรือรายละเอียดสำคัญจริงๆ เท่านั้น "
@@ -2684,7 +2749,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             tokens = llm_tokens(plain_turn(messages + [LAST_ROUND]) if last else messages, calls, None if last else specs, choice)
             said_before, mark = len(said), time.perf_counter()  # mark: where each phrase's own time starts
             words, shown, side = beside(tokens, screen, known, sources, turn, stop)
-            for chunk in chunk_sentences(words, min_chars=36 if phone_mode_turn else 20, max_chars=140):
+            for chunk in chunk_sentences(words, min_chars=18 if phone_mode_turn else 20, max_chars=75 if phone_mode_turn else 140):
                 if C.SILENT_MARK in chunk:  # the words were for someone else in the room: no answer at all
                     log.info("not said to the secretary: no answer")
                     turn["silent"] = True
@@ -3046,6 +3111,10 @@ class BargeInReplyOnPause(ReplyOnPause):
         if is_phone:
             self._is_phone = True
         pause = C.SIP_PAUSE_SILENCE_S if is_phone else C.PAUSE_SILENCE_S
+        if is_phone and state.started_talking:
+            live_txt = (LIVE.get(id(self)) or {}).get("text", "")
+            if live_txt and _is_incomplete_thai_tail(live_txt):
+                pause = getattr(C, "SIP_INCOMPLETE_PAUSE_S", 0.95)
         step, window = int(sampling_rate * C.PAUSE_STEP_S), int(sampling_rate * (pause + 0.4))
         if len(audio) < (step if state.started_talking else window):
             return False

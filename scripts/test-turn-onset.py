@@ -10,6 +10,7 @@ Usage: python scripts/test-turn-onset.py [path/to/voice_agent.py]   -> exit 0 wh
 import ast
 import contextvars
 import logging
+import re
 import sys
 import time
 import types
@@ -22,7 +23,7 @@ SOURCE = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "jarvis" / "voice_ag
 sys.path.insert(0, str(ROOT / "jarvis"))
 import config as C  # noqa: E402
 
-MODULE_NAMES = {"_audio_dbfs"}
+MODULE_NAMES = {"_audio_dbfs", "_INCOMPLETE_TAIL_RE", "_is_incomplete_thai_tail"}
 CLASS_NAME = "BargeInReplyOnPause"
 CLASS_NAMES = {"determine_pause", "_is_phone", "_checked_state_id"}
 SR = 16000
@@ -59,6 +60,7 @@ def build(phone, voiced_fn):
     pool = FakePool()
     scope = {
         "np": np,
+        "re": re,
         "time": time,
         "contextvars": contextvars,
         "C": C,
@@ -102,10 +104,13 @@ def make_state():
     return types.SimpleNamespace(started_talking=False, responding=False, stream=None, buffer=None)
 
 
+WIN_S = C.SIP_PAUSE_SILENCE_S + 0.45
+
+
 def test_phone_empty_vad_keeps_buffer_warm():
     h, sub = build(phone=True, voiced_fn=lambda audio: np.zeros(0, dtype=np.float32))
     st = make_state()
-    paused = h.determine_pause(tone(0.85, -25.0), SR, st)
+    paused = h.determine_pause(tone(WIN_S, -25.0), SR, st)
     assert paused is False, "empty STT VAD must not pause"
     assert st.started_talking is False, "empty STT VAD must NOT start a turn"
     assert st.buffer is not None and st.buffer.size > 0, "state.buffer must stay warm"
@@ -115,7 +120,7 @@ def test_phone_empty_vad_keeps_buffer_warm():
 def test_phone_quiet_noise_keeps_buffer_warm():
     h, sub = build(phone=True, voiced_fn=lambda audio: audio[1])
     st = make_state()
-    paused = h.determine_pause(tone(0.85, C.SIP_MIN_SPEECH_DBFS - 5.0), SR, st)
+    paused = h.determine_pause(tone(WIN_S, C.SIP_MIN_SPEECH_DBFS - 5.0), SR, st)
     assert paused is False
     assert st.started_talking is False, "noise below SIP_MIN_SPEECH_DBFS must NOT start a turn"
     assert st.buffer is not None and st.buffer.size > 0, "state.buffer must stay warm"
@@ -125,7 +130,7 @@ def test_phone_quiet_noise_keeps_buffer_warm():
 def test_phone_quiet_then_loud_starts_next_step_with_word1():
     h, _ = build(phone=True, voiced_fn=lambda audio: audio[1])
     st = make_state()
-    quiet = tone(0.85, C.SIP_MIN_SPEECH_DBFS - 4.0)
+    quiet = tone(WIN_S, C.SIP_MIN_SPEECH_DBFS - 4.0)
     h.determine_pause(quiet, SR, st)
     assert st.started_talking is False and st.buffer is not None
     # Next 100ms step arrives loud -> buffer + new step immediately crosses threshold with word 1 intact
@@ -138,7 +143,7 @@ def test_phone_quiet_then_loud_starts_next_step_with_word1():
 def test_phone_real_speech_starts_immediately():
     h, sub = build(phone=True, voiced_fn=lambda audio: audio[1])
     st = make_state()
-    h.determine_pause(tone(0.85, -26.0), SR, st)
+    h.determine_pause(tone(WIN_S, -26.0), SR, st)
     assert st.started_talking is True
     assert st.stream is not None
     assert len(sub) >= 1
@@ -150,7 +155,7 @@ def test_phone_voiced_error_fails_open():
 
     h, _ = build(phone=True, voiced_fn=boom)
     st = make_state()
-    h.determine_pause(tone(0.85, -26.0), SR, st)
+    h.determine_pause(tone(WIN_S, -26.0), SR, st)
     assert st.started_talking is True, "VAD exception must fail open"
 
 
