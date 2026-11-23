@@ -152,6 +152,8 @@ _DEFAULT_TRANSCRIBE = transcribe
 
 CALL_LANG: dict[str, str | None] = {}  # webrtc_id -> ISO lang code ("th","en","zh","ja","ko","lo","my","vi","km") or None (auto)
 CALL_NEW_CALLER: dict[str, bool] = {}  # webrtc_id -> True when caller is new and language is not yet known
+CALL_CONTEXT: dict[str, str] = {}  # webrtc_id -> initial CRM/caller context injected without extra LLM turn
+PENDING_LANG_CONFIRM: dict[str, str] = {}  # webrtc_id -> detected other language awaiting caller confirmation
 LANG_NAMES = {
     "th": "ภาษาไทย (Thai)",
     "en": "ภาษาอังกฤษ (English)",
@@ -163,49 +165,88 @@ LANG_NAMES = {
     "vi": "ภาษาเวียดนาม (Vietnamese)",
     "km": "ภาษากัมพูชา (Khmer)",
 }
+LANG_CONFIRM_PROMPTS = {
+    "th": "ได้ยินว่าเป็นภาษาไทย ต้องการเปลี่ยนกลับมาคุยเป็นภาษาไทยไหมครับ",
+    "en": "I heard you speaking English. Would you like to switch our conversation to English?",
+    "zh": "我听到您说中文，请问要切换成中文继续沟通吗？",
+    "ja": "日本語でお話しされていますね。日本語に切り替えてよろしいですか？",
+    "ko": "한국어로 말씀하셨네요. 한국어로 대화를 변경할까요?",
+    "lo": "ຂ້ອຍໄດ້ຍິນທ່ານເວົ້າພາສາລາວ ຕ້ອງການປ່ຽນເປັນພາສາລາວເລີຍບໍ",
+    "my": "မြန်မာဘာသာဖြင့် ပြောဆိုရန် ပြောင်းလိုပါသလား",
+    "vi": "Bạn có muốn chuyển cuộc trò chuyện sang tiếng Việt không?",
+    "km": "តើអ្នកចង់ប្តូរការសន្ទនាទៅជាភាសាខ្មែរទេ?",
+}
+LANG_SWITCHED_ACK = {
+    "th": "ได้เลยครับ เปลี่ยนเป็นภาษาไทยแล้ว มีอะไรให้ผมช่วยดูแลครับ",
+    "en": "Sure, I have switched to English. How can I help you today?",
+    "zh": "好的，已为您切换为中文。请问有什么可以帮您？",
+    "ja": "かしこまりました、日本語に切り替えました。どのようなご用件でしょうか？",
+    "ko": "네, 한국어로 변경했습니다. 무엇을 도와드릴까요?",
+    "lo": "ໄດ້ເລີຍ ປ່ຽນເປັນພາສາລາວແລ້ວ ມີຫຍັງໃຫ້ຊ່ວຍບໍ",
+    "my": "ဟုတ်ကဲ့ မြန်မာဘာသာသို့ ပြောင်းလဲပြီးပါပြီ။ ဘာကူညီပေးရမလဲ။",
+    "vi": "Vâng, tôi đã chuyển sang tiếng Việt. Tôi có thể giúp gì cho bạn?",
+    "km": "បាទ ខ្ញុំបានប្តូរទៅភាសាខ្មែរហើយ តើខ្ញុំអាចជួយអ្វីបាន?",
+}
+MULTILANG_FAST_CHAT = re.compile(
+    r"^(hi|hello|hey|good\s*(morning|afternoon|evening)|how\s*are\s*you|thank\s*you|thanks|ok|okay|yes|no|sure|bye|你好|谢谢|再见|こんにちは|ありがとう|안녕하세요)[\s!?.…]*$",
+    re.I,
+)
 
 
-def _detect_lang_switch(text: str, current_lang: str | None = None) -> str | None:
-    s = (text or "").strip()
-    if not s:
+def _detect_explicit_lang_switch(text: str) -> str | None:
+    low = (text or "").strip().lower()
+    if not low:
         return None
-    low = s.lower()
-    if re.search(r"(ภาษาอังกฤษ|พูดอังกฤษ|คุยอังกฤษ|english|speak english|in english)", low):
+    if re.search(r"(ภาษาอังกฤษ|พูดอังกฤษ|คุยอังกฤษ|speak english|in english|switch to english|english please)", low):
         return "en"
-    if re.search(r"(ภาษาจีน|พูดจีน|คุยจีน|chinese|mandarin|中文|普通话|说中文)", low):
+    if re.search(r"(ภาษาจีน|พูดจีน|คุยจีน|speak chinese|in chinese|mandarin|说中文|切换.*中文|用中文)", low):
         return "zh"
-    if re.search(r"(ภาษาญี่ปุ่น|พูดญี่ปุ่น|japanese|日本語)", low):
+    if re.search(r"(ภาษาญี่ปุ่น|พูดญี่ปุ่น|speak japanese|in japanese|日本語で)", low):
         return "ja"
-    if re.search(r"(ภาษาเกาหลี|พูดเกาหลี|korean|한국어)", low):
+    if re.search(r"(ภาษาเกาหลี|พูดเกาหลี|speak korean|in korean|한국어로)", low):
         return "ko"
-    if re.search(r"(ภาษาลาว|พูดลาว|คุยลาว|\blao\b|ພາສາລາວ)", low):
+    if re.search(r"(ภาษาลาว|พูดลาว|คุยลาว|speak lao|ພາສາລາວ)", low):
         return "lo"
-    if re.search(r"(ภาษาพม่า|ภาษาเมียนมา|burmese|myanmar|မြန်မာ)", low):
+    if re.search(r"(ภาษาพม่า|ภาษาเมียนมา|speak burmese|myanmar language|မြန်မာ)", low):
         return "my"
-    if re.search(r"(ภาษาเวียดนาม|vietnamese|tiếng việt)", low):
+    if re.search(r"(ภาษาเวียดนาม|speak vietnamese|tiếng việt)", low):
         return "vi"
-    if re.search(r"(ภาษาเขมร|ภาษากัมพูชา|khmer|cambodian|ភាសាខ្មែរ)", low):
+    if re.search(r"(ภาษาเขมร|ภาษากัมพูชา|speak khmer|ភាសាខ្មែរ)", low):
         return "km"
     if re.search(r"(ภาษาไทย|พูดไทย|คุยไทย|speak thai|in thai|thai language)", low):
         return "th"
-    if not current_lang:
-        if re.search(r"[\u0E00-\u0E7F]", s):
-            return "th"
-        if re.search(r"[\u3040-\u30FF]", s):
-            return "ja"
-        if re.search(r"[\uAC00-\uD7AF]", s):
-            return "ko"
-        if re.search(r"[\u4E00-\u9FFF]", s):
-            return "zh"
-        if re.search(r"[\u0E80-\u0EFF]", s):
-            return "lo"
-        if re.search(r"[\u1000-\u109F]", s):
-            return "my"
-        if re.search(r"[\u1780-\u17FF]", s):
-            return "km"
-        if re.search(r"[a-zA-Z]{3,}", s):
-            return "en"
     return None
+
+
+def _detect_script_lang(text: str) -> str | None:
+    s = (text or "").strip()
+    if not s:
+        return None
+    if re.search(r"[\u0E00-\u0E7F]{2,}", s):
+        return "th"
+    if re.search(r"[\u3040-\u30FF]", s):
+        return "ja"
+    if re.search(r"[\uAC00-\uD7AF]", s):
+        return "ko"
+    if re.search(r"[\u4E00-\u9FFF]{2,}", s):
+        return "zh"
+    if re.search(r"[\u0E80-\u0EFF]{2,}", s):
+        return "lo"
+    if re.search(r"[\u1000-\u109F]{2,}", s):
+        return "my"
+    if re.search(r"[\u1780-\u17FF]{2,}", s):
+        return "km"
+    if len(re.findall(r"[a-zA-Z]{2,}", s)) >= 2 and not re.search(r"[\u0E00-\u0E7F]", s):
+        return "en"
+    return None
+
+
+def _is_lang_confirm_yes(text: str) -> bool:
+    return bool(re.match(r"^(yes|yeah|yep|sure|ok|okay|please|switch|ใช่|ครับ|ค่ะ|ได้|ได้เลย|เปลี่ยน|ตกลง|ดี|好|好的|是的|对|はい|네|예|ເຈົ້າ|ໄດ້)", (text or "").strip(), re.I))
+
+
+def _is_lang_confirm_no(text: str) -> bool:
+    return bool(re.match(r"^(no|nope|nah|cancel|ไม่|ไม่ต้อง|ไม่เปลี่ยน|ไม่เป็นไร|不用|不|いいえ|아니요|ບໍ່)", (text or "").strip(), re.I))
 
 
 def transcribe_final(audio):
@@ -475,19 +516,18 @@ def level(arr):
     return (arr * uniform_filter1d(gain, win)).astype(np.float32)
 
 
-def speak(text):
+def speak(text, lang_override=None):
     model, voice = tts
     cid = call_id() if "call_id" in globals() else ""
-    lang = CALL_LANG.get(cid) or "th"
+    lang = lang_override or CALL_LANG.get(cid) or "th"
     norm = normalize_text(_thai_pronounce(_say_numbers(text))).strip() if lang == "th" else re.sub(r"[#*_`~|]", " ", text or "").strip()
     if not norm:
         return np.zeros((1, C.TTS_SAMPLE_RATE // 10), np.float32)
-    # a lone short word ("ครับ") now and then comes out all silence (OmniVoice: 3 of 20 tries, 2026-11-04): the caller hears
-    # nothing and PyAV's resampler fails on the empty frame. Ceiling: 3 tries, then 0.1 s of quiet
+    steps = min(C.TTS_STEP, 6) if ("on_phone" in globals() and on_phone()) else C.TTS_STEP
     for _ in range(3):
         with TTS_LOCK:
             wav = model.generate(text=norm, language=lang, voice_clone_prompt=voice, speed=C.TTS_SPEED,
-                                 generation_config=OmniVoiceGenerationConfig(num_step=C.TTS_STEP, guidance_scale=C.TTS_CFG))[0]
+                                 generation_config=OmniVoiceGenerationConfig(num_step=steps, guidance_scale=C.TTS_CFG))[0]
         arr = np.asarray(wav, dtype=np.float32).reshape(-1) if wav is not None else np.zeros(0, np.float32)
         if arr.size:
             _, idx = librosa.effects.trim(arr, top_db=40)
@@ -1659,25 +1699,64 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
     # date/time only when asked: the boss kept quoting the clock as a web price's "updated at" date and time, and
     # the number guard can't tell (the clock is a source); no clock in the turn = nothing to misquote
     now = asked + clock_note(heard)
-    # Multi-language per-caller tracking & mid-call language switching
+    # Multi-language per-caller tracking, other-language confirmation, & instant fast-path
     cid = call_id()
-    switched_lang = _detect_lang_switch(heard, CALL_LANG.get(cid))
-    if cid and switched_lang and CALL_LANG.get(cid) != switched_lang:
-        CALL_LANG[cid] = switched_lang
-        CALL_NEW_CALLER[cid] = False
-        yield AdditionalOutputs({"kind": "lang", "language": switched_lang})
+    cur_lang = CALL_LANG.get(cid)
+    if cid and heard and not hello:
+        pending = PENDING_LANG_CONFIRM.get(cid)
+        explicit = _detect_explicit_lang_switch(heard)
+        spoken = _detect_script_lang(heard)
+
+        if pending:
+            if _is_lang_confirm_yes(heard) or explicit == pending:
+                PENDING_LANG_CONFIRM.pop(cid, None)
+                CALL_LANG[cid] = pending
+                CALL_NEW_CALLER[cid] = False
+                yield AdditionalOutputs({"kind": "user", "text": heard})
+                yield AdditionalOutputs({"kind": "lang", "language": pending})
+                ack = LANG_SWITCHED_ACK.get(pending, LANG_SWITCHED_ACK["en"])
+                yield bot_out(ack, speak(ack, lang_override=pending), lead=0.12)
+                yield AdditionalOutputs({"kind": "done"})
+                return
+            elif _is_lang_confirm_no(heard):
+                PENDING_LANG_CONFIRM.pop(cid, None)
+                now += f"\n(ระบบภาษา: ลูกค้าปฏิเสธการเปลี่ยนภาษา ให้คุยภาษาเดิม {LANG_NAMES.get(cur_lang or 'th', 'ภาษาไทย')} ต่อตามปกติ)"
+        elif explicit and explicit != cur_lang:
+            CALL_LANG[cid] = explicit
+            CALL_NEW_CALLER[cid] = False
+            yield AdditionalOutputs({"kind": "user", "text": heard})
+            yield AdditionalOutputs({"kind": "lang", "language": explicit})
+            ack = LANG_SWITCHED_ACK.get(explicit, LANG_SWITCHED_ACK["en"])
+            yield bot_out(ack, speak(ack, lang_override=explicit), lead=0.12)
+            yield AdditionalOutputs({"kind": "done"})
+            return
+        elif not cur_lang and spoken:
+            CALL_LANG[cid] = spoken
+            CALL_NEW_CALLER[cid] = False
+            yield AdditionalOutputs({"kind": "lang", "language": spoken})
+        elif cur_lang and spoken and spoken != cur_lang:
+            # Heard a different language -> ask confirmation immediately in that detected language!
+            PENDING_LANG_CONFIRM[cid] = spoken
+            yield AdditionalOutputs({"kind": "user", "text": heard})
+            q_text = LANG_CONFIRM_PROMPTS.get(spoken, LANG_CONFIRM_PROMPTS["en"])
+            yield bot_out(q_text, speak(q_text, lang_override=spoken), lead=0.12)
+            yield AdditionalOutputs({"kind": "done"})
+            return
+
+    if cid and CALL_CONTEXT.get(cid):
+        now += f"\n{CALL_CONTEXT.pop(cid)}"
 
     active_lang = CALL_LANG.get(cid)
     if active_lang and active_lang != "th":
         lang_label = LANG_NAMES.get(active_lang, active_lang)
         now += (
             f"\n(ระบบภาษา: ลูกค้ากำลังคุยเป็น {lang_label} ให้แปลข้อมูลคำตอบจากฐานความรู้ภาษาไทยและตอบกลับลูกค้าเป็น {lang_label} "
-            f"อย่างเป็นธรรมชาติ สั้นกระชับ 1-2 ประโยค และหากลูกค้าขอเปลี่ยนภาษากลางสายให้สลับตามทันที)"
+            f"อย่างเป็นธรรมชาติ สั้นกระชับ 1-2 ประโยค)"
         )
     elif CALL_NEW_CALLER.get(cid) and not active_lang:
         now += (
-            "\n(ระบบภาษา: เบอร์ลูกค้าใหม่ ยังไม่ทราบภาษา หากลูกค้ายังไม่ระบุภาษาให้ถามสั้นๆ ว่าต้องการคุยภาษาไทยหรือภาษาอื่น "
-            "และเมื่อทราบภาษาแล้วให้แปลคำตอบและตอบเป็นภาษาที่ลูกค้าเลือก)"
+            "\n(ระบบภาษา: เบอร์ลูกค้าใหม่ ยังไม่ทราบภาษา ให้ถามสั้นๆ ว่าต้องการคุยภาษาไทยหรือภาษาอื่น "
+            "และเมื่อทราบภาษาแล้วให้แปลคำตอบเป็นภาษาที่ลูกค้าเลือก)"
         )
 
     said, screen, turn = ([FILLER_TEXT["hello"]] if hello else []), [], {}  # the history keeps the hello too
@@ -1708,7 +1787,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
         read, query = False, ""
         if "web_search" in tools and LATEST_ASK.search(heard):  # changes daily: only a fresh search may answer it
             now += f"\n(ผลจาก web_search ตอนนี้: {(yield from dispatch([('web_search', {'query': heard})], said, turn, tools))[0]})"
-        elif heard and FAST_CHAT.match(heard.strip()):  # bare hello/thanks/hold: answer right away (~0.9 s faster, no wasted search)
+        elif heard and (FAST_CHAT.match(heard.strip()) or MULTILANG_FAST_CHAT.match(heard.strip())):  # bare hello/thanks/hold: answer right away (~0.9 s faster, no wasted search)
             pass
         elif heard and not stay_topic and (wording := search_words(history, heard))[1] and not was:  # off the topic, maybe misheard: ask, search nothing
             topic, new = wording[1]
@@ -2302,11 +2381,13 @@ def make_app(stream, public=False):
                 yield f"data: {json.dumps(out.args[0], ensure_ascii=False)}\n\n"
         return StreamingResponse(events(), media_type="text/event-stream")
 
-    @app.post("/language")  # set or switch caller language (initial from CRM or mid-call switch)
+    @app.post("/language")  # set or switch caller language + store initial CRM context without triggering extra turn
     async def post_language(body: dict):
         call = str(body.get("webrtc_id") or "")
         lang = body.get("language")
         is_new = bool(body.get("is_new_caller", False))
+        init_ctx = body.get("initial_context")
+        pending_confirm = body.get("pending_confirm")
         if not call:
             return JSONResponse({"error": "webrtc_id is required"}, status_code=400)
         if lang is None or lang == "" or lang == "auto":
@@ -2316,6 +2397,12 @@ def make_app(stream, public=False):
         else:
             return JSONResponse({"error": "unsupported language"}, status_code=400)
         CALL_NEW_CALLER[call] = is_new
+        if isinstance(init_ctx, str) and init_ctx.strip():
+            CALL_CONTEXT[call] = init_ctx.strip()[:600]
+        if pending_confirm and str(pending_confirm) in LANG_NAMES:
+            PENDING_LANG_CONFIRM[call] = str(pending_confirm)
+        elif pending_confirm is None and "pending_confirm" in body:
+            PENDING_LANG_CONFIRM.pop(call, None)
         return {"ok": True, "language": CALL_LANG[call], "is_new_caller": is_new}
 
     @app.post("/chat")  # typed message instead of speech; answered with voice + screen like a spoken turn

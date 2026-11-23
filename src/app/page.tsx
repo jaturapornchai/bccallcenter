@@ -8,6 +8,7 @@ import {
   Briefcase,
   ChevronRight,
   Clock3,
+  ExternalLink,
   History,
   Moon,
   Phone,
@@ -520,6 +521,47 @@ export default function ConsolePage() {
             </div>
           </>
         )}
+
+        {/* Open-Source Credits & GitHub Attribution Footer */}
+        <footer className="cc-panel mt-6 px-5 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="font-semibold cc-text">ที่มาของระบบและโอเพ่นซอร์สที่ใช้พัฒนา (Credits):</span>
+              <a
+                href="https://github.com/jaturapornchai/bccallcenter"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="cc-chip tone-in hover:opacity-90"
+              >
+                <span>GitHub: jaturapornchai/bccallcenter</span>
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            </div>
+            <span className="text-[11px] cc-dim">ระบบ BC Call Center • J.A.R.V.I.S • Inbound 5-Line AI Telephony</span>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px]">
+            {[
+              { name: "Next.js", url: "https://github.com/vercel/next.js" },
+              { name: "werift-webrtc", url: "https://github.com/shinyoshiaki/werift-webrtc" },
+              { name: "FastRTC", url: "https://github.com/gradio-app/fastrtc" },
+              { name: "Faster-Whisper", url: "https://github.com/SYSTRAN/faster-whisper" },
+              { name: "OmniVoice TTS", url: "https://github.com/k2-fsa/OmniVoice" },
+              { name: "Ollama / DeepSeek", url: "https://github.com/ollama/ollama" },
+              { name: "LiveKit Agents", url: "https://github.com/livekit/agents" },
+            ].map((item) => (
+              <a
+                key={item.name}
+                href={item.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="cc-chip tone-idle hover:opacity-85"
+              >
+                <span>{item.name}</span>
+                <ExternalLink className="h-2.5 w-2.5" />
+              </a>
+            ))}
+          </div>
+        </footer>
       </div>
 
       {selectedLog && <CallQaDrawer log={selectedLog} onClose={closeDrawer} onReanalyze={handleReanalyze} />}
