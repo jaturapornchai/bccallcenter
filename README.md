@@ -20,6 +20,9 @@
   - ตัวส่งกระแสเสียง `20ms` Drift-Compensated Outbound RTP Pacer พร้อม Pre-buffer 60ms และ Barge-in Flush ใน `lib/sip-engine.mjs` ทำให้เสียงไหลออกสายโทรศัพท์สม่ำเสมอไม่กระตุก
   - รองรับ **ElevenLabs `eleven_v4_turbo` Streaming TTS** (`jarvis/elevenlabs_tts.py`, TTFA ~145–240ms, ไม่ใช้ GPU เครื่อง, รองรับภาษาไทยและหลายภาษา) พร้อม fallback อัตโนมัติไป Local OmniVoice หากไม่ได้ตั้งค่า `ELEVENLABS_API_KEY`
   - **Local Disk TTS Cache (`jarvis/cache/tts/`) & DeepSeek FAQ Cache (`jarvis/cache/qa_cache.json`)**: เก็บไฟล์เสียง PCM 24kHz ลงดิสก์ (LRU สูงสุด 500 MB) และเก็บคำตอบ FAQ ที่ผ่าน Judge แล้ว (TTL 7 วัน, จับคำถามซ้ำ/หางเสียงต่าง/ใกล้เคียงอัตโนมัติ) เพื่อประหยัดทั้งเครดิต ElevenLabs และ DeepSeek Token (ตรวจสถิติได้ที่ `GET /cache/stats`)
+- **ระบบกันเสียงไอ/เสียงรบกวนรอบข้าง + Word-Verified Barge-in**:
+  - กรองเสียงฮัม/ลมความถี่ต่ำด้วย **80 Hz High-Pass Filter** (`scipy.signal.butter/sosfilt`) และ **Noise Floor Gate (`-33 dBFS`)** กันเสียงทีวีหรือคนคุยไกลๆ
+  - ขณะบอทกำลังพูดจะไม่ตัดคำตอบจากเสียงไอ/กระแอม/เสียงเคาะสั้น 100ms แต่ใช้ **OpenThai CPU Streaming** ตรวจยืนยันคำพูดแทรกจริง (`barge_in_confirmed` + ล้างคิว 20ms RTP ทันที) จึงพูดต่อเนื่องได้เมื่อมีเสียงรบกวน และยังแทรกพูดกลางประโยคได้ทันที
 - **ระบบฟัง 3 หูขนาน (Triple-Ear Parallel ASR) + เสียงแจ้ง "รอสักครู่" ทันที 0ms**:
   - ฟังเสียงลูกค้าพร้อมกัน 3 หูในรอบเดียว (ต่อยอดแนวคิดจาก MarketBrain): **หูที่ 1 (GPU)** `Typhoon Whisper Turbo` พร้อม `initial_prompt` ศัพท์บัญชี/BC Ai Account + **หูที่ 2 (`OpenThai 2.0 th-TH`)** และ **หูที่ 3 (`OpenThai 2.0 th-mix`)** รัน Batched ONNX `B=2` บน CPU พร้อมกันในรอบเดียว มี deadline 1.2 วินาทีกันค้างและส่งคำจากหูสำรองให้ DeepSeek รวมความหมายโดยไม่เพิ่มเวลา
   - พูดเสียงแจ้ง **"รอสักครู่นะครับ ขอเช็กข้อมูลให้ครับ"** (Pre-rendered 0ms ไม่ใช้ GPU ตอนโทร) ทันทีที่ต้องค้นฐานความรู้ เพื่อไม่ให้สายเงียบและซ่อนเวลาค้น/คิดคำตอบ

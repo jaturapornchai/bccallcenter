@@ -51,7 +51,7 @@ from fastrtc.utils import create_message
 from pypdf import PdfReader
 from pythainlp.util import num_to_thaiword
 from scipy.ndimage import maximum_filter1d, uniform_filter1d
-from scipy.signal import resample_poly
+from scipy.signal import butter, resample_poly, sosfilt
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"f5_tts_th.*")
 from f5_tts_th.normalize import normalize_text  # noqa: E402  (digits and signs to Thai words: the one part of f5_tts_th still used)
@@ -126,18 +126,34 @@ def load_final_stt():
     return WhisperModel(C.FINAL_STT_MODEL_DIR, device="cuda", compute_type=C.FINAL_STT_COMPUTE_TYPE) if C.HAS_CUDA else None
 
 
-def to16k(audio):  # fastrtc frames -> 16 kHz float32 (fast polyphase resample for 8 kHz phone audio)
+_HP_SOS_16K = butter(4, 80.0, btype="highpass", fs=16000, output="sos")
+
+
+def _audio_dbfs(arr: np.ndarray) -> float:
+    if arr is None or arr.size == 0:
+        return -100.0
+    rms = float(np.sqrt(np.mean(arr.astype(np.float32) ** 2)))
+    return 20.0 * float(np.log10(max(rms, 1e-5)))
+
+
+def to16k(audio):  # fastrtc frames -> 16 kHz float32 with 80 Hz high-pass (cuts AC hum/wind/rumble)
     sr, data = audio
     data = audio_to_float32(np.squeeze(data))
-    if sr == 16000 or data.size == 0:
+    if data.size == 0:
         return data
     if sr == 8000:
-        return resample_poly(data, 2, 1).astype(np.float32, copy=False)
-    if sr == 24000:
-        return resample_poly(data, 2, 3).astype(np.float32, copy=False)
-    if sr == 48000:
-        return resample_poly(data, 1, 3).astype(np.float32, copy=False)
-    return librosa.resample(data, orig_sr=sr, target_sr=16000)
+        out = resample_poly(data, 2, 1).astype(np.float32, copy=False)
+    elif sr == 16000:
+        out = data.astype(np.float32, copy=False)
+    elif sr == 24000:
+        out = resample_poly(data, 2, 3).astype(np.float32, copy=False)
+    elif sr == 48000:
+        out = resample_poly(data, 1, 3).astype(np.float32, copy=False)
+    else:
+        out = librosa.resample(data, orig_sr=sr, target_sr=16000).astype(np.float32, copy=False)
+    if out.size >= 32:
+        out = sosfilt(_HP_SOS_16K, out).astype(np.float32, copy=False)
+    return out
 
 
 def voiced(audio):
@@ -2336,24 +2352,39 @@ class BargeInReplyOnPause(ReplyOnPause):
         if not self.state.started_talking:
             LIVE.pop(id(self), None)
 
+    _BARGE_KEYWORDS = ("หยุด", "เดี๋ยว", "แป๊บ", "ขอถาม", "สอบถาม", "เอาใหม่", "เปลี่ยนภาษา", "stop", "wait", "excuse")
+
     def live_words(self, sr, snap, state):
-        """Stream live karaoke words over the WebRTC data channel while the caller is still speaking."""
+        """Stream live karaoke words over the WebRTC data channel while the caller is still speaking,
+        and trigger Word-Verified Barge-in on phone calls so coughs/ambient noise never cut off the agent."""
         live = LIVE.get(id(self))
         try:
             if not state.started_talking:
                 return
+            snap16 = to16k((sr, snap))
             if transcribe is not _DEFAULT_TRANSCRIBE or not live or not live.get("stream"):
                 txt = transcribe((sr, snap))
             else:
-                txt = live["stream"].accept(to16k((sr, snap)))
+                txt = live["stream"].accept(snap16)
             bare = re.sub(r"[\s.,!?…]+", "", txt)
-            if not bare or bare in self.HESITATIONS or not state.started_talking:
+            if not bare or bare in self.HESITATIONS or bare in self.BACKCHANNELS or not state.started_talking:
                 return
             now_m = time.monotonic()
             turn_s = max(snap.size, live.get("fed", 0) if live else 0) / sr
             spoken = " ".join(t for s, e, t, _ in self.playing if e + 0.5 > now_m - turn_s and s < now_m)
             if spoken and grounding.is_echo(txt, spoken):
                 return
+            # Word-Verified Barge-in on phone lines: only interrupt active speech when foreground human words are heard
+            if on_phone() and not self.cut and any(e > now_m and not is_f for _, e, _, is_f in self.playing):
+                dbfs = _audio_dbfs(snap16)
+                low_bare = bare.lower()
+                is_real_barge = dbfs >= C.SIP_BARGE_MIN_DBFS and (
+                    bare in self.SIP_CUT_INS
+                    or any(k in low_bare for k in self._BARGE_KEYWORDS)
+                    or len(bare) >= C.SIP_BARGE_MIN_CHARS
+                )
+                if is_real_barge:
+                    self.cut_off(f"word-verified barge-in: {masked(bare)} ({dbfs:.0f} dBFS)")
             if live:
                 new, live["text"] = txt != live["text"], txt
                 if new:
@@ -2386,10 +2417,9 @@ class BargeInReplyOnPause(ReplyOnPause):
             state.started_talking, state.stream, state.buffer = True, recent, None
             LIVE[id(self)] = {"t": 0.0, "fed": 0, "text": "", "busy": False,
                               "stream": stt.stream() if hasattr(stt, "stream") else None}
-            self.send_message_sync(create_message("log", "started_talking"))  # the page turns the secretary down
-            # On a phone call, only barge-in/cut_off when a real spoken answer (not a "please hold" filler or active search) is playing.
-            if on_phone() and any(e > time.monotonic() and not is_f for _, e, _, is_f in self.playing):
-                self.cut_off()
+            # On phone calls, do NOT cut off at 100ms VAD onset (that lets coughs/ambient noise kill replies).
+            # Instead, live_words() / process_audio() verify real foreground words and emit "barge_in_confirmed".
+            self.send_message_sync(create_message("log", "started_talking"))
         live = LIVE.setdefault(id(self), {"t": 0.0, "fed": 0, "text": "", "busy": False,
                                           "stream": stt.stream() if hasattr(stt, "stream") else None})
         now_m = time.monotonic()
@@ -2421,16 +2451,14 @@ class BargeInReplyOnPause(ReplyOnPause):
     cut = False  # cut_off() stopped the answer for the speech now being heard; process_audio's turn check clears it
     _checked_stream_len = 0
 
-    def cut_off(self):
-        """ลุงจืด 2026-11-23: on a phone call the caller's first word stops the answer and its queued audio at once (a
-        phone has no page to turn the secretary down). The speech's own pause still starts its turn: emit() keeps
-        pulling while the event is set, so it is cleared, or emit() would answer the first 0.1 s of the speech.
-        ponytail: a cough or a lone อืม stops the answer too, and nothing resumes it: the line goes quiet"""
-        log.info("the caller started talking: the answer stops (phone line)")
+    def cut_off(self, reason: str = "the caller started talking"):
+        """Stop the active answer and flush outbound RTP audio only after foreground speech is confirmed."""
+        log.info("%s: the answer stops (phone line)", reason)
         self._close_generator()
         self.generator, self.cut = None, True
         self.event.clear()
         self.clear_queue()
+        self.send_message_sync(create_message("log", "barge_in_confirmed"))
 
     def process_audio(self, audio, state):
         checked = state.pause_detected  # 2026-11-08 23:03: this pause was checked on the frame that found it; every frame
@@ -2442,16 +2470,22 @@ class BargeInReplyOnPause(ReplyOnPause):
             return
         if state.stream.size == self._checked_stream_len:
             return
-        if state.responding and not self.cut:
-            return
         self._checked_stream_len = state.stream.size
+        phone = on_phone()
         try:  # an STT/GPU error raised here ended listening for the rest of the call
             speech = voiced((state.sampling_rate, state.stream))
-            noise = (not speech.size or self.hears_itself(state) or self.just_filler(state)
-                     or self.no_cut_in(state, speech.size / 16000))
+            dbfs = _audio_dbfs(speech) if speech.size else -100.0
+            too_quiet = phone and speech.size > 0 and dbfs < C.SIP_MIN_SPEECH_DBFS
+            noise = (
+                not speech.size
+                or too_quiet
+                or self.hears_itself(state)
+                or self.just_filler(state)
+                or self.no_cut_in(state, speech.size / 16000)
+            )
             if speech.size:  # how loud each turn is: the numbers a gate for far-off voices (TV, other people) needs
-                log.info("heard %.2fs of speech at %.0f dBFS%s", speech.size / 16000,
-                         20 * np.log10(max(float(np.sqrt(np.mean(speech ** 2))), 1e-5)), ", not a turn" if noise else "")
+                reason_tag = ", background noise" if too_quiet else (", not a turn" if noise else "")
+                log.info("heard %.2fs of speech at %.0f dBFS%s", speech.size / 16000, dbfs, reason_tag)
         except Exception:
             log.exception("turn check failed, taking the speech as a turn")
             noise = False
@@ -2467,6 +2501,10 @@ class BargeInReplyOnPause(ReplyOnPause):
                 log.info("the answer stopped for a sound that is no turn (phone line)")
             if PENDING[call_id()]["text"]:  # typed while this noise played: /chat left it to this turn, so start it now
                 self.push_turn(interrupt=False)
+        elif phone and not self.cut and any(e > time.monotonic() and not is_f for _, e, _, is_f in self.playing):
+            # Fallback barge-in for non-Thai foreground speech verified at pause end
+            self.cut_off("confirmed turn barge-in")
+            state.responding = False
         self.cut = False
 
     playing = ()  # (start, end, text, is_filler) of the secretary's phrases on the caller's speaker, as emit() hands them out
@@ -2513,8 +2551,11 @@ class BargeInReplyOnPause(ReplyOnPause):
     # A hesitation is never an answer; an อืม is a yes after a question, so it passes over only while the secretary
     # talks or thinks. ponytail: fixed lists; หืม (huh?), ครับ, ใช่ and หยุด stay turns
     # เสียงดนตรี: Whisper's caption for music or noise, 22 whole caller turns in the log answered from the brain
-    HESITATIONS = {"เอ่อ", "อ่า", "อ้า", "คือ", "นะ", "นะครับ", "นะคะ", "เสียงดนตรี"}
-    BACKCHANNELS = {"อืม", "อือ", "ฮึ", "หึ", "อ่ะ", "อะ"}
+    HESITATIONS = {
+        "เอ่อ", "อ่า", "อ้า", "คือ", "นะ", "นะครับ", "นะคะ", "เสียงดนตรี",
+        "แฮ่ม", "อะแฮ่ม", "แค่ก", "ฮัดเช้ย", "อึ้ม", "หืมม", "โอ๊ย", "อุ๊ย", "ฮึ", "หึ",
+    }
+    BACKCHANNELS = {"อืม", "อือ", "ฮึ", "หึ", "อ่ะ", "อะ", "อ๋อ", "อ้อ"}
 
     def just_filler(self, state):
         early = EARLY.get(id(self))  # started 0.25 s into the silence: usually done; none = not checked
