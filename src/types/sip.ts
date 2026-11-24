@@ -90,11 +90,15 @@ export interface CrmTicket {
   company: string;
   subject: string;
   description: string;
+  topics?: string[];
+  mergedCount?: number;
+  callbackAdvice?: string;
   status: TicketStatus;
   priority: TicketPriority;
   assignee: string;
   source: "ai_callback" | "ai_auto" | "manual";
   sessionId: string | null;
+  sessionIds?: string[];
   lineId?: number | null;
   acknowledgedAt?: string | null;
   acknowledgedBy?: string | null;
@@ -143,6 +147,7 @@ export interface CallAnalysis {
   buyingIntent?: "high" | "medium" | "low";
   interestedModules?: string[];
   followUpAction?: string;
+  callbackAdvice?: string;
   followUpMessage?: string;
   aiCoachingTip?: string;
   error?: string;

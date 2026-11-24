@@ -6,7 +6,11 @@ import { WebSocketServer } from "ws";
 import {
   buildClearSessionCookie,
   buildSessionSetCookie,
+  collectSecretTerms,
   createSessionToken,
+  sanitizeFreeTextForViewer,
+  sanitizeStateForViewer,
+  sanitizeTicketForViewer,
   verifyGoogleIdToken,
   verifySessionFromCookieHeader,
 } from "./lib/auth.mjs";
@@ -111,16 +115,15 @@ app.prepare().then(async () => {
       return sendJson(res, 200, { idle: activeCalls === 0, activeCalls });
     }
 
-    // --- Auth Endpoints (Strict Single-Admin Google Sign-In + HttpOnly Session Cookie) ---
+    // --- Auth Endpoints (Google Sign-In + HttpOnly Session Cookie) ---
     if (urlPath === "/api/auth/me" && req.method === "GET") {
       const session = verifySessionFromCookieHeader(req.headers.cookie);
-      const isAdmin = Boolean(session?.isAdmin);
       return sendJson(res, 200, {
-        authenticated: isAdmin,
-        isAdmin,
-        email: isAdmin ? session.email : null,
-        name: isAdmin ? session.name : null,
-        picture: isAdmin ? session.picture : null,
+        authenticated: Boolean(session),
+        isAdmin: Boolean(session?.isAdmin),
+        email: session?.email || null,
+        name: session?.name || null,
+        picture: session?.picture || null,
         googleClientId: process.env.GOOGLE_CLIENT_ID || "",
       });
     }
@@ -129,20 +132,6 @@ app.prepare().then(async () => {
       try {
         const body = await readJsonBody(req);
         const user = await verifyGoogleIdToken(body.credential);
-        if (!user.isAdmin) {
-          const clearCookie = buildClearSessionCookie(isRequestHttps(req));
-          return sendJson(
-            res,
-            403,
-            {
-              ok: false,
-              authenticated: false,
-              isAdmin: false,
-              error: "บัญชีนี้ไม่มีสิทธิ์เข้าใช้งานระบบ (สงวนสิทธิ์เฉพาะผู้ดูแลระบบเท่านั้น)",
-            },
-            { "Set-Cookie": clearCookie }
-          );
-        }
         const token = createSessionToken(user);
         const cookie = buildSessionSetCookie(token, isRequestHttps(req));
         return sendJson(
@@ -151,11 +140,13 @@ app.prepare().then(async () => {
           {
             ok: true,
             authenticated: true,
-            isAdmin: true,
+            isAdmin: user.isAdmin,
             email: user.email,
             name: user.name,
             picture: user.picture,
-            message: "เข้าสู่ระบบผู้ดูแลสำเร็จ",
+            message: user.isAdmin
+              ? "เข้าสู่ระบบผู้ดูแลสำเร็จ"
+              : "เข้าสู่ระบบแล้ว (โหมดผู้ชมดูได้ทุกฟีเจอร์ — ข้อมูลที่เป็นความลับถูกปกปิดไว้ สงวนสิทธิ์เฉพาะผู้ดูแลระบบ)",
           },
           { "Set-Cookie": cookie }
         );
@@ -207,20 +198,29 @@ app.prepare().then(async () => {
       return;
     }
 
-    // --- 1-Click Teach AI (Strict Admin Only -> J.A.R.V.I.S QA Cache) ---
+    // --- 1-Click Teach AI (Viewer Redacted Read; Admin Write -> J.A.R.V.I.S QA Cache) ---
     if (urlPath === "/api/teach") {
       const session = verifySessionFromCookieHeader(req.headers.cookie);
-      if (!session?.isAdmin) {
-        return sendJson(res, 403, { ok: false, error: "สงวนสิทธิ์เฉพาะผู้ดูแลระบบเท่านั้น" });
-      }
       if (req.method === "GET") {
         try {
           const r = await fetch(`${sip.jarvisUrl}/teach`, { signal: AbortSignal.timeout(4000) });
           const data = await r.json();
+          if (!session?.isAdmin && Array.isArray(data?.entries)) {
+            const curState = sip.publicState();
+            const ctx = { publicTrunkNumber: curState.trunk?.user || "", ...collectSecretTerms(curState) };
+            data.entries = data.entries.map((entry) => ({
+              ...entry,
+              question: sanitizeFreeTextForViewer(entry.question, ctx),
+              answer: sanitizeFreeTextForViewer(entry.answer, ctx),
+            }));
+          }
           return sendJson(res, r.status, data);
         } catch {
           return sendJson(res, 200, { ok: false, entries: [] });
         }
+      }
+      if (!session?.isAdmin) {
+        return sendJson(res, 403, { ok: false, error: "ต้องเข้าสู่ระบบผู้ดูแลก่อนสอนหรือลบคำตอบ AI" });
       }
       if (req.method === "POST") {
         try {
@@ -258,12 +258,10 @@ app.prepare().then(async () => {
       }
     }
 
-    // --- Analytics & Cache ROI Endpoint (Strict Admin Only) ---
+    // --- Analytics & Cache ROI Endpoint (Safe Aggregate Data, PII Scrubbed for Viewers) ---
     if (urlPath === "/api/analytics" && req.method === "GET") {
       const session = verifySessionFromCookieHeader(req.headers.cookie);
-      if (!session?.isAdmin) {
-        return sendJson(res, 403, { ok: false, error: "สงวนสิทธิ์เฉพาะผู้ดูแลระบบเท่านั้น" });
-      }
+      const isAdmin = Boolean(session?.isAdmin);
       const allLogs = sip.memory.listCallLogs(300);
       const crmState = sip.crm.publicState();
       const now = new Date();
@@ -341,15 +339,24 @@ app.prepare().then(async () => {
         }
       } catch {}
 
+      const curState = isAdmin ? null : sip.publicState();
+      const sanitizeCtx = curState ? { publicTrunkNumber: curState.trunk?.user || "", ...collectSecretTerms(curState) } : null;
+
       const topTopics = Array.from(topicCounts.entries())
         .sort((a, b) => b[1] - a[1])
         .slice(0, 8)
-        .map(([topic, count]) => ({ topic, count }));
+        .map(([topic, count]) => ({
+          topic: sanitizeCtx ? sanitizeFreeTextForViewer(topic, sanitizeCtx) : topic,
+          count,
+        }));
 
       const topModules = Array.from(moduleCounts.entries())
         .sort((a, b) => b[1] - a[1])
         .slice(0, 8)
-        .map(([name, count]) => ({ name, count }));
+        .map(([name, count]) => ({
+          name: sanitizeCtx ? sanitizeFreeTextForViewer(name, sanitizeCtx) : name,
+          count,
+        }));
 
       return sendJson(res, 200, {
         ok: true,
@@ -385,14 +392,7 @@ app.prepare().then(async () => {
   server.on("upgrade", (req, socket, head) => {
     const urlPath = (req.url || "").split("?")[0];
     if (urlPath === "/ws/sip") {
-      const session = verifySessionFromCookieHeader(req.headers.cookie);
-      if (!session?.isAdmin) {
-        socket.write("HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nUnauthorized");
-        socket.destroy();
-        return;
-      }
       wss.handleUpgrade(req, socket, head, (ws) => {
-        ws.adminSession = session;
         wss.emit("connection", ws, req);
       });
     } else {
@@ -402,9 +402,14 @@ app.prepare().then(async () => {
 
   function broadcastState(state) {
     const adminPayload = JSON.stringify({ type: "state", data: state, readOnly: false });
+    const viewerPayload = JSON.stringify({
+      type: "state",
+      data: sanitizeStateForViewer(state),
+      readOnly: true,
+    });
     for (const client of wss.clients) {
-      if (client.readyState === 1 && client.isAdmin) {
-        client.send(adminPayload);
+      if (client.readyState === 1) {
+        client.send(client.isAdmin ? adminPayload : viewerPayload);
       }
     }
   }
@@ -412,10 +417,17 @@ app.prepare().then(async () => {
   sip.on("state", broadcastState);
 
   sip.on("callback_ticket", (ticket) => {
+    const curState = sip.publicState();
+    const publicTrunk = curState.trunk?.user || "";
+    const secretCtx = collectSecretTerms(curState);
     const adminPayload = JSON.stringify({ type: "callback_ticket", ticket });
+    const viewerPayload = JSON.stringify({
+      type: "callback_ticket",
+      ticket: sanitizeTicketForViewer(ticket, publicTrunk, null, secretCtx),
+    });
     for (const client of wss.clients) {
-      if (client.readyState === 1 && client.isAdmin) {
-        client.send(adminPayload);
+      if (client.readyState === 1) {
+        client.send(client.isAdmin ? adminPayload : viewerPayload);
       }
     }
   });
@@ -424,7 +436,7 @@ app.prepare().then(async () => {
     if (wss.clients.size === 0) return;
     const payload = JSON.stringify({ type: "meter", levels, ts: Date.now() });
     for (const client of wss.clients) {
-      if (client.readyState === 1 && client.isAdmin) {
+      if (client.readyState === 1) {
         client.send(payload);
       }
     }
@@ -462,14 +474,10 @@ app.prepare().then(async () => {
   });
 
   wss.on("connection", (ws, req) => {
-    const session = ws.adminSession || verifySessionFromCookieHeader(req.headers.cookie);
-    if (!session?.isAdmin) {
-      try { ws.close(4401, "Unauthorized"); } catch {}
-      return;
-    }
-    ws.isAdmin = true;
-    ws.userEmail = session.email || null;
-    ws.userName = session.name || session.email || "ผู้ดูแลระบบ";
+    const session = verifySessionFromCookieHeader(req.headers.cookie);
+    ws.isAdmin = Boolean(session?.isAdmin);
+    ws.userEmail = session?.email || null;
+    ws.userName = session?.name || session?.email || "ผู้ดูแลระบบ";
     ws.isAlive = true;
     ws.on("pong", () => {
       ws.isAlive = true;
@@ -479,15 +487,15 @@ app.prepare().then(async () => {
     ws.send(
       JSON.stringify({
         type: "state",
-        data: current,
-        readOnly: false,
+        data: ws.isAdmin ? current : sanitizeStateForViewer(current),
+        readOnly: !ws.isAdmin,
         serverTime: Date.now(),
       })
     );
 
     ws.on("message", async (data, isBinary) => {
       ws.isAlive = true;
-      if (!ws.isAdmin) return;
+      // Allow lightweight ping/sync from all connected viewers for true realtime monitoring
       if (!isBinary) {
         try {
           const probe = JSON.parse(data.toString("utf8"));
@@ -500,14 +508,27 @@ app.prepare().then(async () => {
             ws.send(
               JSON.stringify({
                 type: "state",
-                data: snap,
-                readOnly: false,
+                data: ws.isAdmin ? snap : sanitizeStateForViewer(snap),
+                readOnly: !ws.isAdmin,
                 serverTime: Date.now(),
               })
             );
             return;
           }
         } catch {}
+      }
+
+      // Strict server-side read-only enforcement for non-admin viewers
+      if (!ws.isAdmin) {
+        if (!isBinary) {
+          ws.send(
+            JSON.stringify({
+              type: "error",
+              message: "โหมดผู้ชม (ปกปิดความลับ) กรุณาเข้าสู่ระบบผู้ดูแลด้วย Google ก่อนดำเนินการ",
+            })
+          );
+        }
+        return;
       }
 
       if (isBinary) {

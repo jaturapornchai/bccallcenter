@@ -219,7 +219,7 @@ export default function ConsolePage() {
         name: data.name || null,
         picture: data.picture || null,
       }));
-      setToast(data.message || "เข้าสู่ระบบผู้ดูแลสำเร็จ");
+      setToast(data.message || (data.isAdmin ? "เข้าสู่ระบบผู้ดูแลสำเร็จ" : "เข้าสู่ระบบในโหมดผู้ชม"));
       setWsEpoch((v) => v + 1);
     } catch {
       setToast("ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ยืนยันตัวตนได้");
@@ -247,7 +247,7 @@ export default function ConsolePage() {
     setCrmFocusPhone(null);
     stopTicketSpeech();
     audioRef.current?.stopRingtone();
-    setToast("ออกจากระบบผู้ดูแลแล้ว");
+    setToast("ออกจากระบบแล้ว — สลับกลับเป็นโหมดผู้ชม (ปกปิดข้อมูลที่เป็นความลับ)");
     setWsEpoch((v) => v + 1);
   }, []);
 
@@ -293,12 +293,6 @@ export default function ConsolePage() {
   }, []);
 
   useEffect(() => {
-    if (!auth.loaded || !auth.isAdmin) {
-      setWsConnected(false);
-      setWsLatencyMs(null);
-      setMeters({});
-      return;
-    }
     const bridge = new AudioBridge();
     audioRef.current = bridge;
 
@@ -369,7 +363,13 @@ export default function ConsolePage() {
             setWsLatencyMs(Math.max(1, Date.now() - msg.ts));
           } else if (msg.type === "callback_ticket" && msg.ticket) {
             const ticket = msg.ticket as CrmTicket;
-            setToast(`แจ้งเตือนใหม่: ลูกค้าขอให้โทรกลับ (${ticket.id})`);
+            const merged = Math.max(1, Number(ticket.mergedCount || 1));
+            repeatCountsRef.current.delete(ticket.id);
+            setToast(
+              merged > 1
+                ? `อัปเดตเคสโทรกลับรวม ${merged} ครั้ง (${ticket.id})`
+                : `แจ้งเตือนใหม่: ลูกค้าขอให้โทรกลับ (${ticket.id})`
+            );
             announceCallbackTicket(ticket, false);
             setRightTab("callbacks");
           } else if (msg.type === "error") {
@@ -426,7 +426,7 @@ export default function ConsolePage() {
       wsRef.current?.close();
       bridge.destroy();
     };
-  }, [auth.loaded, auth.isAdmin, wsEpoch, announceCallbackTicket]);
+  }, [wsEpoch, announceCallbackTicket]);
 
   useEffect(() => {
     const bridge = audioRef.current;
@@ -611,84 +611,6 @@ export default function ConsolePage() {
   const trunkTone = trunkOnline ? "tone-in" : state.trunk.status === "error" ? "tone-danger" : "tone-held";
   const clock = new Date(nowMs).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
-  if (!auth.loaded) {
-    return (
-      <div data-theme={theme} className="cc-root relative flex min-h-screen items-center justify-center px-4">
-        <div className="cc-ambient" aria-hidden="true" />
-        <div className="cc-grid-bg" aria-hidden="true" />
-        <div className="cc-scanline" aria-hidden="true" />
-        <div className="cc-panel relative flex items-center gap-3 px-6 py-4 text-sm font-medium cc-text">
-          <Lock className="h-4 w-4 animate-pulse" />
-          <span>กำลังตรวจสอบสิทธิ์ผู้ดูแลระบบ...</span>
-        </div>
-      </div>
-    );
-  }
-
-  if (!auth.isAdmin) {
-    return (
-      <div data-theme={theme} className="cc-root relative flex min-h-screen flex-col items-center justify-center px-4 py-10">
-        <div className="cc-ambient" aria-hidden="true" />
-        <div className="cc-grid-bg" aria-hidden="true" />
-        <div className="cc-scanline" aria-hidden="true" />
-
-        <div className="fixed right-4 top-4 z-10">
-          <button
-            type="button"
-            onClick={toggleTheme}
-            className="cc-btn h-9"
-            title={isDark ? "สลับเป็นโหมดสว่าง" : "สลับเป็นโหมดมืด"}
-          >
-            {isDark ? <Sun className="h-3.5 w-3.5 text-amber-300" /> : <Moon className="h-3.5 w-3.5 text-indigo-600" />}
-            <span>{isDark ? "โหมดสว่าง" : "โหมดมืด"}</span>
-          </button>
-        </div>
-
-        <main className="cc-panel relative w-full max-w-md space-y-5 p-7 text-center">
-          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-[var(--tone-line)] bg-[var(--tone-soft)] tone-in">
-            <ShieldCheck className="h-7 w-7 cc-ink" />
-          </div>
-
-          <div className="space-y-2">
-            <h1 className="text-xl font-bold tracking-tight cc-text">ระบบ BC Call Center</h1>
-            <p className="text-xs leading-relaxed cc-muted">
-              ระบบนี้เป็นข้อมูลความลับ สงวนสิทธิ์เฉพาะผู้ดูแลระบบที่ได้รับอนุญาตเท่านั้น กรุณาเข้าสู่ระบบด้วยบัญชี Google ผู้ดูแล
-            </p>
-          </div>
-
-          {toast && (
-            <div
-              role="alert"
-              className={`cc-banner px-3.5 py-2.5 text-left ${
-                toast.includes("ไม่มีสิทธิ์") || toast.includes("ไม่สำเร็จ") || toast.includes("ไม่สามารถ")
-                  ? "tone-danger"
-                  : "tone-held"
-              }`}
-            >
-              <TriangleAlert className="h-4 w-4 shrink-0" />
-              <span>{toast}</span>
-            </div>
-          )}
-
-          <div className="flex justify-center pt-1">
-            <AuthControls
-              auth={auth}
-              isDark={isDark}
-              compact={false}
-              onGoogleCredential={handleGoogleCredential}
-              onLogout={handleLogout}
-            />
-          </div>
-
-          <p className="text-[11px] cc-dim">
-            <Lock className="mr-1 inline h-3 w-3 align-text-bottom" />
-            <span>ปิดเสียงโทรศัพท์แบบเรียลไทม์ • ปกป้องข้อมูลลูกค้าและการสนทนาทุกสาย</span>
-          </p>
-        </main>
-      </div>
-    );
-  }
-
   return (
     <div data-theme={theme} data-alert={ringingLine ? "in" : activeAiLine ? "ai" : "none"} className="cc-root relative min-h-screen">
       {/* Command-center backdrop: ambient glow + drifting grid + telemetry scanline */}
@@ -846,7 +768,7 @@ export default function ConsolePage() {
           <div role="status" className="cc-banner tone-held mb-4 px-4 py-2.5">
             <Lock className="h-4 w-4 shrink-0" />
             <span>
-              โหมดผู้ชม (ดูได้อย่างเดียว) • หมายเลขโทรศัพท์ทั้งหมดถูกปกปิดเป็นความลับ กรุณาเข้าสู่ระบบผู้ดูแลด้วย Google เพื่อดูหมายเลขและควบคุมระบบ
+              โหมดผู้ชม (ดูได้ทุกฟีเจอร์) • ข้อมูลที่เป็นความลับทั้งหมด (เบอร์โทร ชื่อและบริษัทลูกค้า โน้ตส่วนตัว ไฟล์บันทึกเสียง และสิทธิ์ควบคุม) ถูกปกปิดไว้ สงวนสิทธิ์เฉพาะผู้ดูแลระบบ
             </span>
           </div>
         )}

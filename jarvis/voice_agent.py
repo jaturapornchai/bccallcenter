@@ -52,7 +52,7 @@ from fastrtc.utils import create_message
 from pypdf import PdfReader
 from pythainlp.util import num_to_thaiword
 from scipy.ndimage import maximum_filter1d, uniform_filter1d
-from scipy.signal import butter, resample_poly, sosfilt
+from scipy.signal import butter, resample_poly, sosfilt, sosfiltfilt
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"f5_tts_th.*")
 from f5_tts_th.normalize import normalize_text  # noqa: E402  (digits and signs to Thai words: the one part of f5_tts_th still used)
@@ -1014,17 +1014,52 @@ def load_tts():
 TTS_LOCK = threading.Lock()  # ponytail: one TTS phrase at a time for every caller; a second model if callers queue
 
 
+_TTS_BP_SOS = butter(4, [110.0, 3500.0], btype="bandpass", fs=C.TTS_SAMPLE_RATE, output="sos")
+
+
 def level(arr):
-    """ลุงจืด 2026-11-17 "ตอนนี้เสียงไม่ค่อยดัง": the voice's phrases came out between -23 and -17 dBFS, each at its own
-    loudness. Every phrase goes to C.TTS_RMS; where that lifts a peak past 0.95 the gain eases down around the peak
-    (a limiter over 20 ms each side), nothing is clipped."""
-    rms = float(np.sqrt(np.mean(arr ** 2))) if arr.size else 0.0
-    if rms < 1e-4:
+    """Clean telephony conditioning: DC removal, 110-3500 Hz zero-phase bandpass (anti-alias + rumble/hiss cut),
+    soft pause noise expander/gate, active-speech RMS normalization to C.TTS_RMS, smooth 0.78 peak limiter,
+    and 6ms cosine edge fades."""
+    arr = np.asarray(arr, dtype=np.float32).reshape(-1)
+    sr = C.TTS_SAMPLE_RATE
+    if arr.size < 64:
         return arr
-    arr = arr * (C.TTS_RMS / rms)
-    win = 2 * int(0.02 * C.TTS_SAMPLE_RATE) + 1  # odd: the same reach on both sides of a peak
-    gain = np.minimum(1.0, 0.95 / np.maximum(maximum_filter1d(np.abs(arr), win), 1e-6))
-    return (arr * uniform_filter1d(gain, win)).astype(np.float32)
+    arr = arr - float(np.mean(arr))
+    if arr.size > 32:
+        arr = sosfiltfilt(_TTS_BP_SOS, arr).astype(np.float32)
+    env_win = max(1, int(0.015 * sr))
+    rms_env = np.sqrt(np.maximum(uniform_filter1d(arr * arr, env_win), 1e-12))
+    peak_env = float(np.max(rms_env))
+    if peak_env < 1e-4:
+        return np.zeros_like(arr)
+    active_mask = rms_env > max(0.012, peak_env * 0.12)
+    speech_rms = (
+        float(np.sqrt(np.mean(arr[active_mask] ** 2)))
+        if np.any(active_mask)
+        else float(np.sqrt(np.mean(arr ** 2)))
+    )
+    if speech_rms < 1e-4:
+        return np.zeros_like(arr)
+    # Soft noise expander for room hiss / breath pauses (smooth S-curve down to -28 dB floor)
+    gate_hi = speech_rms * 0.20
+    gate_lo = speech_rms * 0.06
+    t = np.clip((rms_env - gate_lo) / max(gate_hi - gate_lo, 1e-6), 0.0, 1.0)
+    gate_gain = 0.04 + 0.96 * (t * t * (3.0 - 2.0 * t))
+    hold_win = max(1, int(0.025 * sr))
+    gate_gain = uniform_filter1d(maximum_filter1d(gate_gain, hold_win), hold_win)
+    arr = (arr * gate_gain).astype(np.float32)
+    # Normalize active speech to C.TTS_RMS with smooth peak limiter @ 0.78 (-2.2 dBFS)
+    arr = arr * (C.TTS_RMS / speech_rms)
+    win = 2 * int(0.02 * sr) + 1
+    gain = np.minimum(1.0, 0.78 / np.maximum(maximum_filter1d(np.abs(arr), win), 1e-6))
+    arr = (arr * uniform_filter1d(gain, win)).astype(np.float32)
+    fade = min(int(0.006 * sr), arr.size // 4)
+    if fade > 1:
+        ramp = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, fade, dtype=np.float32)))
+        arr[:fade] *= ramp
+        arr[-fade:] *= ramp[::-1]
+    return arr
 
 
 def _prepare_tts_text(text, lang):

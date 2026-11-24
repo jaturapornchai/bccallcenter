@@ -22,6 +22,7 @@ import {
   Users,
 } from "lucide-react";
 import { formatDateTime, formatPhone, formatSeconds } from "@/components/LineCard";
+import { CallbackAdviceBox } from "@/components/CallbackAlertPanel";
 import { sentimentMeta } from "@/components/CallQaDrawer";
 import { SUPPORTED_LANGUAGES, languageShortLabel } from "@/types/sip";
 import type {
@@ -810,6 +811,11 @@ export function CrmWorkspace({
                           <span>AI สร้างอัตโนมัติ</span>
                         </span>
                       )}
+                      {Math.max(1, Number(t.mergedCount || 1)) > 1 && (
+                        <span className="cc-chip tone-ai text-[10.5px]">
+                          รวม {Math.max(1, Number(t.mergedCount || 1))} ครั้ง
+                        </span>
+                      )}
                     </div>
                     {!readOnly && (
                       <button
@@ -838,6 +844,8 @@ export function CrmWorkspace({
                       {t.description}
                     </p>
                   )}
+
+                  <CallbackAdviceBox advice={t.callbackAdvice} />
 
                   {(t.acknowledgedBy || t.closedBy) && (
                     <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] cc-dim">
@@ -913,7 +921,7 @@ export function CrmWorkspace({
                           ดูบันทึกสาย
                         </button>
                       )}
-                      <span className="text-[11px] cc-dim">{formatDateTime(t.createdAt)}</span>
+                      <span className="text-[11px] cc-dim">{formatDateTime(t.updatedAt || t.createdAt)}</span>
                     </div>
                   </div>
                 </div>

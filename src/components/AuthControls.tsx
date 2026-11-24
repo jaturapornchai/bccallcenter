@@ -125,14 +125,18 @@ export function AuthControls({ auth, isDark, compact = true, onGoogleCredential,
   }
 
   return (
-    <div className={`inline-flex flex-wrap items-center justify-center gap-2.5 ${compact ? "" : "flex-col"}`}>
-      {compact && (
-        <span className="cc-chip tone-held h-9 rounded-xl px-3">
-          <Lock className="h-3.5 w-3.5" />
-          <span>สงวนสิทธิ์ผู้ดูแลระบบ</span>
-        </span>
+    <div className={`inline-flex flex-wrap items-center gap-2 ${compact ? "" : "flex-col justify-center"}`}>
+      <span className="cc-chip tone-held h-9 rounded-xl px-3">
+        <Lock className="h-3.5 w-3.5" />
+        <span>{auth.authenticated ? `โหมดผู้ชม (${auth.email})` : "โหมดผู้ชม (ปกปิดความลับ)"}</span>
+      </span>
+      {auth.authenticated && (
+        <button type="button" onClick={onLogout} className="cc-btn h-9 gap-1.5" title="ออกจากระบบ">
+          <LogOut className="h-3.5 w-3.5" />
+          <span>ออก</span>
+        </button>
       )}
-      {auth.googleClientId && <div ref={btnRef} className="inline-flex min-h-[40px] items-center justify-center" />}
+      {auth.googleClientId && <div ref={btnRef} className="inline-flex items-center" />}
     </div>
   );
 }

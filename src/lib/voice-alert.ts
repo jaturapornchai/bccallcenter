@@ -16,7 +16,7 @@ export function formatPhoneForSpeech(phone: string): string {
 
 function cleanTopicForSpeech(subject: string): string {
   return String(subject || "")
-    .replace(/^ขอให้โทรกลับ\s*[:：\-]?\s*/i, "")
+    .replace(/^ขอให้โทรกลับ(?:\s*\([^)]*\))?\s*[:：\-]?\s*/i, "")
     .replace(/^ลูกค้าขอให้พนักงานโทรกลับ\s*/i, "")
     .trim()
     .slice(0, 65);
@@ -25,16 +25,20 @@ function cleanTopicForSpeech(subject: string): string {
 /** สร้างข้อความเสียงพูดภาษาไทยสำหรับแจ้งเตือน Ticket โทรกลับ (รองรับโหมดผู้ชมที่ปกปิดข้อมูล) */
 export function buildTicketSpeechText(ticket: CrmTicket, readOnly: boolean): string {
   const cbPhone = ticket.callbackPhone || ticket.phone || "";
+  const merged = Math.max(1, Number(ticket.mergedCount || 1));
   if (readOnly || cbPhone.includes("•")) {
-    return "แจ้งเตือนครับ มีเคสลูกค้าขอให้โทรกลับใหม่ กรุณาตรวจสอบรายการบนหน้าจอครับ";
+    return merged > 1
+      ? `แจ้งเตือนครับ มีเคสลูกค้าขอให้โทรกลับอัปเดตเพิ่มเติม รวม ${merged} ครั้ง กรุณาตรวจสอบรายการบนหน้าจอครับ`
+      : "แจ้งเตือนครับ มีเคสลูกค้าขอให้โทรกลับใหม่ กรุณาตรวจสอบรายการบนหน้าจอครับ";
   }
   const cleanName = String(ticket.customerName || "").trim();
   const namePart = cleanName && !cleanName.includes("ปกปิด") ? ` คุณ${cleanName}` : "";
   const spokenPhone = formatPhoneForSpeech(cbPhone);
   const phonePart = spokenPhone ? ` เบอร์ ${spokenPhone}` : "";
+  const mergedPart = merged > 1 ? ` ติดต่อซ้ำรวม ${merged} ครั้ง` : "";
   const topic = cleanTopicForSpeech(ticket.subject);
   const topicPart = topic ? ` เรื่อง ${topic}` : "";
-  return `แจ้งเตือนครับ มีลูกค้าขอให้โทรกลับ${namePart}${phonePart}${topicPart} กรุณากดรับทราบหรือปิดเคสครับ`.slice(0, 180);
+  return `แจ้งเตือนครับ มีลูกค้าขอให้โทรกลับ${namePart}${phonePart}${mergedPart}${topicPart} กรุณากดรับทราบหรือปิดเคสครับ`.slice(0, 190);
 }
 
 function pickThaiVoice(synth: SpeechSynthesis): SpeechSynthesisVoice | null {

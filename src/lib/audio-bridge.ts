@@ -2,8 +2,8 @@
 
 // Browser Web Audio API <-> G.711 mu-law (8kHz) bridge + Ringtone + DTMF
 
-const MULAW_MAX = 0x1fff;
-const MULAW_BIAS = 33;
+const MULAW_MAX = 32635;
+const MULAW_BIAS = 0x84;
 
 const decodeTable = new Float32Array(256);
 for (let i = 0; i < 256; i++) {
@@ -17,7 +17,7 @@ for (let i = 0; i < 256; i++) {
 }
 
 function encodeMuLawSample(floatSample: number): number {
-  let sample = Math.max(-1, Math.min(1, floatSample)) * 32767;
+  let sample = Math.trunc(Math.max(-1, Math.min(1, floatSample)) * 32767);
   let sign = 0;
   if (sample < 0) {
     sign = 0x80;

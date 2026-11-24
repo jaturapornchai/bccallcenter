@@ -4,12 +4,96 @@ import {
   BellRing,
   CheckCircle2,
   ClipboardList,
+  Lightbulb,
   PhoneCall,
   UserCheck,
   Volume2,
 } from "lucide-react";
 import { formatDateTime, formatPhone } from "@/components/LineCard";
 import type { CrmTicket } from "@/types/sip";
+
+function extractExtraDescriptionLines(t: CrmTicket): string[] {
+  const lines = String(t.description || "").split(/\r?\n/);
+  const extra: string[] = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (
+      /^เรื่องที่ให้โทรกลับ\s*[:：]/.test(line) ||
+      /^ประเด็นที่ลูกค้าแจ้ง/.test(line) ||
+      /^\d+\.\s+/.test(line) ||
+      /^เบอร์ให้โทรกลับ\s*[:：]/.test(line) ||
+      /^โทรเข้าจากเบอร์\s*[:：]/.test(line) ||
+      /^ชื่อลูกค้า\s*[:：]/.test(line) ||
+      /^บริษัท\s*[:：]/.test(line)
+    ) {
+      continue;
+    }
+    extra.push(line);
+  }
+  return extra;
+}
+
+export function CallbackAdviceBox({ advice }: { advice?: string | null }) {
+  if (!advice || !advice.trim()) return null;
+  return (
+    <div className="mt-2.5 rounded-xl border border-[var(--tone-line)] bg-[var(--tone-soft)] tone-ai p-3">
+      <div className="flex items-center gap-1.5 text-[11.5px] font-bold cc-text">
+        <Lightbulb className="h-3.5 w-3.5 shrink-0" />
+        <span>คำแนะนำในการโทรกลับให้พนักงาน</span>
+      </div>
+      <p className="mt-1.5 whitespace-pre-line text-xs leading-relaxed cc-text">{advice}</p>
+    </div>
+  );
+}
+
+function TicketFullDetailsBox({ ticket }: { ticket: CrmTicket }) {
+  const topics = Array.isArray(ticket.topics) ? ticket.topics.filter(Boolean) : [];
+  const extraLines = extractExtraDescriptionLines(ticket);
+  const merged = Math.max(1, Number(ticket.mergedCount || 1));
+
+  return (
+    <div className="mt-2 space-y-2">
+      <p className="whitespace-pre-line text-xs font-semibold leading-relaxed cc-text">
+        {ticket.subject}
+      </p>
+
+      {(topics.length > 0 || extraLines.length > 0 || ticket.description) && (
+        <div className="rounded-xl border border-[var(--cc-border)] bg-[var(--cc-panel)] p-2.5 text-xs leading-relaxed cc-muted">
+          {topics.length > 0 ? (
+            <>
+              <div className="mb-1 text-[11px] font-semibold cc-text">
+                {topics.length > 1
+                  ? `ประเด็นที่ลูกค้าแจ้งทั้งหมด (${topics.length} ประเด็น${merged > 1 ? ` • โทรซ้ำ ${merged} ครั้ง` : ""})`
+                  : "รายละเอียดเรื่องที่ลูกค้าฝากไว้"}
+              </div>
+              {topics.length > 1 ? (
+                <ol className="list-decimal space-y-1 pl-4">
+                  {topics.map((tp, idx) => (
+                    <li key={idx} className="whitespace-pre-line">
+                      {tp}
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="whitespace-pre-line">{topics[0]}</p>
+              )}
+              {extraLines.length > 0 && (
+                <div className="mt-2 border-t border-[var(--cc-border)] pt-2 whitespace-pre-line">
+                  {extraLines.join("\n")}
+                </div>
+              )}
+            </>
+          ) : (
+            <p className="whitespace-pre-line">{ticket.description}</p>
+          )}
+        </div>
+      )}
+
+      <CallbackAdviceBox advice={ticket.callbackAdvice} />
+    </div>
+  );
+}
 
 interface CallbackAlertPanelProps {
   tickets: CrmTicket[];
@@ -87,11 +171,12 @@ export function CallbackAlertPanel({
         </div>
       </div>
 
-      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
-        {tickets.slice(0, 4).map((t) => {
+      <div className={`mt-3 grid grid-cols-1 gap-3 ${tickets.length > 1 ? "lg:grid-cols-2" : ""}`}>
+        {tickets.slice(0, 6).map((t) => {
           const cbPhone = t.callbackPhone || t.phone;
           const hasDiffCaller = Boolean(t.callerPhone && cbPhone && t.callerPhone !== cbPhone);
           const isUnack = t.status === "open" && !t.acknowledgedAt;
+          const merged = Math.max(1, Number(t.mergedCount || 1));
 
           return (
             <div
@@ -111,11 +196,16 @@ export function CallbackAlertPanel({
                       <span>รับทราบแล้ว • กำลังโทรกลับ</span>
                     </span>
                   )}
+                  {merged > 1 && (
+                    <span className="cc-chip tone-ai text-[10.5px]">
+                      รวม {merged} ครั้ง
+                    </span>
+                  )}
                   {typeof t.lineId === "number" && (
                     <span className="cc-chip tone-ai text-[10.5px] font-mono">L{t.lineId}</span>
                   )}
                 </div>
-                <span className="text-[11px] cc-dim">{formatDateTime(t.createdAt)}</span>
+                <span className="text-[11px] cc-dim">{formatDateTime(t.updatedAt || t.createdAt)}</span>
               </div>
 
               <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
@@ -132,7 +222,7 @@ export function CallbackAlertPanel({
                 )}
               </div>
 
-              <p className="mt-1.5 line-clamp-2 text-xs leading-relaxed cc-muted">{t.subject}</p>
+              <TicketFullDetailsBox ticket={t} />
 
               {t.acknowledgedBy && t.acknowledgedAt && (
                 <div className="mt-1.5 text-[11px] cc-dim">
@@ -200,7 +290,7 @@ export function CallbackTicketList({
     const aClosed = a.status === "closed" || a.status === "resolved" ? 1 : 0;
     const bClosed = b.status === "closed" || b.status === "resolved" ? 1 : 0;
     if (aClosed !== bClosed) return aClosed - bClosed;
-    return String(b.createdAt).localeCompare(String(a.createdAt));
+    return String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt));
   });
 
   if (sorted.length === 0) {
@@ -213,11 +303,13 @@ export function CallbackTicketList({
 
   return (
     <div className="space-y-2.5">
-      <div className="max-h-[470px] space-y-2.5 overflow-y-auto pr-1 cc-scroll">
+      <div className="max-h-[620px] space-y-2.5 overflow-y-auto pr-1 cc-scroll">
         {sorted.slice(0, 20).map((t) => {
           const isClosed = t.status === "closed" || t.status === "resolved";
           const isUnack = t.status === "open" && !t.acknowledgedAt;
           const cbPhone = t.callbackPhone || t.phone;
+          const hasDiffCaller = Boolean(t.callerPhone && cbPhone && t.callerPhone !== cbPhone);
+          const merged = Math.max(1, Number(t.mergedCount || 1));
 
           return (
             <div
@@ -244,16 +336,25 @@ export function CallbackTicketList({
                       <span>รับทราบแล้ว</span>
                     </span>
                   )}
+                  {merged > 1 && (
+                    <span className="cc-chip tone-ai text-[10px]">
+                      รวม {merged} ครั้ง
+                    </span>
+                  )}
                 </div>
-                <span className="text-[10.5px] cc-dim">{formatDateTime(t.createdAt)}</span>
+                <span className="text-[10.5px] cc-dim">{formatDateTime(t.updatedAt || t.createdAt)}</span>
               </div>
 
               <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
                 {cbPhone && <span className="font-mono font-semibold cc-text">{formatPhone(cbPhone)}</span>}
                 {t.customerName && <span className="cc-text">• {t.customerName}</span>}
+                {t.company && <span className="cc-muted">({t.company})</span>}
+                {hasDiffCaller && (
+                  <span className="text-[11px] cc-muted">(โทรเข้าจาก {formatPhone(t.callerPhone!)})</span>
+                )}
               </div>
 
-              <p className="mt-1 text-xs leading-snug cc-muted">{t.subject}</p>
+              <TicketFullDetailsBox ticket={t} />
 
               {isClosed ? (
                 <div className="mt-2 text-[10.5px] cc-dim">

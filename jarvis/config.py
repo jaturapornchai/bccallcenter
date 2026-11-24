@@ -284,7 +284,7 @@ TTS_CFG = 2.0  # guidance scale
 TTS_SPEED = 0.88
 # the loudness every phrase is brought to, as rms (0.16 is -16 dBFS). ลุงจืด 2026-11-17 "ตอนนี้เสียงไม่ค่อยดัง": the voice gave
 # -23 to -17 dBFS, a different level each phrase. ponytail: a chosen level, not picked by ear; raise it if it is still quiet
-TTS_RMS = 0.16
+TTS_RMS = 0.14
 SENTENCE_GAP_S = 0.22  # silence before each sentence after the first of a reply. ponytail: a chosen value, not measured; tune it by ear
 TTS_SAMPLE_RATE = 24000
 

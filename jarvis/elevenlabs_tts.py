@@ -31,9 +31,10 @@ class ElevenLabsTTS:
         voice_id: str = "H9eYlNHpm1vah6PPgYAk",
         model_id: str = "eleven_v4_turbo",
         speed: float = 0.94,
-        stability: float = 0.35,
-        similarity_boost: float = 0.78,
-        style: float = 0.45,
+        stability: float = 0.65,
+        similarity_boost: float = 0.72,
+        style: float = 0.0,
+        use_speaker_boost: bool = False,
         timeout: float = 15.0,
         cache_dir: str | None = None,
         max_cache_mb: int = 500,
@@ -45,6 +46,7 @@ class ElevenLabsTTS:
         self.stability = float(stability)
         self.similarity_boost = float(similarity_boost)
         self.style = float(style)
+        self.use_speaker_boost = bool(use_speaker_boost)
         self.cache_dir = cache_dir
         self.max_cache_bytes = max(20, int(max_cache_mb)) * 1024 * 1024
         self._cache_lock = threading.Lock()
@@ -68,18 +70,21 @@ class ElevenLabsTTS:
         return bool(self.api_key)
 
     def _resolve_emotion(self, emotion: str | None) -> tuple[float, float, float]:
-        """Map conversational emotion -> (stability, style, speed) while preserving default cache keys."""
+        """Map conversational emotion -> (stability, style, speed) tuned cleanly for narrowband telephony."""
         emo = (emotion or "friendly").strip().lower()
         if emo == "empathy":
-            return (0.48, 0.34, max(0.86, round(self.speed - 0.04, 2)))
+            return (0.72, 0.0, max(0.86, round(self.speed - 0.04, 2)))
         if emo == "upbeat":
-            return (0.30, 0.58, min(1.02, round(self.speed + 0.02, 2)))
+            return (0.58, 0.05, min(1.00, round(self.speed + 0.02, 2)))
         return (self.stability, self.style, self.speed)
 
     def _cache_path(self, text: str, lang: str | None, stability: float, style: float, speed: float) -> str | None:
         if not self.cache_dir:
             return None
-        key_src = f"{self.model_id}|{self.voice_id}|{speed:.2f}|{stability:.2f}|{style:.2f}|{lang or 'auto'}|{text}"
+        key_src = (
+            f"{self.model_id}|{self.voice_id}|{speed:.2f}|{stability:.2f}|"
+            f"{self.similarity_boost:.2f}|{style:.2f}|{int(self.use_speaker_boost)}|{lang or 'auto'}|{text}"
+        )
         digest = hashlib.sha256(key_src.encode("utf-8")).hexdigest()[:24]
         return os.path.join(self.cache_dir, f"{digest}.pcm")
 
@@ -156,7 +161,7 @@ class ElevenLabsTTS:
                 "stability": self.stability if stability is None else stability,
                 "similarity_boost": self.similarity_boost,
                 "style": self.style if style is None else style,
-                "use_speaker_boost": True,
+                "use_speaker_boost": self.use_speaker_boost,
                 "speed": self.speed if speed is None else speed,
             },
         }
