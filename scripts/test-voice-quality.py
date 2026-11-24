@@ -78,7 +78,7 @@ def test_caller_name_rejects_connectors_and_accepts_real_names():
     extract = scope["_extract_caller_name_py"]
     asked = "ไม่ทราบว่าขอเรียกชื่อเล่นว่าอะไรดีครับ"
 
-    for bad in ("และ", "แล้ว", "อันนี้", "เจ๊", "ครับผม", "โอเค", "คือ", "เอ่อ", "ค่ะ", "หรือ", "ถ้า", "ไหม", "การผลัดหรือการร้", "คุณการผลัดหรือการร้"):
+    for bad in ("และ", "แล้ว", "อันนี้", "เจ๊", "ครับผม", "โอเค", "คือ", "เอ่อ", "ค่ะ", "หรือ", "ถ้า", "ไหม", "การผลัดหรือการร้", "คุณการผลัดหรือการร้", "สวัสดีครับผม", "หวัดดีครับ", "ทักทาย"):
         got, _ = extract(bad, asked)
         assert got == "", f"expected bad token {bad!r} to be rejected, got {got!r}"
 
@@ -408,6 +408,7 @@ def test_first_call_ai_intro_name_capture_and_callback_confirm():
     assert "เบอร์นี้หรือเบอร์อื่น" in src
     assert "ครบสามอย่าง" in src and "has_prior_topic" in src
     assert "cb_offered_recently" in src and "cb_already_saved" in src
+    assert "CALL_GREET_SENT_AT" in src and "ถามเจาร์วิสได้ในเวอร์ชันใหม่" in src
 
 
 def test_callback_restraint_qa_cache_fast_chat_and_batch():

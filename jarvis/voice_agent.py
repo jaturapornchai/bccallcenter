@@ -235,6 +235,7 @@ CALL_CONTEXT: dict[str, str] = {}  # webrtc_id -> initial CRM/caller context inj
 CALL_CALLER_META: dict[str, dict] = {}  # webrtc_id -> {"phone", "name", "company", "totalCalls", "lastTopic"}
 LAST_WAIT_AT: dict[str, float] = {}  # webrtc_id -> monotonic ts of last wait filler (avoid repetitive cues)
 PENDING_LANG_CONFIRM: dict[str, str] = {}  # webrtc_id -> detected other language awaiting caller confirmation
+CALL_GREET_SENT_AT: dict[str, float] = {}  # webrtc_id -> monotonic ts when greeting/intro started (detect early barge-in)
 
 CALLER_PROFILES_PATH = os.path.join(C.SESSIONS_DIR, "caller_profiles.json")
 CALLER_PROFILES_LOCK = threading.Lock()
@@ -262,6 +263,7 @@ _BAD_CALLER_NAMES = {
     "เอ่อ", "อ่า", "อ้า", "อืม", "อือ", "ฮึ", "หึ", "อ๋อ", "อ้อ", "จ้า", "จ้ะ", "เหรอ", "หรอ", "เลย", "มาก", "หน่อย", "ด้วย",
     "เดี๋ยว", "แป๊บ", "หยุด", "พอ", "เจ๊", "เฮีย", "พี่", "น้อง", "คุณ", "ผม", "ฉัน", "หนู", "ดิฉัน", "มัน", "เขา", "เรา",
     "ไหม", "มั้ย", "หรือ", "อะไร", "ยังไง", "เท่าไหร่", "กี่", "บ้าง", "รึเปล่า", "เปล่า", "เหรอครับ", "เหรอคะ",
+    "สวัสดี", "สวัสดีครับ", "สวัสดีค่ะ", "หวัดดี", "ฮัลโหล", "ทักทาย", "ขอบคุณ",
     "calling", "asking", "looking", "trying", "interested", "using", "not", "here", "fine", "good", "okay",
     "hello", "hi", "yes", "no", "thanks", "thank", "and",
 }
@@ -1468,7 +1470,7 @@ STATUS = {"web_search": "กำลังค้นหาในอินเทอ�
           "calc": "กำลังคำนวณ", "general_knowledge": "กำลังถามความรู้ทั่วไป"}
 FILLER_TEXT = {
     "hello": "สวัสดีครับ",
-    "phone_intro": "ผมเจาร์วิส ผู้ช่วยเอไอของบีซีคอลเซ็นเตอร์ครับ ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามเจาร์วิสได้ทันที ส่วนถ้าใช้บีซีแอคเคาท์เวอร์ชันเก่า หรืออยากคุยกับพนักงานจริง แจ้งฝากเบอร์โทรกลับได้เลยนะครับ ไม่ทราบว่าผมขอเรียกคุณชื่ออะไรดีครับ",
+    "phone_intro": "ผมเจาร์วิส ผู้ช่วยเอไอของบีซีคอลเซ็นเตอร์ครับ สำหรับลูกค้าถ้าเป็นบีซีแอคเคาท์เวอร์ชันเก่า หรืออยากคุยกับพนักงานจริง ให้ฝากเบอร์โทรกลับ เดี๋ยวเจ้าหน้าที่ติดต่อกลับครับ ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามเจาร์วิสได้ในเวอร์ชันใหม่เลย ไม่ทราบว่าขอเรียกคุณชื่ออะไรดีครับ",
     "wait_th_1": "แป๊บนะครับ",
     "wait_th_2": "ครับผม ขอเช็กนิดนึงนะ",
     "wait_th_3": "เดี๋ยวดูให้นะครับ",
@@ -2823,6 +2825,14 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
 
     if cid and CALL_CONTEXT.get(cid):
         now += f"\n{CALL_CONTEXT.pop(cid)}"
+    if cid and on_phone() and not hello and cid in CALL_GREET_SENT_AT:
+        greet_sent_at = CALL_GREET_SENT_AT.pop(cid, 0.0)
+        if greet_sent_at and (time.monotonic() - greet_sent_at) < 7.5:
+            now += (
+                "\n(ระบบ: คำทักทายต้นสายถูกพูดแทรกยังไม่จบ ให้บอกลูกค้าสั้นๆ 1 ประโยคด้วยว่า "
+                "สำหรับลูกค้าถ้าเป็นบีซีแอคเคาท์เวอร์ชันเก่าให้ฝากเบอร์โทรกลับ เดี๋ยวเจ้าหน้าที่ติดต่อกลับ "
+                "ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามเจาร์วิสได้ในเวอร์ชันใหม่ครับ)"
+            )
     c_name = ""
     has_prior_topic = _has_continuous_topic("", history)
     if cid and (meta := CALL_CALLER_META.get(cid)):
@@ -3315,9 +3325,10 @@ def greet(*_, public=False):
             if cur_lang == "th":
                 addressed = _format_addressed_name(c_name)
                 if last_topic:
-                    greeting = f"สวัสดีครับ{addressed} เจาร์วิสครับ คราวก่อนเราคุยเรื่อง{last_topic}กันไว้ วันนี้คุยต่อเรื่องเดิมหรือมีเรื่องไหนให้ช่วยดูครับ"
+                    greeting = f"สวัสดีครับ{addressed} เจาร์วิสครับ ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามผมได้ในเวอร์ชันใหม่ ส่วนถ้าเป็นบีซีแอคเคาท์เวอร์ชันเก่าฝากเบอร์โทรกลับได้นะครับ คราวก่อนเราคุยเรื่อง{last_topic}กันไว้ วันนี้คุยต่อเรื่องเดิมหรือมีเรื่องไหนให้ช่วยดูครับ"
                 else:
-                    greeting = f"สวัสดีครับ{addressed} เจาร์วิสครับ ดีใจที่ได้คุยกันอีกนะครับ วันนี้มีเรื่องไหนให้ผมช่วยดูดีครับ"
+                    greeting = f"สวัสดีครับ{addressed} เจาร์วิสครับ ดีใจที่ได้คุยกันอีกนะครับ ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามเจาร์วิสได้ในเวอร์ชันใหม่ ส่วนถ้าเป็นบีซีแอคเคาท์เวอร์ชันเก่าฝากเบอร์โทรกลับให้เจ้าหน้าที่ติดต่อกลับได้ครับ"
+                CALL_GREET_SENT_AT[cid] = time.monotonic()
                 yield bot_out(greeting, speak(greeting, lang_override="th", emotion="upbeat"), lead=0.14)
                 yield AdditionalOutputs({"kind": "done"})
                 return
@@ -3326,18 +3337,20 @@ def greet(*_, public=False):
             if c_calls > 1 and last_topic:
                 greeting = (
                     f"สวัสดีครับ ยินดีต้อนรับกลับมาครับ ผมเจาร์วิส ผู้ช่วยเอไอของบีซีคอลเซ็นเตอร์ครับ "
-                    f"ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามผมได้ทันที ส่วนถ้าใช้บีซีแอคเคาท์เวอร์ชันเก่าแจ้งฝากเบอร์โทรกลับได้นะครับ คราวก่อนเราคุยเรื่อง{last_topic}กันไว้ "
+                    f"ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามผมได้ในเวอร์ชันใหม่ ส่วนถ้าใช้บีซีแอคเคาท์เวอร์ชันเก่าให้ฝากเบอร์โทรกลับ เดี๋ยวเจ้าหน้าที่ติดต่อกลับครับ คราวก่อนเราคุยเรื่อง{last_topic}กันไว้ "
                     f"ไม่ทราบว่าขอเรียกคุณชื่ออะไรดีครับ"
                 )
                 hist_g.append({"role": "assistant", "content": greeting})
                 del hist_g[: -2 * C.HISTORY_TURNS]
                 save_session(sid_g, hist_g)
+                CALL_GREET_SENT_AT[cid] = time.monotonic()
                 yield bot_out(greeting, speak(greeting, lang_override="th"), lead=0.14)
                 yield AdditionalOutputs({"kind": "done"})
                 return
             hist_g.append({"role": "assistant", "content": f"{FILLER_TEXT['hello']} {FILLER_TEXT['phone_intro']}"})
             del hist_g[: -2 * C.HISTORY_TURNS]
             save_session(sid_g, hist_g)
+            CALL_GREET_SENT_AT[cid] = time.monotonic()
             yield bot_out(FILLER_TEXT["hello"], FILLERS["hello"], lead=0.18)
             yield bot_out(FILLER_TEXT["phone_intro"], FILLERS["phone_intro"], lead=0.12)
             yield AdditionalOutputs({"kind": "done"})

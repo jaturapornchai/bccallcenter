@@ -764,6 +764,14 @@ export default function ConsolePage() {
           </div>
         </header>
 
+        <div role="note" className="cc-banner tone-live mb-4 px-4 py-2.5">
+          <Bot className="h-4 w-4 shrink-0" />
+          <span>
+            สำหรับลูกค้าถ้าเป็น <strong>BC Account เวอร์ชันเก่า</strong> ให้ฝากเบอร์โทรกลับ เดี๋ยวเจ้าหน้าที่ติดต่อกลับ • ตอนนี้เวอร์ชันล่าสุดคือ{" "}
+            <strong>BC Ai Account</strong> ถาม J.A.R.V.I.S ได้ในเวอร์ชันใหม่
+          </span>
+        </div>
+
         {auth.loaded && isReadOnly && (
           <div role="status" className="cc-banner tone-held mb-4 px-4 py-2.5">
             <Lock className="h-4 w-4 shrink-0" />
