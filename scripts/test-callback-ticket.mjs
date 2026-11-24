@@ -10,7 +10,8 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bc-cc-test-"));
 
 try {
   process.chdir(tmpDir);
-  const { CrmStore } = await import(pathToFileURL(path.join(origCwd, "lib", "crm-store.mjs")).href);
+  const { CrmStore, isPlausibleCustomerName } = await import(pathToFileURL(path.join(origCwd, "lib", "crm-store.mjs")).href);
+  const { extractCallerNameFromText } = await import(pathToFileURL(path.join(origCwd, "lib", "sip-engine.mjs")).href);
   const { sanitizeStateForViewer, sanitizeTicketForViewer } = await import(
     pathToFileURL(path.join(origCwd, "lib", "auth.mjs")).href
   );
@@ -264,6 +265,34 @@ try {
   for (const secret of ["020000001", "020000002", "020000003", "020000004", "020000009", "สมชาย", "สมหญิง", "มานะ", "มานี", "บีซี", "แอดมินเอ"]) {
     assert.equal(maskedStateJson.includes(secret), false, `viewer state leaked ${secret}`);
   }
+
+  // 10. Regression (call 1795527470144-wok98): Thai words containing "ชื่อ" ("เชื่อม...", "เชื่อว่า...", "ขายเชื่อไหม")
+  // must never overwrite or capture garbled caller names in Node sip-engine or CRM.
+  for (const badUtterance of [
+    "ให้เซลฟเวอร์อยู่คนละที่อะ คนลักสาขาเชื่อมกันได้หรือเปล่า",
+    "แล้วสาขากับคลางสินค้าเชื่อมโยงกันยังไง",
+    "สินค้าที่ขายเชื่อไหม",
+    "ผมเชื่อว่าโปรแกรมนี้ใช้งานได้ดี",
+    "ชื่อเมนูอะไรครับ",
+    "ชื่อสาขาต้องกรอกยังไง",
+  ]) {
+    assert.equal(extractCallerNameFromText(badUtterance, ""), null, `must not capture name from: ${badUtterance}`);
+  }
+  assert.equal(isPlausibleCustomerName("มโยงกันยังไง", { explicit: true }), false);
+  assert.equal(isPlausibleCustomerName("มกันได้หรือเปล่า", { explicit: true }), false);
+  assert.equal(isPlausibleCustomerName("น้องไหม", { explicit: true }), true);
+
+  const selfIntro = extractCallerNameFromText("ผมชื่อสมชายครับ", "");
+  assert.deepEqual(selfIntro, { name: "สมชาย", explicit: true }, "self-intro must allow updating caller name");
+  const bareNamed = extractCallerNameFromText("เรียกว่าก้องครับ", "");
+  assert.deepEqual(bareNamed, { name: "ก้อง", explicit: false }, "bare เรียกว่า must capture only when no existing name");
+
+  // Post-call QA must heal a previously corrupted CRM name while rejecting garbled QA names
+  store.upsertCustomer({ phone: "020000008", name: "มโยงกันยังไง" });
+  store.applyPostCallAnalysis("020000008", "sess-heal-1", { callerName: "มกันได้หรือเปล่า", csatScore: 6 });
+  assert.equal(store.getCustomer("020000008").name, "มโยงกันยังไง", "garbled QA name must not replace anything");
+  store.applyPostCallAnalysis("020000008", "sess-heal-2", { callerName: "สมชาย", csatScore: 8 });
+  assert.equal(store.getCustomer("020000008").name, "สมชาย", "plausible QA name must heal corrupted CRM name");
 
   console.log("ALL_CALLBACK_TICKET_TESTS_PASSED");
 } finally {

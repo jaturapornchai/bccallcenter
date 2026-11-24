@@ -246,8 +246,8 @@ _NAME_SUFFIX_RE = re.compile(r"(?:ชื่อเล่น|ชื่อว่า
 _NAME_SPLIT_RE = re.compile(r"(?:ชื่อเล่น|ชื่อว่า|ชื่อ|เรียกว่า|ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|คับ)")
 _HONORIFIC_RE = re.compile(r"^(?:คุณ|พี่|ลุง|ป้า|น้า|อา|น้อง|อาจารย์|หมอ|เฮีย|เจ๊)")
 _EXPLICIT_NAME_TH_RE = re.compile(
-    r"(?:ผมชื่อว่า|ดิฉันชื่อว่า|หนูชื่อว่า|ฉันชื่อว่า|พี่ชื่อว่า|ชื่อว่า|ผมชื่อ|ดิฉันชื่อ|หนูชื่อ|ฉันชื่อ|พี่ชื่อ|"
-    r"เรียกผมว่า|เรียกพี่ว่า|เรียกหนูว่า|เรียกฉันว่า|เรียกว่า|ชื่อเล่นว่า|ชื่อเล่น|(?<![ก-๙])ชื่อ)\s*([ก-๙a-zA-Z]{2,20})"
+    r"(?:ผมชื่อว่า|ดิฉันชื่อว่า|หนูชื่อว่า|ฉันชื่อว่า|พี่ชื่อว่า|ผมชื่อ|ดิฉันชื่อ|หนูชื่อ|ฉันชื่อ|พี่ชื่อ|"
+    r"เรียกผมว่า|เรียกพี่ว่า|เรียกหนูว่า|เรียกฉันว่า|(?<![ก-๙])(?:ชื่อว่า|เรียกว่า|ชื่อเล่นว่า|ชื่อเล่น|ชื่อ))\s*([ก-๙a-zA-Z]{2,20})"
 )
 _EXPLICIT_NAME_EN_RE = re.compile(r"(?:my name is|i am|i'm|call me)\s+([A-Za-z]{2,20})", re.I)
 _ASKED_NAME_BOT_RE = re.compile(
@@ -315,7 +315,10 @@ def _format_addressed_name(name: str) -> str:
     return clean_n if _HONORIFIC_RE.match(clean_n) else f"คุณ{clean_n}"
 
 
-_GARBLED_NAME_RE = re.compile(r"(?:หรือ|แล้ว|แต่|เพราะ|ถ้า|ว่า|การ[ก-๙]{2,}|ความ[ก-๙]{2,}|เรื่อง|ระบบ|โปรแกรม|สต๊อก|สต็อก|สินค้า|ราคา|บัญชี|ภาษี)")
+_GARBLED_NAME_RE = re.compile(
+    r"(?:หรือ|แล้ว|แต่|เพราะ|ถ้า|ว่า|ยังไง|อย่างไร|หรือเปล่า|รึเปล่า|ได้ไหม|ได้มั้ย|มั้ย|อะไร|เท่าไหร่|กันได้|โยงกัน|"
+    r"การ[ก-๙]{2,}|ความ[ก-๙]{2,}|เรื่อง|ระบบ|โปรแกรม|สต๊อก|สต็อก|สินค้า|ราคา|บัญชี|ภาษี|สาขา|คลัง|เมนู|รายงาน|เซิร์ฟเวอร์)"
+)
 _BARE_TONE_CUT_RE = re.compile(r"(?<![าำะัิีึืุูเแโใไ])[ก-ฮ][่-๋]$")
 
 
@@ -338,7 +341,8 @@ def _extract_caller_name_py(text: str, prev_bot: str = "") -> tuple[str, bool]:
     if m := _EXPLICIT_NAME_TH_RE.search(s):
         cand = _clean_caller_name(m.group(1))
         if _is_plausible_name(cand, explicit=True):
-            return cand, True
+            is_self_intro = bool(re.match(r"^(?:ผม|ดิฉัน|หนู|ฉัน|พี่|เรียก(?:ผม|พี่|หนู|ฉัน))", m.group(0)))
+            return cand, is_self_intro
     if m := _EXPLICIT_NAME_EN_RE.search(s):
         cand = m.group(1).strip()
         if _is_plausible_name(cand, explicit=True):
@@ -384,9 +388,12 @@ def _save_all_caller_profiles(profiles: dict[str, dict]) -> None:
 
 def _sync_caller_profile(phone: str, meta: dict) -> dict:
     norm_phone = _normalize_phone(phone)
+    in_name = _clean_caller_name(meta.get("name"))
+    if in_name and not _is_plausible_name(in_name, explicit=True):
+        in_name = ""
     cleaned_in = {
         "phone": norm_phone,
-        "name": _clean_caller_name(meta.get("name")),
+        "name": in_name,
         "company": str(meta.get("company") or "").strip()[:120],
         "totalCalls": int(meta.get("totalCalls") or 0),
         "lastTopic": str(meta.get("lastTopic") or "").strip()[:80],
@@ -396,9 +403,12 @@ def _sync_caller_profile(phone: str, meta: dict) -> dict:
     with CALLER_PROFILES_LOCK:
         profiles = _load_all_caller_profiles()
         existing = profiles.get(norm_phone) if isinstance(profiles.get(norm_phone), dict) else {}
+        existing_name = _clean_caller_name(existing.get("name"))
+        if existing_name and not _is_plausible_name(existing_name, explicit=True):
+            existing_name = ""
         merged = {
             "phone": norm_phone,
-            "name": cleaned_in["name"] or _clean_caller_name(existing.get("name")),
+            "name": cleaned_in["name"] or existing_name,
             "company": cleaned_in["company"] or str(existing.get("company") or "").strip()[:120],
             "totalCalls": max(cleaned_in["totalCalls"], int(existing.get("totalCalls") or 0)),
             "lastTopic": cleaned_in["lastTopic"] or str(existing.get("lastTopic") or "").strip()[:80],

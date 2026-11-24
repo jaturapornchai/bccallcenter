@@ -85,9 +85,57 @@ def test_caller_name_rejects_connectors_and_accepts_real_names():
     got_exp_bad, _ = extract("ผมชื่อการผลัดหรือการร้ครับ", "")
     assert got_exp_bad == "", f"expected garbled explicit name rejected, got {got_exp_bad!r}"
 
-    # "ขายเชื่อไหม" contains "เชื่อ" (เ + ชื่อ): must NOT extract "ไหม" as caller name
-    got_credit, _ = extract("สินค้า ที่ ขายเชื่อไหม", "")
-    assert got_credit == "", f"expected 'ขายเชื่อไหม' not to extract name, got {got_credit!r}"
+    # "ขายเชื่อไหม", "เชื่อมกันได้หรือเปล่า", "เชื่อมโยงกันยังไง", "เชื่อว่า..." contain "ชื่อ" inside Thai words:
+    # must NOT extract garbled caller names (regression: call 1795527470144-wok98)
+    for phrase in (
+        "สินค้า ที่ ขายเชื่อไหม",
+        "ให้เซลฟเวอร์อยู่คนละที่อะ คนลักสาขาเชื่อมกันได้หรือเปล่า",
+        "แล้วสาขากับคลางสินค้าเชื่อมโยงกันยังไง",
+        "ผมเชื่อว่าโปรแกรมนี้ใช้ดี",
+        "ชื่อเมนูอะไรครับ",
+        "ชื่อสาขาต้องกรอกยังไง",
+    ):
+        got_bad, _ = extract(phrase, "")
+        assert got_bad == "", f"expected {phrase!r} not to extract name, got {got_bad!r}"
+
+    is_plausible = scope["_is_plausible_name"]
+    assert not is_plausible("มโยงกันยังไง", explicit=True), "garbled sync name must be rejected"
+    assert not is_plausible("มกันได้หรือเปล่า", explicit=True), "garbled sync name must be rejected"
+    assert is_plausible("น้องไหม", explicit=True), "real Thai name containing ไหม must stay allowed"
+
+    got_self, exp_self = extract("ผมชื่อก้องครับ", "")
+    assert (got_self, exp_self) == ("ก้อง", True), f"self-intro must be explicit=True, got {(got_self, exp_self)!r}"
+    got_bare, exp_bare = extract("เรียกว่าสมชายครับ", "")
+    assert (got_bare, exp_bare) == ("สมชาย", False), f"bare เรียกว่า must be explicit=False, got {(got_bare, exp_bare)!r}"
+
+    # _sync_caller_profile must reject garbled incoming names and filter corrupted stored names
+    with tempfile.TemporaryDirectory() as prof_tmp:
+        prof_path = str(Path(prof_tmp) / "caller_profiles.json")
+        sync_scope = load_symbols(
+            {
+                "_NAME_PREFIX_RE", "_NAME_SUFFIX_RE", "_NAME_SPLIT_RE",
+                "_BAD_CALLER_NAMES", "_GARBLED_NAME_RE", "_BARE_TONE_CUT_RE",
+                "_normalize_phone", "_clean_caller_name", "_is_plausible_name",
+                "_load_all_caller_profiles", "_save_all_caller_profiles", "_sync_caller_profile",
+            },
+            extra_scope={
+                "CALLER_PROFILES_PATH": prof_path,
+                "CALLER_PROFILES_LOCK": __import__("threading").Lock(),
+                "_CALLER_PROFILES_CACHE": None,
+                "datetime": __import__("datetime"),
+                "json": __import__("json"),
+                "os": __import__("os"),
+                "threading": __import__("threading"),
+                "C": type("_C", (), {"SESSIONS_DIR": prof_tmp})(),
+            },
+        )
+        sync_fn = sync_scope["_sync_caller_profile"]
+        m1 = sync_fn("020000098", {"name": "สมชาย", "totalCalls": 3})
+        assert m1["name"] == "สมชาย"
+        m2 = sync_fn("020000098", {"name": "มโยงกันยังไง", "totalCalls": 3})
+        assert m2["name"] == "สมชาย", f"garbled sync must not overwrite existing name, got {m2['name']!r}"
+        m3 = sync_fn("020000097", {"name": "มโยงกันยังไง", "totalCalls": 1})
+        assert m3["name"] == "", f"garbled sync for unknown caller must become empty, got {m3['name']!r}"
 
     for good_in, want in (
         ("แบงค์ครับ", "แบงค์"),
