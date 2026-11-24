@@ -100,7 +100,7 @@ type RightTab = "callbacks" | "qa" | "callers" | "history";
 type MainView = "console" | "crm" | "analytics";
 
 export default function ConsolePage() {
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [theme, setTheme] = useState<"dark" | "light">("light");
   const [activeView, setActiveView] = useState<MainView>("console");
   const [crmFocusPhone, setCrmFocusPhone] = useState<string | null>(null);
   const [crmSubTab, setCrmSubTab] = useState<"customers" | "tickets">("customers");
