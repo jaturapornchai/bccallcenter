@@ -334,7 +334,8 @@ def test_three_tier_search_planner():
 def test_incomplete_tail_and_phone_fallback_queries():
     scope = load_symbols({
         "_INCOMPLETE_TAIL_RE", "_is_incomplete_thai_tail", "_FOLLOWUP_START_RE",
-        "_VAGUE_FOLLOWUP_RE", "_stt_ears_diverge", "_build_phone_fallback_queries", "BC_STT_PROMPT",
+        "_VAGUE_FOLLOWUP_RE", "_stt_ears_diverge", "_PHONE_INTENT_HINTS",
+        "_expand_phone_intent_queries", "_build_phone_fallback_queries", "BC_STT_PROMPT",
     })
     incomplete = scope["_is_incomplete_thai_tail"]
     fallback = scope["_build_phone_fallback_queries"]
@@ -548,6 +549,9 @@ def test_bcbrain_v230_zone_abstain_and_ultra_mode():
     assert scope["brain_audience"](False, "ขอดูตาราง SQL ic_trans") == {"audience": "dev"}
     assert scope["brain_audience"](False, "ออกใบกำกับภาษีเข้าเมนูไหน") == {"audience": "user"}
     assert scope["_is_brain_abstain"]("🛑 Abstain: ไม่มีข้อมูลยืนยันในระบบ") is True
+    assert scope["_is_brain_abstain"](
+        "[batch_ask | count=2]\n\n## Q1: raw\n🛑 Abstain\n\n## Q2: hint\n[quick_answer:ultra | audience=user | confidence=high | slug: start-first-day]\n# วันแรก"
+    ) is False
     assert scope["_is_brain_abstain"]("เมนู 4013 ขายสินค้า/บริการ") is False
     assert "batch_ask" in scope["MCP_CACHEABLE_TOOLS"]
     assert scope["MCP_CACHE_TTL_S"] >= 300
@@ -555,6 +559,73 @@ def test_bcbrain_v230_zone_abstain_and_ultra_mode():
     assert C.BRAIN_BOOTSTRAP_TTL_S >= 1800
     src = SOURCE.read_text(encoding="utf-8")
     assert '"ultra"' in src and "_pin_user_audience" in src and "load_bootstrap_pack" in src
+
+
+def test_vault_mirror_intent_expander_planner_and_ice_filter():
+    from brain_mirror import BrainVaultMirror
+
+    mirror = BrainVaultMirror("https://brain.bcsmethai.com/api/vault-pack", ttl_s=1800)
+    mirror.load_notes_payload(
+        {
+            "version": "2.3.0",
+            "syncCommit": "test",
+            "notes": [
+                {
+                    "slug": "menu-cat-4-sales",
+                    "folder": "start",
+                    "raw": "---\ntitle: เมนูหมวดขาย\ntags: [menu]\n---\n| **4013** | **4.13** | **ขายสินค้า/บริการ**<br>ขาย > ขายสินค้า/บริการ | ทุกรุ่น (Starter+) |\n",
+                },
+                {
+                    "slug": "start-first-day",
+                    "folder": "start",
+                    "raw": "---\ntitle: วันแรกที่เริ่มใช้ BC Ai Account\ntags: [เริ่มต้น]\naliases: [onboarding]\nsources:\n  - secret/path.go:1-10\n---\n# วันแรกที่เริ่มใช้ BC Ai Account\nตั้งค่ากิจการและนำเข้าสินค้าครับ",
+                },
+                {
+                    "slug": "api-mcp-gateway",
+                    "folder": "api",
+                    "raw": "---\ntitle: MCP Dev Gateway\naudience: dev\nsources:\n  - backend/mcp.go:1\n---\nSQL table ic_trans secret dev doc",
+                },
+            ],
+        },
+        etag='"test-etag"',
+    )
+    assert mirror.stats()["notes"] == 3 and mirror.stats()["menus"] == 1
+    menu_out = mirror.lookup_menu("เข้าเมนู 4013 ยังไง", audience="user")
+    assert menu_out and "4013" in menu_out and "ขายสินค้า/บริการ" in menu_out
+    assert mirror.lookup_menu("4013", audience="dev") is None
+
+    br_user = mirror.batch_read(["start-first-day", "api-mcp-gateway"], audience="user")
+    assert br_user and "ตั้งค่ากิจการ" in br_user
+    assert "ic_trans" not in br_user and "secret/path.go" not in br_user
+    assert mirror.read_note("api-mcp-gateway", audience="user") is None
+    assert "ic_trans" in (mirror.read_note("api-mcp-gateway", audience="dev") or "")
+
+    scope = load_symbols({
+        "_FOLLOWUP_START_RE", "_VAGUE_FOLLOWUP_RE", "_stt_ears_diverge",
+        "_PHONE_INTENT_HINTS", "_expand_phone_intent_queries",
+        "_needs_search_planner", "_filter_bindable_ice_addresses",
+    })
+    needs = scope["_needs_search_planner"]
+    expand = scope["_expand_phone_intent_queries"]
+    ice_filter = scope["_filter_bindable_ice_addresses"]
+
+    # Clear 50-char Thai sentence with agreeing ears must use Fast-Path (no planner wait)
+    clear_50 = "ระบบคิดต้นทุนสินค้าแบบไฟโฟทำยังไงบ้างครับ"
+    assert not needs(clear_50, [clear_50], [])
+    assert needs("ก" * 82, [], [])
+
+    for phrase, expected_kw in (
+        ("มีระบบขนส่งแบบช้อปปี้หรือเปล่า", "TMS"),
+        ("หลังจากตกลงรับโปรแกรมแล้วต้องเตรียมอะไร", "วันแรก"),
+        ("ถ้าฟรีศูนย์บาทแล้วคุณจะได้เงินยังไง", "Starter"),
+        ("สต็อกสินค้าไม่ตรงต้องทำยังไง", "สต็อกไม่ตรง"),
+    ):
+        ex = expand(phrase)
+        assert ex and any(expected_kw in x for x in ex), f"expand({phrase!r}) missing {expected_kw}: {ex}"
+
+    filtered = ice_filter(["169.254.10.5", "fe80::1ff:fe23:4567:890a", "192.168.1.50", "10.0.0.2"])
+    assert filtered == ["192.168.1.50", "10.0.0.2"]
+    assert ice_filter(["169.254.10.5"]) == ["169.254.10.5"], "must keep fallback list if all addresses filtered"
 
 
 TESTS = [
@@ -570,6 +641,7 @@ TESTS = [
     test_leave_message_requires_topic_when_no_continuity,
     test_bcbrain_v230_zone_abstain_and_ultra_mode,
     test_callback_restraint_qa_cache_fast_chat_and_batch,
+    test_vault_mirror_intent_expander_planner_and_ice_filter,
 ]
 
 

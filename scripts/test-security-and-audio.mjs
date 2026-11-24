@@ -7,11 +7,13 @@ import { pathToFileURL } from "node:url";
 
 const origCwd = process.cwd();
 const origAdminEmail = process.env.ADMIN_EMAIL;
+const origAdminEmails = process.env.ADMIN_EMAILS;
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bc-cc-sec-"));
 
 try {
   process.chdir(tmpDir);
   const {
+    getAdminEmails,
     isAdminEmail,
     sanitizeFreeTextForViewer,
     sanitizeStateForViewer,
@@ -20,7 +22,8 @@ try {
   const { SipEngine } = await import(pathToFileURL(path.join(origCwd, "lib", "sip-engine.mjs")).href);
   const { decodeMuLawSample, encodeMuLawSample } = await import(pathToFileURL(path.join(origCwd, "lib", "g711.mjs")).href);
 
-  // 1. Strict Single-Admin check (case-insensitive exact match against ADMIN_EMAIL)
+  // 1. Admin allowlist check (single + comma-separated ADMIN_EMAIL / ADMIN_EMAILS, case-insensitive)
+  process.env.ADMIN_EMAILS = "";
   process.env.ADMIN_EMAIL = "admin@example.test";
   assert.equal(isAdminEmail("admin@example.test"), true);
   assert.equal(isAdminEmail("ADMIN@EXAMPLE.TEST"), true);
@@ -28,6 +31,15 @@ try {
   assert.equal(isAdminEmail(""), false);
   process.env.ADMIN_EMAIL = "";
   assert.equal(isAdminEmail("admin@example.test"), false);
+
+  process.env.ADMIN_EMAIL = "admin1@example.test, admin2@example.test";
+  process.env.ADMIN_EMAILS = "staff1@example.test;staff2@example.test\n";
+  const adminSet = getAdminEmails();
+  assert.equal(adminSet.size, 4);
+  for (const okEmail of ["admin1@example.test", "ADMIN2@EXAMPLE.TEST", "staff1@example.test", "Staff2@example.test"]) {
+    assert.equal(isAdminEmail(okEmail), true, `expected admin allowlist match for ${okEmail}`);
+  }
+  assert.equal(isAdminEmail("viewer@example.test"), false);
 
   // 2. Free-text PII redaction (redacts nicknames, emails, IPs, domestic & international phones while keeping Thai accounting words intact)
   const sanitized = sanitizeFreeTextForViewer(
@@ -218,6 +230,8 @@ try {
 } finally {
   if (origAdminEmail === undefined) delete process.env.ADMIN_EMAIL;
   else process.env.ADMIN_EMAIL = origAdminEmail;
+  if (origAdminEmails === undefined) delete process.env.ADMIN_EMAILS;
+  else process.env.ADMIN_EMAILS = origAdminEmails;
   process.chdir(origCwd);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 }

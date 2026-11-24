@@ -237,6 +237,8 @@ DOCS_DIR = os.path.join(BASE_DIR, "docs")  # search_docs reads .txt .md .csv .pd
 MCP_SERVERS = {"bcbrain": "https://brain.bcsmethai.com/mcp"}
 BRAIN_BOOTSTRAP_URL = "https://brain.bcsmethai.com/api/bootstrap-pack"
 BRAIN_BOOTSTRAP_TTL_S = 1800
+BRAIN_VAULT_PACK_URL = os.environ.get("BRAIN_VAULT_PACK_URL", "https://brain.bcsmethai.com/api/vault-pack")
+BRAIN_VAULT_PACK_TTL_S = int(os.environ.get("BRAIN_VAULT_PACK_TTL_S", "1800"))
 # OpenStreetMap Nominatim wants an app that names itself (never a personal email): [แผนที่] lines get coordinates
 GEO_USER_AGENT = "bctest01-voice-secretary/1.0 (+https://callcenter.bcsmethai.com)"
 TOOL_RESULT_CHARS = 6000  # per tool result sent to the LLM (ask_brain returns ~22k chars)
@@ -336,6 +338,7 @@ PHONE_PROMPT = (
     "สลับสองบทบาทให้เหมาะกับผู้โทร หากลูกค้าสนใจโปรแกรมหรือเล่าธุรกิจ ให้คุยแบบเพื่อนที่แนะนำของดีจากผลค้นแค่หนึ่งจุดสำคัญก่อน "
     "หากลูกค้าถามวิธีใช้หรือติดปัญหา ให้ช่วยแนะนำขั้นตอนสำคัญ ชื่อเมนู และรหัสเมนูสี่หลักจากผลค้นแบบง่ายๆ สบายๆ ทีละขั้น ห้ามพูดชื่อตารางฐานข้อมูล SQL โค้ด หรือชื่อไฟล์ภายในให้ลูกค้าฟัง "
     "หากสมองคืนว่า Abstain หรือไม่มีข้อมูลยืนยันในระบบ ห้ามเดาหรือแต่งตัวเลขเอง ให้แจ้งลูกค้าตรงๆ ว่าเรื่องนี้ผมยังไม่มีข้อมูลยืนยันในระบบ แล้วชวนคุยต่อหรือถามประเด็นที่อยากรู้เพิ่ม ไม่ต้องรีบเสนอให้พนักงานโทรกลับทุกครั้ง (เสนอฝากเบอร์โทรกลับเฉพาะเมื่อจำเป็นจริงๆ ลูกค้าขอเอง หรือเป็นบีซีแอคเคาท์เวอร์ชันเก่าเท่านั้น) "
+    "หากลูกค้าถามเรื่องรหัสผ่านส่วนตัวของบัญชีผู้ใช้ ให้แจ้งสุภาพว่าเพื่อความปลอดภัย เจาร์วิสไม่ได้เก็บหรือเข้าถึงรหัสผ่านส่วนตัวของลูกค้า และแนะนำให้ติดต่อแอดมินหรือเจ้าหน้าที่ช่วยรีเซ็ตหากจำเป็น ส่วนหากลูกค้าชวนคุยหยอกล้อนอกเรื่องบัญชี (เช่น ดูดวง) ให้รับมุกสั้นๆ อย่างอารมณ์ดีแล้วชวนคุยต่อเรื่องธุรกิจหรือโปรแกรมบีซีเอไอแอคเคาท์อย่างเป็นธรรมชาติ ไม่ต้องพูดแข็งๆ ว่าไม่มีข้อมูลยืนยันในระบบ "
     "ห้ามบอกให้ดูบนจอ ห้ามใช้ตาราง หัวข้อ หรือเครื่องหมายใดๆ ในคำพูด")
 
 

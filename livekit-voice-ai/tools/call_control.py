@@ -315,7 +315,9 @@ def build_call_tools(ctx: CallCenterContext) -> list[Any]:
                 texts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("text")]
                 if texts:
                     joined = "\n".join(texts)
-                    if "🛑" in joined or "abstain" in joined.lower():
+                    if ("🛑" in joined or "abstain" in joined.lower()) and not (
+                        "[batch_ask" in joined and re.search(r"confidence=(?:high|medium)\b", joined, re.I)
+                    ):
                         return "ไม่พบข้อมูลยืนยันในระบบ (Abstain): ห้ามเดาหรือแต่งข้อมูลเอง ให้แจ้งลูกค้าตรงๆ ว่ายังไม่มีข้อมูลยืนยันในระบบ แล้วชวนคุยตอบเรื่องอื่นต่ออย่างเป็นธรรมชาติ (ไม่ต้องเสนอโทรกลับทุกครั้ง เสนอเฉพาะเมื่อลูกค้าขอ จำเป็นจริงๆ หรือเป็น BC Account เวอร์ชันเก่า)"
                     limit_chars = 2400 if tool_name == "batch_read" else 1400
                     out = joined[:limit_chars]

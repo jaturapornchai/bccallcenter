@@ -59,6 +59,7 @@ from f5_tts_th.normalize import normalize_text  # noqa: E402  (digits and signs 
 from omnivoice import OmniVoice  # noqa: E402
 from omnivoice.models.omnivoice import OmniVoiceGenerationConfig  # noqa: E402
 
+from brain_mirror import BrainVaultMirror  # noqa: E402
 import config as C  # noqa: E402
 import desktop_agent  # noqa: E402
 from elevenlabs_tts import ElevenLabsTTS, SPEAKABLE_RE  # noqa: E402
@@ -1282,7 +1283,11 @@ BRAIN_AUDIENCE_TOOLS = frozenset({
 
 def _is_brain_abstain(text: str) -> bool:
     s = str(text or "")
-    return "🛑" in s or "abstain" in s.lower()
+    if "🛑" not in s and "abstain" not in s.lower():
+        return False
+    if "[batch_ask" in s and re.search(r"confidence=(?:high|medium)\b", s, re.I):
+        return False
+    return True
 
 
 def load_bootstrap_pack(audience: str = "user", force: bool = False) -> str:
@@ -1742,7 +1747,34 @@ def mcp_tool(server, client, name):
     def run(**args):
         if name == "ask_brain" and "compact" not in args:
             args = {**args, "compact": True}
-        text = client.call(name, args)
+        mirror = globals().get("BRAIN_MIRROR") if server == "bcbrain" else None
+        text = None
+        if mirror is not None and mirror.ready:
+            mirror.maybe_refresh()
+            aud = (args.get("audience") or "user").strip() or "user"
+            if name == "lookup_menu" and aud == "user":
+                text = mirror.lookup_menu(args.get("query", ""), audience="user", limit=int(args.get("limit", 5)))
+            elif name == "batch_read":
+                text = mirror.batch_read(
+                    args.get("slugs") or [],
+                    audience=aud,
+                    query=args.get("query", ""),
+                    max_chars_per_note=int(args.get("max_chars_per_note", 2000)),
+                )
+            elif name == "read_note" and args.get("slug"):
+                text = mirror.read_note(args["slug"], audience=aud)
+        if text is None:
+            try:
+                text = client.call(name, args)
+            except Exception:
+                if mirror is not None and mirror.ready and name in ("quick_answer", "batch_ask"):
+                    q_text = args.get("question") or " ".join(args.get("questions") or [])
+                    fb = mirror.fallback_quick_answer(q_text, audience=(args.get("audience") or "user"), max_chars=int(args.get("max_chars", 700)))
+                    if fb:
+                        log.warning("bcbrain HTTP unavailable -> served mirror fallback for %s", name)
+                        text = fb
+                if text is None:
+                    raise
         if _is_brain_abstain(text):
             return [], f"{text}\n(ระบบ: สมองคืน Abstain ไม่มีข้อมูลยืนยัน ห้ามเดาหรือแต่งคำตอบเอง ให้แจ้งตรงๆ ว่าไม่มีข้อมูลยืนยันในระบบ)"
         if name == "search_brain":
@@ -1779,6 +1811,7 @@ def connect_mcp(server, url):
     return None
 
 
+BRAIN_MIRROR = BrainVaultMirror(C.BRAIN_VAULT_PACK_URL, ttl_s=C.BRAIN_VAULT_PACK_TTL_S)
 MCP_CLIENTS: dict[str, MCPClient] = {}
 LEGACY_BRAIN_TOOLS = frozenset({"search_brain", "read_note", "ask_brain"})
 
@@ -1790,10 +1823,13 @@ def _prefetch_mcp_batch(calls: list[tuple[str, dict]], tools: dict) -> None:
     client = MCP_CLIENTS.get("bcbrain")
     if client is None or not hasattr(client, "call_batch"):
         return
+    mirror = globals().get("BRAIN_MIRROR")
+    mirror_ok = bool(mirror is not None and mirror.ready)
     batch_items = [
         (n, ({**a, "compact": True} if n == "ask_brain" and "compact" not in a else dict(a)))
         for n, a in calls
         if WORKER.get(n) == "bcbrain" and n in tools
+        and not (mirror_ok and ((n in ("batch_read", "read_note")) or (n == "lookup_menu" and (a.get("audience") or "user") == "user")))
     ]
     if len(batch_items) >= 2:
         try:
@@ -1827,6 +1863,11 @@ def load_mcp_tools():
         pack = loader("user", force=True)
         if pack:
             log.info("BC Brain bootstrap-pack (user): %d chars", len(pack))
+    mirror = globals().get("BRAIN_MIRROR")
+    if mirror is not None and getattr(C, "BRAIN_VAULT_PACK_URL", ""):
+        st = mirror.sync(force=True)
+        if st.get("notes"):
+            log.info("BC Brain vault-pack mirror: %d notes, %d menus (etag=%s)", st["notes"], st["menus"], st.get("etag"))
 
 
 def run_tool(name, args, tools):
@@ -2314,6 +2355,7 @@ OWN_WORDS = "\n".join([
     SAY_WORDS,
     BRAIN_DOWN,
     "เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามเจาร์วิสได้ในเวอร์ชันใหม่ ถ้าเป็นบีซีแอคเคาท์เวอร์ชันเก่าให้ฝากเบอร์โทรกลับ เดี๋ยวเจ้าหน้าที่ติดต่อกลับ",
+    "เพื่อความปลอดภัย เจาร์วิสไม่ได้เก็บหรือเข้าถึงรหัสผ่านส่วนตัวครับ เรื่องดูดวงผมดูไม่เป็นครับ แต่ถ้าดูภาพรวมธุรกิจหรือกระแสเงินสดในบีซีเอไอแอคเคาท์ช่วยดูให้ได้เต็มที่เลยครับ",
     *FILLER_TEXT.values(),
 ])
 # talk about the talk itself (log 2026-11-09..10: 44 sentences cut by the judge, half of them "ช่วยสะกดหรือบอกอีกนิด
@@ -2440,6 +2482,27 @@ def _stt_ears_diverge(heard: str, alt_heard: list[str]) -> bool:
     return len(sa & sb) / max(len(sa | sb), 1) < 0.35
 
 
+_PHONE_INTENT_HINTS = (
+    (re.compile(r"(?:ขนส่ง|เดลิเวอรี|ช้อปปี้|ส่งของ|รถส่ง|จัดส่ง)"), "ระบบบริหารขนส่ง TMS e-POD ใบส่งของ จัดส่งสินค้า"),
+    (re.compile(r"(?:หลัง(?:จาก(?:ที่)?)?(?:ได้)?(?:ตกลง)?(?:รับ|ซื้อ|ใช้|สมัคร)โปรแกรม|เริ่ม(?:ต้น)?ใช้งาน|เตรียม(?:ตัว|ข้อมูล).*(?:บริษัท|ร้าน|โปรแกรม)|วันแรก)"), "วันแรกที่เริ่มใช้ BC Ai Account เช็กลิสต์ตั้งค่า เตรียมข้อมูล"),
+    (re.compile(r"(?:ฟรี(?:ศูนย์|0)?บาท.*(?:ได้เงิน|กำไร|รายได้|ยังไง|ทำไม|ค่าใช้จ่าย)|Starter.*(?:ฟรี|จำกัด|ต่าง))", re.I), "ตารางราคาและแพ็กเกจ BC Ai Account 4 รุ่น Starter ฟรี 0 บาท เงื่อนไข"),
+    (re.compile(r"(?:ส่วนลดรับ|ปัดเศษ|เศษสตางค์|ช่องส่วนลด.*จ่าย|จ่าย(?:ชำระ)?เจ้าหนี้.*ส่วนลด|ค้างไม่ตรงบิล)"), "จ่ายชำระหนี้ เจ้าหนี้ ส่วนลดรับ ปัดเศษ ยอดค้างไม่ตรงบิล วิธีบันทึก"),
+    (re.compile(r"(?:สต(?:็อก|๊อก|อก|็อค|อค).*(?:ผิด|ไม่ตรง|เพี้ยน|ติดลบ)|ต้นทุน.*(?:ผิด|ไม่ตรง|เพี้ยน))"), "สต็อกไม่ตรง ต้นทุนผิด คำนวณยอดคงเหลือใหม่ เช็กสต็อก"),
+)
+
+
+def _expand_phone_intent_queries(heard: str) -> list[str]:
+    """0ms regex intent expander mapping conversational phrasings to canonical BC Brain search keywords."""
+    s = (heard or "").strip()
+    if not s:
+        return []
+    hints: list[str] = []
+    for pattern, expanded in _PHONE_INTENT_HINTS:
+        if pattern.search(s) and expanded not in hints:
+            hints.append(expanded)
+    return hints[:2]
+
+
 def _needs_search_planner(heard: str, alt_heard: list[str], history: list[dict]) -> bool:
     """Tier-2 Fast-Path vs Tier-3 AI Search Planner:
     Run search_words before quick_answer when ears strongly disagree, utterance is vague/follow-up, or long/rambling."""
@@ -2448,7 +2511,7 @@ def _needs_search_planner(heard: str, alt_heard: list[str], history: list[dict])
         return False
     if _stt_ears_diverge(s, alt_heard):
         return True
-    if len(s) > 38:
+    if len(s) > 78:
         return True
     if history and (len(s) < 13 or bool(_FOLLOWUP_START_RE.match(s)) or (len(s) <= 18 and bool(_VAGUE_FOLLOWUP_RE.search(s)))):
         return True
@@ -2504,7 +2567,10 @@ def _build_phone_fallback_queries(heard: str, alt_heard: list[str], history: lis
             q_alt = f"{a} {ctx_anchor}".strip()[:120] if ctx_anchor and ctx_anchor not in a else a[:120]
             if q_alt not in queries:
                 queries.append(q_alt)
-    return queries
+    for hint in _expand_phone_intent_queries(base):
+        if hint not in queries:
+            queries.append(hint)
+    return queries[:3]
 
 
 def search_words(history, heard, alt_heard=None, allow_sync=True):
@@ -2519,7 +2585,7 @@ def search_words(history, heard, alt_heard=None, allow_sync=True):
         phone_now = "on_phone" in globals() and on_phone()
         job = early or (WORDS_POOL.submit(worker_chat, ask, None) if phone_now else None)
         if early:
-            text, _ = early.result(timeout=0.75 if phone_now else None)
+            text, _ = early.result(timeout=0.40 if phone_now else None)
         elif job is not None:
             text, _ = job.result(timeout=1.15)
         else:
@@ -2905,15 +2971,14 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 if stay_topic:
                     qs = [stay_topic]
                 elif _needs_search_planner(heard, alt_heard, history):
-                    allow_sync = len(heard.strip()) > 35
-                    planned_q, _ = search_words(history, heard, alt_heard=alt_heard, allow_sync=allow_sync)
+                    planned_q, _ = search_words(history, heard, alt_heard=alt_heard, allow_sync=False)
                     if planned_q:
                         log.info("SEARCH-PLANNER: %s -> %s", masked(heard), masked(planned_q))
-                        qs = [planned_q]
+                        qs = list(dict.fromkeys([planned_q, *_expand_phone_intent_queries(heard)]))[:2]
                     else:
                         qs = _build_phone_fallback_queries(heard, alt_heard, history)
                 else:
-                    qs = [heard]
+                    qs = list(dict.fromkeys([heard, *_expand_phone_intent_queries(heard)]))[:2]
             else:
                 wording = search_words(history, heard) if not stay_topic else (heard, None)
                 qs = [stay_topic] if stay_topic else swarm_queries(wording[0], heard, history)
@@ -3706,6 +3771,18 @@ def make_stream(public=False):
 # ponytail: 1 s keeps one STUN retry (aioice resends at 0.5 s); a slower link loses the server's public candidate
 # and customers behind NAT cannot connect. Then raise this or drop the dead adapters.
 aioice.ice.Connection.get_component_candidates.__defaults__ = (1,)
+
+
+def _filter_bindable_ice_addresses(addrs: list[str]) -> list[str]:
+    """Drop Windows APIPA (169.254.x.x) and IPv6 link-local (fe80::) addresses that trigger WinError 10049."""
+    clean = [a for a in addrs if not a.startswith(("169.254.", "fe80:"))]
+    return clean or list(addrs)
+
+
+_orig_aioice_host_addrs = aioice.ice.get_host_addresses
+aioice.ice.get_host_addresses = lambda use_ipv4=True, use_ipv6=True: _filter_bindable_ice_addresses(
+    _orig_aioice_host_addrs(use_ipv4=use_ipv4, use_ipv6=use_ipv6)
+)
 
 
 def ice_servers():
