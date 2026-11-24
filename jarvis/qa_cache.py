@@ -35,6 +35,14 @@ _PERSONAL_REPLY_RE = re.compile(
     re.I,
 )
 _PERSONAL_NUM_RE = re.compile(r"\d{4,}")
+_VAGUE_FOLLOWUP_CACHE_RE = re.compile(
+    r"^(?:ช่วย|ลอง)?(?:เล่าภาพรวม|เล่าให้ฟัง|เล่ามา|เล่าต่อ|อธิบายเพิ่ม|บอกมา|ขอรายละเอียด|รายละเอียดเพิ่ม|ขยายความ|ต่อได้เลย)"
+    r"|(?:^(?:ตัวไหนดี|อันไหนดี|มีอะไรบ้าง|อยากรู้เรื่องไหน)(?:ครับ|ค่ะ|คะ|นะ|หน่อย|บ้าง)*[\s.!?…]*$)"
+)
+_TOPIC_ANCHOR_CACHE_RE = re.compile(
+    r"(?:บีซี|\bbc\b|โปรแกรม|ระบบ|รายงานสินค้า|สต็อก|สต๊อก|บัญชี|ภาษี|\bpos\b|\bwms\b|\btms\b|\bcrm\b|autocare|ออโต้แคร์|เงินสด|ธนาคาร|ลูกหนี้|เจ้าหนี้|แพ็กเกจ|ราคา)",
+    re.I,
+)
 
 
 def normalize_question(text: str) -> str:
@@ -56,6 +64,8 @@ def is_cacheable_question(text: str) -> bool:
     if not raw or len(raw) > 90:
         return False
     if _CONTEXT_DEP_RE.search(raw) or _PERSONAL_NUM_RE.search(raw):
+        return False
+    if _VAGUE_FOLLOWUP_CACHE_RE.search(raw) and not _TOPIC_ANCHOR_CACHE_RE.search(raw):
         return False
     norm = normalize_question(raw)
     return len(norm) >= 8
@@ -82,11 +92,17 @@ class QACache:
                 data = json.load(f)
             if isinstance(data, dict):
                 now = time.time()
-                self._entries = {
-                    k: v for k, v in data.items()
-                    if isinstance(v, dict) and v.get("sentences")
-                    and (v.get("taught") or now - float(v.get("saved_at", 0)) < self.ttl_s)
-                }
+                pruned = {}
+                for k, v in data.items():
+                    if not (isinstance(v, dict) and v.get("sentences")):
+                        continue
+                    if v.get("taught"):
+                        pruned[k] = v
+                    elif now - float(v.get("saved_at", 0)) < self.ttl_s and is_cacheable_question(v.get("question", "")):
+                        pruned[k] = v
+                self._entries = pruned
+                if len(pruned) < len(data):
+                    self._save()
         except Exception:
             log.warning("QA cache load failed, starting fresh")
             self._entries = {}

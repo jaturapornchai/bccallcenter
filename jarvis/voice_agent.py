@@ -2650,23 +2650,27 @@ def words_ask(history, heard, alt_heard=None):
 
 
 _INCOMPLETE_TAIL_RE = re.compile(
-    r"(?:อยากจะรู้ว่า|อยากรู้ว่า|หมายถึงว่า|แต่ว่า|หรือว่า|ถ้าเกิด|พอดี|เพราะว่า|"
+    r"(?:อยากจะรู้ว่า|อยากรู้ว่า|หมายถึงว่า|แต่ว่า|หรือว่า|ถ้าเกิด|พอดี|เพราะว่า|ถ้ามี|ถ้าเป็น|แล้วถ้า|"
     r"ว่า|แล้ว|ที่|และ|กับ|ถ้า|คือ|แต่|หรือ|เป็น|จะ|ก็|แบบ|ซึ่ง|เรื่อง|ของ|ใน|จาก|เพื่อ)[\s.!?…]*$"
 )
 
 
 def _is_incomplete_thai_tail(text: str) -> bool:
-    """True when a live Thai partial clearly ends mid-clause on a trailing connector/conjunction."""
+    """True when a live Thai partial clearly ends mid-clause on a trailing connector/conditional opener."""
     s = (text or "").strip()
     if len(s) < 4:
         return False
     if re.search(r"(?:ครับ|ค่ะ|คะ|ไหม|มั้ย|เปล่า|ไหน|เท่าไหร่|ยังไง|อย่างไร|บ้าง)[\s.!?…]*$", s):
         return False
+    if re.match(r"^(?:แล้ว)?ถ้า(?:เป็น|มี)\s*", s) and len(s) <= 38:
+        if not re.search(r"(?:ครับ|ค่ะ|คะ|ไหม|มั้ย|เปล่า|ไหน|เท่าไหร่|ยังไง|อย่างไร|บ้าง|อะไร|ได้|หรือ)[\s.!?…]*$", s):
+            return True
     return bool(_INCOMPLETE_TAIL_RE.search(s))
 
 
 _STANDALONE_TOPIC_RE = re.compile(
-    r"(?:เบอร์โทร|ติดต่อ|เว็บไซต์|ไลน์|ราคา|แพ็กเกจ|ติดตั้ง|คลาวด์|ออฟฟิศ|เวอร์ชัน|เวอร์ชั่น|รุ่น)"
+    r"(?:เบอร์โทร|ติดต่อ|เว็บไซต์|ไลน์|ราคา|แพ็กเกจ|ติดตั้ง|คลาวด์|ออฟฟิศ|เวอร์ชัน|เวอร์ชั่น|รุ่น|"
+    r"มาคุยเรื่อง|เปลี่ยนเรื่อง|ถามเรื่อง|ถ้าเป็นธุรกิจ|ธุรกิจ|ร้านผม|ร้านยาง|รายงานสินค้า|เงินสด|ธนาคาร|คลังสินค้า|สต็อก|สต๊อก|โลเคชั่น)"
 )
 
 
@@ -3298,7 +3302,12 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                     has_nearby = True
             elif not abstained and BRAIN_MIRROR.ready and zone.get("audience") == "user" and "confidence=high" not in (qa_text or "").lower():
                 returned_slugs = set(re.findall(r"slug:\s*([\w.-]+)", " ".join(texts)))
-                sup_q = " ".join(x for x in (heard, ctx_topic if len(heard) <= 45 else "") if x).strip()
+                need_sup_ctx = bool(
+                    ctx_topic
+                    and not _STANDALONE_TOPIC_RE.search(heard)
+                    and (len(heard) <= 22 or bool(_FOLLOWUP_START_RE.match(heard)) or bool(_VAGUE_FOLLOWUP_RE.search(heard)))
+                )
+                sup_q = " ".join(x for x in (heard, ctx_topic if need_sup_ctx else "") if x).strip()
                 nearby = BRAIN_MIRROR.search_nearby(
                     sup_q,
                     audience="user",
@@ -3331,8 +3340,13 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                  "ห้ามครอบผังย่อหน้าด้วย ``` และห้ามใส่ตัวเลขสองหลักขึ้นไปหรือวันที่สมมติเองโดยไม่ผ่าน calc ถ้าไม่ได้เรียก calc ให้ใช้รหัสติดตัวอักษรเช่น WH01, A01, SKU01)")
             )
             if abstained and has_nearby:
+                concise_nearby = (
+                    "ให้ตอบสั้นกระชับไม่เกิน 2-3 ประโยคสั้นๆ ประโยคแรกแจ้งตรงๆ ว่าส่วนที่ถามตรงๆ ยังไม่มีข้อมูลยืนยัน แล้วเล่าเฉพาะจุดใกล้เคียงที่สำคัญที่สุด 1-2 จุดจากผลค้น ห้ามร่ายยาว "
+                    if phone_mode else ""
+                )
                 reuse_hint = (
                     "สมองไม่พบคำตอบตรงเป๊ะ [Abstain] แต่มี [ข้อมูลใกล้เคียงจากคลังความรู้ BC] ที่มีอยู่จริงด้านบนแล้ว "
+                    + concise_nearby +
                     "ห้ามเดาและห้ามแต่งเติมเองเด็ดขาด ให้บอกลูกค้าสั้นๆ ตรงๆ ว่าส่วนที่ถามตรงๆ ยังไม่มีข้อมูลยืนยัน "
                     "แล้วเล่าเฉพาะข้อเท็จจริงจากข้อมูลใกล้เคียงด้านบน (ชื่อฟีเจอร์ รายงาน หรือรหัสเมนู) เพื่อช่วยลูกค้าต่อ "
                     "ห้ามโมเมว่าทำได้ในส่วนที่ไม่ได้เขียนไว้ และไม่ต้องรีบถามเรื่องโทรกลับทุกครั้ง "
@@ -3533,7 +3547,8 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
     finally:  # also runs after barge-in; history may hold a chunk that was queued but cut before playback
         stop.set()
         if interrupted and heard and not hello and not said and not turn.get("voiced") and not turn.get("kept"):
-            PENDING[call_id()]["carry"] = (time.monotonic(), heard)
+            carry_cid = cid or call_id()
+            PENDING[carry_cid]["carry"] = (time.monotonic(), heard)
         elif answered:
             details = "\n".join(turn.get("kept", []))  # only lines that passed both checks, never the CUT_SHOW note; an unchecked rest is no memory
             answer = C.SILENT_MARK if turn.get("silent") else " ".join(said) + (f"\n{C.SCREEN_MARK}\n{details[:800]}" if details else "")
@@ -3903,10 +3918,10 @@ class BargeInReplyOnPause(ReplyOnPause):
             too_short_turn = False
             min_turn_s = C.SIP_MIN_TURN_SPEECH_S if phone else 0.08
             if 0 < speech_s < min_turn_s:
-                # Log 2026-11-23 20:43:10 & 21:47:26: 0.03s-0.06s glitches ("และ") slipped through and polluted transcripts.
+                # Log 2026-11-23 20:43:10 & 2026-11-24 20:38:22: 0.03s-0.06s glitches ("และ", "ครับ") must never trigger a turn.
                 early = EARLY.get(id(self))
                 short_heard = re.sub(r"[\s.,!?…]+", "", early[1].result()) if early else ""
-                if short_heard not in self.SIP_CUT_INS:
+                if speech_s < 0.08 or short_heard not in self.SIP_CUT_INS:
                     too_short_turn = True
             noise = (
                 not speech.size

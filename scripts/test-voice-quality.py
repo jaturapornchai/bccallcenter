@@ -846,6 +846,146 @@ def test_abstain_nearby_fallback_zero_hallucination():
     assert "ข้อมูลใกล้เคียง" in (ROOT / "livekit-voice-ai" / "llm" / "thai_llm.py").read_text(encoding="utf-8")
 
 
+def test_wok98_log_5_improvements():
+    import qa_cache
+    from brain_mirror import BrainVaultMirror
+
+    # 1. QA Cache rejects vague context-dependent requests without a product/topic anchor & auto-prunes on load
+    assert qa_cache.is_cacheable_question("เล่าภาพรวมมาเลย") is False
+    assert qa_cache.is_cacheable_question("อธิบายเพิ่มหน่อย") is False
+    assert qa_cache.is_cacheable_question("เล่าภาพรวมโปรแกรม BC Ai Account หน่อย") is True
+    with tempfile.TemporaryDirectory() as tmpdir:
+        qpath = Path(tmpdir) / "qa.json"
+        qpath.write_text(
+            json.dumps(
+                {
+                    "th|phone|เล่าภาพรวมมา": {
+                        "norm": "เล่าภาพรวมมา",
+                        "question": "เล่าภาพรวมมาเลย",
+                        "lang": "th",
+                        "phone_mode": True,
+                        "taught": False,
+                        "saved_at": time.time(),
+                        "sentences": ["ระบบบีซีออโต้แคร์มีห้าสายงานหลัก"],
+                    },
+                    "th|phone|มาคุยเรื่องเงินสดธนาคาร": {
+                        "norm": "มาคุยเรื่องเงินสดธนาคาร",
+                        "question": "มาคุยเรื่องเงินสดธนาคารดีกว่าทำงานยังไง",
+                        "lang": "th",
+                        "phone_mode": True,
+                        "taught": False,
+                        "saved_at": time.time(),
+                        "sentences": ["หมวดเงินสดธนาคารมีเมนูบันทึกเงินสดและเช็คครับ"],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        qc = qa_cache.QACache(str(qpath), ttl_s=3600, max_entries=50)
+        assert qc.lookup("เล่าภาพรวมมาเลย", lang="th", phone_mode=True) is None
+        assert "th|phone|เล่าภาพรวมมา" not in qc._entries
+        assert "th|phone|มาคุยเรื่องเงินสดธนาคาร" in qc._entries
+
+    # 2. Mirror STT typo normalization + domain synonyms for server / autocare / warehouse / location
+    mirror = BrainVaultMirror("https://brain.bcsmethai.com/api/vault-pack", ttl_s=1800)
+    mirror.load_notes_payload(
+        {
+            "version": "2.3.0",
+            "syncCommit": "wok98",
+            "notes": [
+                {
+                    "slug": "sales-accounting-partner",
+                    "folder": "sales",
+                    "raw": "---\ntitle: พาร์ตเนอร์สำนักงานบัญชี\n---\nใช้ฟรี แยก Server เฉพาะสำนักงานได้",
+                },
+                {
+                    "slug": "sys-autocare-garage",
+                    "folder": "systems",
+                    "raw": "---\ntitle: ระบบอู่ซ่อมรถ AutoCare\n---\nเหมาะกับร้านยาง อู่ซ่อมรถ เปลี่ยนน้ำมันเครื่อง",
+                },
+                {
+                    "slug": "rpt-stock-cost",
+                    "folder": "reports",
+                    "raw": "---\ntitle: รายงานยอดคงเหลือสินค้าและต้นทุน\n---\nดูยอดคงเหลือคลังสินค้าและจุดสั่งซื้อ",
+                },
+                {
+                    "slug": "howto-wms-pick-pack-bin",
+                    "folder": "howto",
+                    "raw": "---\ntitle: แผนผังจุดเก็บ WMS\n---\nจัดเก็บตามโซน แร็ค ชั้นวาง (Bin Location)",
+                },
+            ],
+        },
+        etag='"wok98"',
+    )
+    assert "sales-accounting-partner" in mirror.search_nearby("โปรแกรมคุณแยกเซิร์ฟเวอร์ได้หรือเปล่า", audience="user")["slugs"]
+    assert "sys-autocare-garage" in mirror.search_nearby("ธุรกิจขายอย่างรถยนต์ใช้ได้หรือเปล่า", audience="user")["slugs"]
+    assert "rpt-stock-cost" in mirror.search_nearby("ยอดโครงเรือรวมคังดูยังไง", audience="user")["slugs"]
+    assert "howto-wms-pick-pack-bin" in mirror.search_nearby("โลเคชั่นที่เป็นชั้นทำยังไง", audience="user")["slugs"]
+
+    # 3. Conditional incomplete-tail wait + topic-switch guard in fallback queries
+    s = load_symbols({
+        "_INCOMPLETE_TAIL_RE", "_is_incomplete_thai_tail", "_FOLLOWUP_START_RE",
+        "_VAGUE_FOLLOWUP_RE", "_stt_ears_diverge", "_PHONE_INTENT_HINTS",
+        "_expand_phone_intent_queries", "_STANDALONE_TOPIC_RE", "_BOILERPLATE_CTX_RE",
+        "_extract_recent_topic", "_build_phone_fallback_queries", "BC_STT_PROMPT",
+    })
+    assert s["_is_incomplete_thai_tail"]("แล้วถ้ามี") is True
+    assert s["_is_incomplete_thai_tail"]("แล้วถ้าเป็นธุรกิจขายยางรถยนต์") is True
+    assert s["_is_incomplete_thai_tail"]("แล้วถ้าเป็นธุรกิจขายยางรถยนต์จะใช้ได้หรือเปล่า") is False
+
+    hist_auto = [{"role": "user", "content": "ระบบบีซีออโต้แคร์ร้านยาง"}, {"role": "assistant", "content": "เมนู 1001 นัดหมายช่าง"}]
+    for topic_q in ("แล้วมีรายงานสินค้าคงเหลือกี่แบบ", "แล้วถ้าเป็นธุรกิจขายยางรถยนต์", "มาคุยเรื่องเงินสดธนาคารดีกว่าทำงานยังไง"):
+        qs = s["_build_phone_fallback_queries"](topic_q, [], hist_auto)
+        assert qs and "ออโต้แคร์" not in qs[0] and "1001" not in qs[0], f"topic leak in {topic_q!r}: {qs}"
+
+    # 4. Source invariants for cross-thread carry & BRAIN-NEARBY-SUPPLEMENT standalone guard
+    src = SOURCE.read_text(encoding="utf-8")
+    assert "carry_cid = cid or call_id()" in src and 'PENDING[carry_cid]["carry"]' in src
+    assert "not _STANDALONE_TOPIC_RE.search(heard)" in src
+    assert "speech_s < 0.08 or short_heard not in self.SIP_CUT_INS" in src
+
+    # 5. Sub-80ms glitch ("ครับ" 0.03s in SIP_CUT_INS) must be dropped as noise in process_audio
+    class BaseReplyOnPause:
+        def process_audio(self, audio, state):
+            state.pause_detected = True
+
+        def reset(self):
+            pass
+
+    pa_scope = load_symbols(
+        {"_audio_dbfs"},
+        class_names={"process_audio", "reset", "cut", "_checked_stream_len", "_checked_state_id", "CUT_INS", "SIP_CUT_INS"},
+        extra_scope={
+            "on_phone": lambda: True,
+            "voiced": lambda a: a[1],
+            "EARLY": {},
+            "LIVE": {},
+            "PENDING": {"sip-1-tiny": {"text": ""}},
+            "call_id": lambda: "sip-1-tiny",
+            "create_message": lambda k, d: (k, d),
+        },
+    )
+
+    class TinyHandler(pa_scope["Handler"], BaseReplyOnPause):
+        playing = ()
+        def hears_itself(self, state): return False
+        def just_filler(self, state): return False
+        def no_cut_in(self, state, speech_s): return False
+        def send_message_sync(self, msg): pass
+        def cut_off(self, reason=""): pass
+        def push_turn(self, interrupt=False): pass
+
+    h = TinyHandler()
+    st_tiny = types.SimpleNamespace(
+        pause_detected=False, started_talking=True, responding=False,
+        sampling_rate=SR, stream=np.full(int(SR * 0.03), 0.2, dtype=np.float32), buffer=None,
+    )
+    pa_scope["EARLY"][id(h)] = (st_tiny.stream, types.SimpleNamespace(result=lambda: "ครับ"))
+    h.process_audio((SR, np.zeros(320, dtype=np.float32)), st_tiny)
+    assert st_tiny.pause_detected is False and st_tiny.stream is None, "0.03s 'ครับ' glitch must be rejected"
+
+
 TESTS = [
     test_caller_name_rejects_connectors_and_accepts_real_names,
     test_stt_stutter_detector_and_ear2_fallback,
@@ -862,6 +1002,7 @@ TESTS = [
     test_vault_mirror_intent_expander_planner_and_ice_filter,
     test_log_and_audio_6_improvements,
     test_abstain_nearby_fallback_zero_hallucination,
+    test_wok98_log_5_improvements,
 ]
 
 
