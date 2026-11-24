@@ -294,6 +294,33 @@ try {
   store.applyPostCallAnalysis("020000008", "sess-heal-2", { callerName: "สมชาย", csatScore: 8 });
   assert.equal(store.getCustomer("020000008").name, "สมชาย", "plausible QA name must heal corrupted CRM name");
 
+  // 11. CrmStore.load() auto-sanitizes persisted garbled names while preserving valid names
+  const crmFile = store.crmPath;
+  const rawDb = JSON.parse(fs.readFileSync(crmFile, "utf8"));
+  rawDb.customers["020000011"] = { phone: "020000011", name: "มโยงกันยังไง", totalCalls: 3 };
+  rawDb.customers["020000012"] = { phone: "020000012", name: "คุณการผลัดหรือการร้", totalCalls: 1 };
+  rawDb.customers["020000013"] = { phone: "020000013", name: "สวัสดี", totalCalls: 1 };
+  rawDb.customers["020000014"] = { phone: "020000014", name: "คุณเพ็ญ", totalCalls: 2 };
+  rawDb.tickets.push({
+    id: "TCK-TEST-BADNAME",
+    phone: "020000013",
+    customerName: "สวัสดี",
+    status: "open",
+    subject: "ทดสอบ",
+    description: "เรื่องที่ให้โทรกลับ: ทดสอบ\n\nชื่อลูกค้า: สวัสดี",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+  fs.writeFileSync(crmFile, JSON.stringify(rawDb, null, 2), "utf8");
+  const reloaded = new CrmStore(store.dataDir);
+  assert.equal(reloaded.getCustomer("020000011").name, "", "load() must clear garbled name มโยงกันยังไง");
+  assert.equal(reloaded.getCustomer("020000012").name, "", "load() must clear truncated garbled name");
+  assert.equal(reloaded.getCustomer("020000013").name, "", "load() must clear greeting สวัสดี");
+  assert.equal(reloaded.getCustomer("020000014").name, "คุณเพ็ญ", "load() must keep valid Thai customer name");
+  const cleanedTicket = reloaded.tickets.find((t) => t.id === "TCK-TEST-BADNAME");
+  assert.equal(cleanedTicket.customerName, "", "load() must clear garbled ticket customerName");
+  assert.equal(cleanedTicket.description.includes("ชื่อลูกค้า: สวัสดี"), false, "load() must strip garbled name line");
+
   console.log("ALL_CALLBACK_TICKET_TESTS_PASSED");
 } finally {
   process.chdir(origCwd);
