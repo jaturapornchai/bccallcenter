@@ -131,11 +131,29 @@ function AnalysisBody({ analysis }: { analysis: CallAnalysis }) {
   const followUpText = useMemo(() => buildDefaultFollowUpMessage(analysis), [analysis]);
 
   const handleCopyFollowUp = async () => {
+    let ok = false;
     try {
-      await navigator.clipboard.writeText(followUpText);
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(followUpText);
+        ok = true;
+      }
+    } catch {}
+    if (!ok && typeof document !== "undefined") {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = followUpText;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+      } catch {}
+    }
+    if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2200);
-    } catch {}
+    }
   };
 
   return (
@@ -379,6 +397,7 @@ export function CallQaDrawer({
   readOnly?: boolean;
 }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const teachFormRef = useRef<HTMLFormElement | null>(null);
   const [audioSec, setAudioSec] = useState(0);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [teachOpen, setTeachOpen] = useState(false);
@@ -386,6 +405,14 @@ export function CallQaDrawer({
   const [teachA, setTeachA] = useState("");
   const [teachStatus, setTeachStatus] = useState<string | null>(null);
   const [teachSaving, setTeachSaving] = useState(false);
+
+  useEffect(() => {
+    setTeachOpen(false);
+    setTeachStatus(null);
+    setTeachQ("");
+    setTeachA("");
+    setAudioSec(0);
+  }, [log.sessionId]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -416,6 +443,9 @@ export function CallQaDrawer({
     setTeachA("");
     setTeachStatus(null);
     setTeachOpen(true);
+    window.requestAnimationFrame(() => {
+      teachFormRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
   };
 
   const handleSubmitTeach = async (e: React.FormEvent) => {
@@ -507,6 +537,9 @@ export function CallQaDrawer({
                     controls
                     preload="metadata"
                     src={`/api/recordings/${encodeURIComponent(log.sessionId)}`}
+                    onLoadedMetadata={(e) => {
+                      e.currentTarget.playbackRate = playbackRate;
+                    }}
                     onTimeUpdate={(e) => setAudioSec(e.currentTarget.currentTime)}
                     className="h-9 w-full"
                   />
@@ -523,7 +556,7 @@ export function CallQaDrawer({
 
           {/* 1-Click Teach AI Panel */}
           {teachOpen && !readOnly && (
-            <form onSubmit={(e) => void handleSubmitTeach(e)} className="cc-inset tone-in space-y-2.5 p-3.5">
+            <form ref={teachFormRef} onSubmit={(e) => void handleSubmitTeach(e)} className="cc-inset tone-in space-y-2.5 p-3.5">
               <div className="flex items-center justify-between gap-2">
                 <span className="inline-flex items-center gap-1.5 text-xs font-semibold cc-text">
                   <BookOpenCheck className="h-3.5 w-3.5" />
@@ -565,7 +598,8 @@ export function CallQaDrawer({
             {!readOnly && (
               <button
                 type="button"
-                disabled={analyzing}
+                disabled={analyzing || log.messages.length === 0}
+                title={log.messages.length === 0 ? "สายนี้ยังไม่มีข้อความสนทนาสำหรับวิเคราะห์" : "วิเคราะห์คุณภาพสายซ้ำด้วย DeepSeek"}
                 onClick={() => onReanalyze(log.phone, log.sessionId)}
                 className="cc-btn cc-btn--tone tone-ai h-9"
               >

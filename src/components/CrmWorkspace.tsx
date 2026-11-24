@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Bot,
@@ -56,6 +56,7 @@ interface CrmWorkspaceProps {
   onCloseTicket?: (id: string) => void;
   onDeleteTicket: (id: string) => void;
   onOpenQaLog: (phone: string, sessionId: string) => void;
+  onNotify?: (msg: string) => void;
   readOnly?: boolean;
 }
 
@@ -101,8 +102,10 @@ export function CrmWorkspace({
   onCloseTicket,
   onDeleteTicket,
   onOpenQaLog,
+  onNotify,
   readOnly = false,
 }: CrmWorkspaceProps) {
+  const newTicketRef = useRef<HTMLDivElement | null>(null);
   const [subTab, setSubTab] = useState<"customers" | "tickets">(initialSubTab || "customers");
   useEffect(() => {
     if (initialSubTab) setSubTab(initialSubTab);
@@ -138,6 +141,7 @@ export function CrmWorkspace({
     preferredLanguage: string;
     tagsText: string;
     notes: string;
+    baseUpdatedAt?: string;
   } | null>(null);
 
   // New Ticket Form state
@@ -186,8 +190,19 @@ export function CrmWorkspace({
       preferredLanguage: activeCustomer.preferredLanguage || "",
       tagsText: activeCustomer.tags.join(", "),
       notes: activeCustomer.notes,
+      baseUpdatedAt: activeCustomer.updatedAt || "",
     };
   }, [activeCustomer, editDraft, showNewCustomer]);
+
+  const remoteCustomerUpdated = Boolean(
+    !showNewCustomer &&
+      editDraft &&
+      activeCustomer &&
+      editDraft.phone === activeCustomer.phone &&
+      editDraft.baseUpdatedAt &&
+      activeCustomer.updatedAt &&
+      editDraft.baseUpdatedAt !== activeCustomer.updatedAt
+  );
 
   const customerTickets = useMemo(() => {
     if (!activeCustomer) return [];
@@ -215,7 +230,10 @@ export function CrmWorkspace({
   }, [crm.tickets, search, statusFilter]);
 
   const handleSaveCustomer = () => {
-    if (!activeDraft || !activeDraft.phone.trim()) return;
+    if (!activeDraft || !activeDraft.phone.trim()) {
+      onNotify?.("กรุณากรอกเบอร์โทรศัพท์ลูกค้าก่อนบันทึก");
+      return;
+    }
     onUpsertCustomer({
       phone: activeDraft.phone.trim(),
       name: activeDraft.name.trim(),
@@ -235,7 +253,10 @@ export function CrmWorkspace({
   };
 
   const handleSubmitTicket = () => {
-    if (!ticketForm.subject.trim()) return;
+    if (!ticketForm.subject.trim()) {
+      onNotify?.("กรุณากรอกหัวข้อเคสก่อนบันทึก");
+      return;
+    }
     const cust = crm.customers.find((c) => c.phone === ticketForm.phone.replace(/[^\d+]/g, ""));
     onCreateTicket({
       phone: ticketForm.phone.trim(),
@@ -249,6 +270,7 @@ export function CrmWorkspace({
     setTicketForm({ phone: "", subject: "", description: "", priority: "medium", assignee: "ทีมดูแลลูกค้า" });
     setShowNewTicket(false);
     setSubTab("tickets");
+    onSubTabChange?.("tickets");
   };
 
   const inputCls =
@@ -351,6 +373,7 @@ export function CrmWorkspace({
                 type="button"
                 onClick={() => {
                   setSubTab("customers");
+                  onSubTabChange?.("customers");
                   setShowNewCustomer(true);
                   setEditDraft({
                     phone: "",
@@ -361,6 +384,7 @@ export function CrmWorkspace({
                     preferredLanguage: "",
                     tagsText: "",
                     notes: "",
+                    baseUpdatedAt: "",
                   });
                 }}
                 className="cc-btn cc-btn--tone tone-in h-9"
@@ -387,7 +411,7 @@ export function CrmWorkspace({
 
       {/* Inline Create Ticket Box */}
       {showNewTicket && (
-        <div className="cc-panel space-y-3 p-4">
+        <div ref={newTicketRef} className="cc-panel space-y-3 p-4">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold cc-text">สร้างเคสติดตามงานใหม่ (CRM Ticket)</h3>
             <button type="button" onClick={() => setShowNewTicket(false)} className="cc-btn h-7 px-2.5 text-xs">
@@ -556,12 +580,26 @@ export function CrmWorkspace({
                   </div>
                   {!readOnly && (
                     <div className="flex items-center gap-2">
-                      {!showNewCustomer && (
+                      {showNewCustomer ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowNewCustomer(false);
+                            setEditDraft(null);
+                          }}
+                          className="cc-btn h-9"
+                        >
+                          <span>ยกเลิก</span>
+                        </button>
+                      ) : (
                         <button
                           type="button"
                           onClick={() => {
                             setTicketForm((p) => ({ ...p, phone: activeDraft.phone }));
                             setShowNewTicket(true);
+                            window.requestAnimationFrame(() => {
+                              newTicketRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                            });
                           }}
                           className="cc-btn cc-btn--tone tone-live h-9"
                         >
@@ -576,6 +614,15 @@ export function CrmWorkspace({
                     </div>
                   )}
                 </div>
+
+                {remoteCustomerUpdated && (
+                  <div role="status" className="cc-banner tone-held justify-between gap-2 px-3 py-2">
+                    <span>ผู้ดูแลท่านอื่นเพิ่งอัปเดตข้อมูลลูกค้ารายนี้</span>
+                    <button type="button" onClick={() => setEditDraft(null)} className="cc-btn cc-btn--tone tone-held h-7 px-2.5 text-[11px]">
+                      โหลดข้อมูลล่าสุด
+                    </button>
+                  </div>
+                )}
 
                 {/* Form Grid */}
                 <fieldset disabled={readOnly} className="grid grid-cols-1 gap-3 sm:grid-cols-2 disabled:opacity-80">
@@ -898,16 +945,10 @@ export function CrmWorkspace({
                         ))}
                       </select>
 
-                      <input
+                      <TicketAssigneeInput
+                        assignee={t.assignee}
                         disabled={readOnly}
-                        defaultValue={t.assignee}
-                        onBlur={(e) => {
-                          if (e.target.value.trim() !== t.assignee) {
-                            onUpdateTicket(t.id, { assignee: e.target.value.trim() });
-                          }
-                        }}
-                        className="h-8 w-36 rounded-lg border border-[var(--cc-border)] bg-[var(--cc-panel)] px-2.5 text-xs cc-text outline-none disabled:opacity-70"
-                        placeholder="ผู้รับผิดชอบ"
+                        onCommit={(nextAssignee) => onUpdateTicket(t.id, { assignee: nextAssignee })}
                       />
                     </div>
 
@@ -931,5 +972,49 @@ export function CrmWorkspace({
         </div>
       )}
     </div>
+  );
+}
+
+function TicketAssigneeInput({
+  assignee,
+  disabled,
+  onCommit,
+}: {
+  assignee: string;
+  disabled: boolean;
+  onCommit: (nextAssignee: string) => void;
+}) {
+  const [val, setVal] = useState(assignee);
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) setVal(assignee);
+  }, [assignee, focused]);
+
+  const commit = () => {
+    const trimmed = val.trim();
+    if (trimmed !== assignee) {
+      onCommit(trimmed);
+    }
+  };
+
+  return (
+    <input
+      disabled={disabled}
+      value={val}
+      onFocus={() => setFocused(true)}
+      onChange={(e) => setVal(e.target.value)}
+      onBlur={() => {
+        setFocused(false);
+        commit();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.currentTarget.blur();
+        }
+      }}
+      className="h-8 w-36 rounded-lg border border-[var(--cc-border)] bg-[var(--cc-panel)] px-2.5 text-xs cc-text outline-none disabled:opacity-70"
+      placeholder="ผู้รับผิดชอบ"
+    />
   );
 }

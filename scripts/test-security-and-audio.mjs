@@ -191,15 +191,75 @@ try {
   await engine.answer(2, { enableWebAudio: true });
   assert.equal(engine.activeAudioLine, 2);
 
-  // 5. Source-level invariants on server.mjs & page.tsx
+  // 5. Source-level invariants on server.mjs, page.tsx, LineCard.tsx & new SipEngine control guards
+  let sentRegisterCount = 0;
+  engine.sendRegister = () => {
+    sentRegisterCount += 1;
+  };
+  engine.sock = { mock: true };
+  engine.resolvedIp = "127.0.0.1";
+  engine.trunk.status = "error";
+  engine.trunk.error = "timeout";
+  await engine.reregister();
+  assert.equal(sentRegisterCount, 1, "reregister must send REGISTER when socket is initialized");
+  assert.equal(engine.trunk.status, "connecting");
+  assert.equal(engine.trunk.error, null);
+
+  const reregStartEngine = new SipEngine({ host: "127.0.0.1", port: 5060, user: "020000099", password: "x" });
+  let startCalled = false;
+  reregStartEngine.started = true;
+  reregStartEngine.start = async () => {
+    startCalled = true;
+  };
+  await reregStartEngine.reregister();
+  assert.equal(startCalled, true, "reregister must restart engine when socket/DNS failed initially");
+
+  const noMsgQa = await engine.runPostCallAnalysis("020000001", "missing-sess", 0);
+  assert.equal(noMsgQa.ok, false, "runPostCallAnalysis must return ok:false when session has no messages");
+  engine.memory.startSession("020000008", "inbound");
+  const sessWithMsg = engine.memory.listCallLogs(1)[0];
+  engine.memory.appendMessage("020000008", sessWithMsg.sessionId, "caller", "สอบถามราคา");
+  const noKeyQa = await engine.runPostCallAnalysis("020000008", sessWithMsg.sessionId, 5);
+  assert.equal(noKeyQa.ok, false, "runPostCallAnalysis must return ok:false when OLLAMA_API_KEY is missing");
+
+  line2.state = "held";
+  line2.held = true;
+  line2.aiActive = false;
+  line2._dialog = { vias: [], fromHdr: "", toHdr: "", callId: "c2", cseqHdr: "", routes: [] };
+  const heldAttach = await engine.attachAiToLine(2);
+  assert.equal(heldAttach.ok, false, "attachAiToLine must reject held lines with guidance");
+  assert.ok(heldAttach.error.includes("คุยต่อ"));
+
+  line2.aiActive = true;
+  line2.aiPartial = "กำลังพูด";
+  line2.aiStatus = "กำลังค้นหา";
+  line2.aiTranscript = "J.A.R.V.I.S: สวัสดี";
+  await engine.takeOverFromAi(2);
+  assert.equal(line2.aiActive, false);
+  assert.equal(line2.held, false, "takeOverFromAi must unhold line");
+  assert.equal(line2.state, "connected");
+  assert.equal(line2.aiPartial, "");
+  assert.equal(line2.aiStatus, "");
+  assert.equal(line2.aiTranscript, "");
+  assert.equal(engine.activeAudioLine, 2);
+
   const serverSrc = fs.readFileSync(path.join(origCwd, "server.mjs"), "utf8");
   assert.ok(serverSrc.includes("/api/internal/idle") && serverSrc.includes("isDirectLoopback"), "server.mjs must restrict /api/internal/idle to loopback");
   assert.ok(serverSrc.includes("sanitizeStateForViewer"), "server.mjs must sanitize state for viewer mode");
   assert.ok(serverSrc.includes("if (!line || line.aiActive || sip.activeAudioLine !== lineId) return;"), "server.mjs must mute live RTP on AI calls");
+  assert.ok(
+    serverSrc.includes("broadcastToOtherAdmins") && serverSrc.includes("client.isAdmin"),
+    "server.mjs must restrict admin_action broadcasts to authenticated admins only"
+  );
+  assert.ok(serverSrc.includes("broadcastDataSync") && serverSrc.includes("await sip.reregister()"), "server.mjs must handle data_sync and async reregister");
 
   const pageSrc = fs.readFileSync(path.join(origCwd, "src", "app", "page.tsx"), "utf8");
   assert.ok(!pageSrc.includes("startRingtone"), "page.tsx must not ring on browser when callers dial in");
   assert.ok(pageSrc.includes("activeAudioLineRef.current === lineId"), "page.tsx must play live RTP only for selected human line");
+  assert.ok(pageSrc.includes("toggleAudio") && pageSrc.includes("disableAudio"), "page.tsx must allow turning audio/mic off cleanly");
+
+  const lineCardSrc = fs.readFileSync(path.join(origCwd, "src", "components", "LineCard.tsx"), "utf8");
+  assert.ok(lineCardSrc.includes("หยุดฟัง") && lineCardSrc.includes("onSelectAudio(isActiveAudio ? null : line.lineId)"), "LineCard must support toggling listen off");
 
   // 6. ITU-T G.711 mu-law (0x84 bias, 32635 max) monotonicity & sine-wave SNR check
   assert.equal(decodeMuLawSample(0xff), 0, "mu-law 0xff must decode to 0");
@@ -225,6 +285,7 @@ try {
 
   const bridgeSrc = fs.readFileSync(path.join(origCwd, "src", "lib", "audio-bridge.ts"), "utf8");
   assert.ok(bridgeSrc.includes("const MULAW_MAX = 32635") && bridgeSrc.includes("const MULAW_BIAS = 0x84"), "audio-bridge.ts must use ITU-T G.711 16-bit table");
+  assert.ok(bridgeSrc.includes("async disableAudio()") && bridgeSrc.includes("if (!this.isReady || !this.ctx"), "audio-bridge.ts must cleanly stop mic and output on disableAudio()");
 
   console.log("ALL_SECURITY_AND_AUDIO_TESTS_PASSED");
 } finally {

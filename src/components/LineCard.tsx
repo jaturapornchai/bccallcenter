@@ -20,6 +20,7 @@ import {
   Sparkles,
   Timer,
   UserCheck,
+  VolumeX,
 } from "lucide-react";
 import { SUPPORTED_LANGUAGES, languageShortLabel } from "@/types/sip";
 import type { SipLine } from "@/types/sip";
@@ -34,7 +35,7 @@ interface LineCardProps {
   onHangup: (lineId: number) => void;
   onMute: (lineId: number) => void;
   onHold: (lineId: number) => void;
-  onSelectAudio: (lineId: number) => void;
+  onSelectAudio: (lineId: number | null) => void;
   onTakeOverAi: (lineId: number) => void;
   onAttachAi: (lineId: number) => void;
   onViewCallerHistory?: (phone: string) => void;
@@ -427,16 +428,27 @@ export function LineCard({
                   <span>รับสายแทน AI</span>
                 </button>
               ) : (
-                <button type="button" onClick={() => onAttachAi(line.lineId)} className="cc-btn cc-btn--tone tone-ai">
+                <button
+                  type="button"
+                  disabled={isHeld}
+                  title={isHeld ? "กรุณากด 'คุยต่อ' ก่อนให้ AI รับช่วงต่อ" : "ให้ J.A.R.V.I.S รับช่วงสนทนาแทน"}
+                  onClick={() => onAttachAi(line.lineId)}
+                  className="cc-btn cc-btn--tone tone-ai"
+                >
                   <Bot className="h-3.5 w-3.5" />
                   <span>ให้ AI ตอบ</span>
                 </button>
               )}
 
-              {!line.aiActive && !isActiveAudio && (
-                <button type="button" onClick={() => onSelectAudio(line.lineId)} className="cc-btn cc-btn--tone tone-live">
-                  <Headphones className="h-3.5 w-3.5" />
-                  <span>ฟังเสียง</span>
+              {!line.aiActive && (isConnected || isHeld) && (
+                <button
+                  type="button"
+                  onClick={() => onSelectAudio(isActiveAudio ? null : line.lineId)}
+                  className={`cc-btn cc-btn--tone ${isActiveAudio ? "tone-held" : "tone-live"}`}
+                  title={isActiveAudio ? "หยุดฟังเสียงและส่งไมค์ในสายนี้" : "เปิดฟังเสียงและพูดคุยในสายนี้"}
+                >
+                  {isActiveAudio ? <VolumeX className="h-3.5 w-3.5" /> : <Headphones className="h-3.5 w-3.5" />}
+                  <span>{isActiveAudio ? "หยุดฟัง" : "ฟังเสียง"}</span>
                 </button>
               )}
 

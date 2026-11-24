@@ -103,6 +103,37 @@ function isDirectLoopback(req) {
 app.prepare().then(async () => {
   await sip.start();
 
+  const wss = new WebSocketServer({ noServer: true });
+
+  function getActorLabel(nameOrEmail) {
+    const raw = String(nameOrEmail || "").trim();
+    return raw && !raw.includes("@") ? raw : "ผู้ดูแลท่านอื่น";
+  }
+
+  function broadcastToOtherAdmins(senderWs, message, senderEmail = null) {
+    if (!message) return;
+    const payload = JSON.stringify({ type: "admin_action", message });
+    for (const client of wss.clients) {
+      if (client === senderWs) continue;
+      if (senderEmail && client.userEmail === senderEmail) continue;
+      if (client.readyState === 1 && client.isAdmin) {
+        client.send(payload);
+      }
+    }
+  }
+
+  function broadcastDataSync(scope, adminMessage = null, senderWs = null, senderEmail = null) {
+    const syncPayload = JSON.stringify({ type: "data_sync", scope, ts: Date.now() });
+    for (const client of wss.clients) {
+      if (client.readyState === 1) {
+        client.send(syncPayload);
+      }
+    }
+    if (adminMessage) {
+      broadcastToOtherAdmins(senderWs, adminMessage, senderEmail);
+    }
+  }
+
   const server = http.createServer(async (req, res) => {
     const urlPath = (req.url || "").split("?")[0];
 
@@ -236,6 +267,9 @@ app.prepare().then(async () => {
             signal: AbortSignal.timeout(5000),
           });
           const data = await r.json();
+          if (r.ok && data?.ok !== false) {
+            broadcastDataSync("analytics", `${getActorLabel(session.name)}สอนคำตอบ AI เพิ่มในคลัง`, null, session.email);
+          }
           return sendJson(res, r.status, data);
         } catch (err) {
           return sendJson(res, 502, { ok: false, error: err.message });
@@ -251,6 +285,9 @@ app.prepare().then(async () => {
             signal: AbortSignal.timeout(5000),
           });
           const data = await r.json();
+          if (r.ok && data?.ok !== false) {
+            broadcastDataSync("analytics", `${getActorLabel(session.name)}ลบคำตอบ AI ออกจากคลัง`, null, session.email);
+          }
           return sendJson(res, r.status, data);
         } catch (err) {
           return sendJson(res, 502, { ok: false, error: err.message });
@@ -386,7 +423,6 @@ app.prepare().then(async () => {
     return handle(req, res);
   });
 
-  const wss = new WebSocketServer({ noServer: true });
   const nextUpgradeHandler = app.getUpgradeHandler();
 
   server.on("upgrade", (req, socket, head) => {
@@ -542,15 +578,19 @@ app.prepare().then(async () => {
 
       try {
         const msg = JSON.parse(data.toString("utf8"));
+        const actor = getActorLabel(ws.userName);
         switch (msg.type) {
           case "answer":
             await sip.answer(Number(msg.lineId), { enableWebAudio: true });
+            broadcastToOtherAdmins(ws, `${actor}รับสายคู่สาย ${Number(msg.lineId)}`);
             break;
           case "reject":
             sip.reject(Number(msg.lineId));
+            broadcastToOtherAdmins(ws, `${actor}ปฏิเสธสายคู่สาย ${Number(msg.lineId)}`);
             break;
           case "hangup":
             sip.hangup(Number(msg.lineId));
+            broadcastToOtherAdmins(ws, `${actor}วางสายคู่สาย ${Number(msg.lineId)}`);
             break;
           case "dial": {
             const res = await sip.dial(msg.number, msg.lineId ? Number(msg.lineId) : null);
@@ -561,51 +601,75 @@ app.prepare().then(async () => {
           }
           case "mute":
             sip.toggleMute(Number(msg.lineId));
+            broadcastToOtherAdmins(ws, `${actor}สลับปิด/เปิดไมค์คู่สาย ${Number(msg.lineId)}`);
             break;
           case "hold":
             sip.toggleHold(Number(msg.lineId));
+            broadcastToOtherAdmins(ws, `${actor}สลับพักสาย/คุยต่อคู่สาย ${Number(msg.lineId)}`);
             break;
           case "dtmf":
             sip.sendDtmf(Number(msg.lineId), String(msg.digit || ""));
             break;
           case "setActiveAudioLine":
-            sip.setActiveAudioLine(Number(msg.lineId));
+            sip.setActiveAudioLine(msg.lineId ? Number(msg.lineId) : null);
             break;
           case "setAutoAnswerAi":
             sip.setAutoAnswerAi(Boolean(msg.enabled));
+            broadcastToOtherAdmins(ws, `${actor}${msg.enabled ? "เปิด" : "ปิด"} AI รับสายอัตโนมัติ`);
             break;
           case "takeOverFromAi":
             await sip.takeOverFromAi(Number(msg.lineId));
+            broadcastToOtherAdmins(ws, `${actor}รับสายแทน AI คู่สาย ${Number(msg.lineId)}`);
             break;
-          case "attachAi":
-            await sip.attachAiToLine(Number(msg.lineId));
+          case "attachAi": {
+            const res = await sip.attachAiToLine(Number(msg.lineId));
+            if (res && res.ok === false) {
+              ws.send(JSON.stringify({ type: "error", message: res.error }));
+            } else {
+              broadcastToOtherAdmins(ws, `${actor}ให้ J.A.R.V.I.S รับสายคู่สาย ${Number(msg.lineId)}`);
+            }
             break;
-          case "reanalyze":
-            await sip.runPostCallAnalysis(String(msg.phone || ""), String(msg.sessionId || ""));
+          }
+          case "reanalyze": {
+            const res = await sip.runPostCallAnalysis(String(msg.phone || ""), String(msg.sessionId || ""));
+            if (res && res.ok === false) {
+              ws.send(JSON.stringify({ type: "error", message: res.error }));
+            } else {
+              broadcastToOtherAdmins(ws, `${actor}สั่งวิเคราะห์ผล QA สายใหม่`);
+            }
             break;
+          }
           case "crmUpsertCustomer":
             sip.crmUpsertCustomer(msg.customer || {});
+            broadcastToOtherAdmins(ws, `${actor}บันทึกข้อมูลลูกค้า CRM`);
             break;
           case "crmCreateTicket":
             sip.crmCreateTicket(msg.ticket || {});
+            broadcastToOtherAdmins(ws, `${actor}สร้างเคส CRM ใหม่`);
             break;
           case "crmUpdateTicket":
             sip.crmUpdateTicket(String(msg.id || ""), msg.patch || {}, ws.userName);
+            broadcastToOtherAdmins(ws, `${actor}อัปเดตเคส ${String(msg.id || "")}`);
             break;
           case "crmAcknowledgeTicket":
             sip.crmAcknowledgeTicket(String(msg.id || ""), ws.userName);
+            broadcastToOtherAdmins(ws, `${actor}รับทราบเคส ${String(msg.id || "")}`);
             break;
           case "crmCloseTicket":
             sip.crmCloseTicket(String(msg.id || ""), ws.userName, String(msg.note || ""));
+            broadcastToOtherAdmins(ws, `${actor}ปิดเคส ${String(msg.id || "")}`);
             break;
           case "crmDeleteTicket":
             sip.crmDeleteTicket(String(msg.id || ""));
+            broadcastToOtherAdmins(ws, `${actor}ลบเคส ${String(msg.id || "")}`);
             break;
           case "setLineLanguage":
             await sip.setLineLanguage(Number(msg.lineId), msg.language ? String(msg.language) : null);
+            broadcastToOtherAdmins(ws, `${actor}เปลี่ยนภาษาคู่สาย ${Number(msg.lineId)}`);
             break;
           case "reregister":
-            sip.sendRegister();
+            await sip.reregister();
+            broadcastToOtherAdmins(ws, `${actor}สั่งเชื่อมต่อ SIP ใหม่`);
             break;
           default:
             break;

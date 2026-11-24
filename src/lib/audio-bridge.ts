@@ -41,7 +41,9 @@ const DTMF_FREQS: Record<string, [number, number]> = {
 export class AudioBridge {
   private ctx: AudioContext | null = null;
   private micStream: MediaStream | null = null;
+  private micSource: MediaStreamAudioSourceNode | null = null;
   private processor: ScriptProcessorNode | null = null;
+  private silentGain: GainNode | null = null;
   private nextPlayTime = 0;
   private ringTimer: ReturnType<typeof setInterval> | null = null;
   private sendAudioCb: ((lineId: number, pcmu: Uint8Array) => void) | null = null;
@@ -57,6 +59,28 @@ export class AudioBridge {
     this.activeLineId = lineId;
   }
 
+  private disconnectMicNodes() {
+    if (this.processor) {
+      this.processor.onaudioprocess = null;
+      try { this.processor.disconnect(); } catch {}
+      this.processor = null;
+    }
+    if (this.micSource) {
+      try { this.micSource.disconnect(); } catch {}
+      this.micSource = null;
+    }
+    if (this.silentGain) {
+      try { this.silentGain.disconnect(); } catch {}
+      this.silentGain = null;
+    }
+    if (this.micStream) {
+      this.micStream.getTracks().forEach((t) => {
+        try { t.stop(); } catch {}
+      });
+      this.micStream = null;
+    }
+  }
+
   async ensureAudio(): Promise<boolean> {
     if (!this.ctx) {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -64,6 +88,9 @@ export class AudioBridge {
     }
     if (this.ctx.state === "suspended") {
       await this.ctx.resume();
+    }
+    if (this.micStream && this.micStream.getTracks().every((t) => t.readyState === "ended")) {
+      this.disconnectMicNodes();
     }
     if (!this.micStream) {
       try {
@@ -84,17 +111,38 @@ export class AudioBridge {
     return true;
   }
 
+  async disableAudio(): Promise<void> {
+    this.isReady = false;
+    this.micError = null;
+    this.nextPlayTime = 0;
+    this.stopRingtone();
+    this.disconnectMicNodes();
+  }
+
   private setupMicCapture() {
     if (!this.ctx || !this.micStream) return;
+    if (this.processor) {
+      this.processor.onaudioprocess = null;
+      try { this.processor.disconnect(); } catch {}
+      this.processor = null;
+    }
+    if (this.micSource) {
+      try { this.micSource.disconnect(); } catch {}
+      this.micSource = null;
+    }
+    if (this.silentGain) {
+      try { this.silentGain.disconnect(); } catch {}
+      this.silentGain = null;
+    }
     const source = this.ctx.createMediaStreamSource(this.micStream);
     // 2048 samples @ 48kHz ~= 42ms; downsample to 8kHz
-    this.processor = this.ctx.createScriptProcessor(2048, 1, 1);
+    const processor = this.ctx.createScriptProcessor(2048, 1, 1);
     const inputRate = this.ctx.sampleRate;
     const ratio = inputRate / 8000;
     let carry: number[] = [];
 
-    this.processor.onaudioprocess = (ev) => {
-      if (!this.activeLineId || !this.sendAudioCb) return;
+    processor.onaudioprocess = (ev) => {
+      if (!this.isReady || !this.activeLineId || !this.sendAudioCb) return;
       const input = ev.inputBuffer.getChannelData(0);
       const outLen = Math.floor(input.length / ratio);
       for (let i = 0; i < outLen; i++) {
@@ -109,13 +157,17 @@ export class AudioBridge {
 
     const silentGain = this.ctx.createGain();
     silentGain.gain.value = 0;
-    source.connect(this.processor);
-    this.processor.connect(silentGain);
+    source.connect(processor);
+    processor.connect(silentGain);
     silentGain.connect(this.ctx.destination);
+
+    this.micSource = source;
+    this.processor = processor;
+    this.silentGain = silentGain;
   }
 
   playIncomingPcmu(pcmu: Uint8Array) {
-    if (!this.ctx || this.ctx.state !== "running") return;
+    if (!this.isReady || !this.ctx || this.ctx.state !== "running") return;
     const buf = this.ctx.createBuffer(1, pcmu.length, 8000);
     const channel = buf.getChannelData(0);
     for (let i = 0; i < pcmu.length; i++) {
@@ -148,29 +200,45 @@ export class AudioBridge {
     }
   }
 
+  private _scheduleTicketChime(): void {
+    if (!this.ctx || this.ctx.state !== "running") return;
+    const now = this.ctx.currentTime;
+    const notes = [880, 1174.66, 1318.51];
+    notes.forEach((freq, idx) => {
+      if (!this.ctx) return;
+      const start = now + idx * 0.14;
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(0.001, start);
+      gain.gain.linearRampToValueAtTime(0.14, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, start + 0.2);
+      gain.connect(this.ctx.destination);
+
+      const osc = this.ctx.createOscillator();
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(freq, start);
+      osc.connect(gain);
+      osc.start(start);
+      osc.stop(start + 0.22);
+    });
+  }
+
   playTicketAlertChime(): boolean {
     try {
       const unlocked = this.unlockOutputOnly();
-      if (!this.ctx || (!unlocked && this.ctx.state !== "running")) return false;
-      const now = this.ctx.currentTime;
-      const notes = [880, 1174.66, 1318.51];
-      notes.forEach((freq, idx) => {
-        if (!this.ctx) return;
-        const start = now + idx * 0.14;
-        const gain = this.ctx.createGain();
-        gain.gain.setValueAtTime(0.001, start);
-        gain.gain.linearRampToValueAtTime(0.14, start + 0.02);
-        gain.gain.exponentialRampToValueAtTime(0.001, start + 0.2);
-        gain.connect(this.ctx.destination);
-
-        const osc = this.ctx.createOscillator();
-        osc.type = "triangle";
-        osc.frequency.setValueAtTime(freq, start);
-        osc.connect(gain);
-        osc.start(start);
-        osc.stop(start + 0.22);
-      });
-      return true;
+      if (!this.ctx) return false;
+      if (unlocked || this.ctx.state === "running") {
+        this._scheduleTicketChime();
+        return true;
+      }
+      if (this.ctx.state === "suspended") {
+        const nav = navigator as Navigator & { userActivation?: { hasBeenActive: boolean } };
+        if (nav.userActivation && !nav.userActivation.hasBeenActive) {
+          return false;
+        }
+        void this.ctx.resume().then(() => this._scheduleTicketChime()).catch(() => {});
+        return true;
+      }
+      return false;
     } catch {
       return false;
     }
@@ -237,15 +305,11 @@ export class AudioBridge {
   }
 
   destroy() {
+    this.isReady = false;
+    this.micError = null;
+    this.nextPlayTime = 0;
     this.stopRingtone();
-    if (this.processor) {
-      this.processor.disconnect();
-      this.processor = null;
-    }
-    if (this.micStream) {
-      this.micStream.getTracks().forEach((t) => t.stop());
-      this.micStream = null;
-    }
+    this.disconnectMicNodes();
     if (this.ctx) {
       void this.ctx.close();
       this.ctx = null;

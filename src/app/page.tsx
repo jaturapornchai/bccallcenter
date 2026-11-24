@@ -127,6 +127,8 @@ export default function ConsolePage() {
   const [wsReadOnly, setWsReadOnly] = useState(true);
   const [wsEpoch, setWsEpoch] = useState(0);
   const [wsLatencyMs, setWsLatencyMs] = useState<number | null>(null);
+  const [syncVersion, setSyncVersion] = useState(0);
+  const [reregistering, setReregistering] = useState(false);
   const [meters, setMeters] = useState<Record<number, { in: number; out: number }>>({});
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -135,6 +137,8 @@ export default function ConsolePage() {
   const isReadOnly = !auth.isAdmin || wsReadOnly;
   const voiceAlertEnabledRef = useRef(voiceAlertEnabled);
   const isReadOnlyRef = useRef(isReadOnly);
+  const authRef = useRef(auth);
+  const lastDataSigRef = useRef("");
   const pendingSpokenTicketRef = useRef<CrmTicket | null>(null);
   const repeatCountsRef = useRef<Map<string, number>>(new Map());
   const linesRef = useRef<SipLine[]>(state.lines);
@@ -152,6 +156,10 @@ export default function ConsolePage() {
   useEffect(() => {
     isReadOnlyRef.current = isReadOnly;
   }, [isReadOnly]);
+
+  useEffect(() => {
+    authRef.current = auth;
+  }, [auth]);
 
   const announceCallbackTicket = useCallback((ticket: CrmTicket, isManual = false) => {
     if (!isManual && !voiceAlertEnabledRef.current) return;
@@ -173,30 +181,34 @@ export default function ConsolePage() {
     }
   }, []);
 
-  useEffect(() => {
-    let active = true;
-    fetch("/api/auth/me", { cache: "no-store" })
-      .then((res) => res.json())
-      .then((data) => {
-        if (!active) return;
-        setAuth({
-          loaded: true,
-          authenticated: Boolean(data.authenticated),
-          isAdmin: Boolean(data.isAdmin),
-          email: data.email || null,
-          name: data.name || null,
-          picture: data.picture || null,
-          googleClientId: data.googleClientId || "",
-        });
-      })
-      .catch(() => {
-        if (!active) return;
-        setAuth((prev) => ({ ...prev, loaded: true }));
+  const refreshAuth = useCallback(async () => {
+    try {
+      const res = await fetch("/api/auth/me", { cache: "no-store" });
+      const data = await res.json();
+      const nextAdmin = Boolean(data.isAdmin);
+      const nextAuthed = Boolean(data.authenticated);
+      const prev = authRef.current;
+      const changed = prev.loaded && (prev.isAdmin !== nextAdmin || prev.authenticated !== nextAuthed);
+      setAuth({
+        loaded: true,
+        authenticated: nextAuthed,
+        isAdmin: nextAdmin,
+        email: data.email || null,
+        name: data.name || null,
+        picture: data.picture || null,
+        googleClientId: data.googleClientId || "",
       });
-    return () => {
-      active = false;
-    };
+      if (changed) {
+        setWsEpoch((v) => v + 1);
+      }
+    } catch {
+      setAuth((prev) => ({ ...prev, loaded: true }));
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshAuth();
+  }, [refreshAuth]);
 
   const handleGoogleCredential = useCallback(async (credential: string) => {
     try {
@@ -245,7 +257,10 @@ export default function ConsolePage() {
     setSelectedLogId(null);
     setSelectedCallerPhone(null);
     setCrmFocusPhone(null);
+    setAudioReady(false);
+    setMicWarning(null);
     stopTicketSpeech();
+    void audioRef.current?.disableAudio();
     audioRef.current?.stopRingtone();
     setToast("ออกจากระบบแล้ว — สลับกลับเป็นโหมดผู้ชม (ปกปิดข้อมูลที่เป็นความลับ)");
     setWsEpoch((v) => v + 1);
@@ -258,6 +273,20 @@ export default function ConsolePage() {
       const savedVoice = localStorage.getItem("bc-cc-ticket-voice-alert");
       if (savedVoice === "false") setVoiceAlertEnabled(false);
     } catch {}
+    const onStorage = (ev: StorageEvent) => {
+      if (ev.key === "yalecom-theme" && (ev.newValue === "light" || ev.newValue === "dark")) {
+        setTheme(ev.newValue);
+      } else if (ev.key === "bc-cc-ticket-voice-alert" && ev.newValue !== null) {
+        const nextEnabled = ev.newValue !== "false";
+        setVoiceAlertEnabled(nextEnabled);
+        if (!nextEnabled) {
+          stopTicketSpeech();
+          pendingSpokenTicketRef.current = null;
+        }
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, []);
 
   useEffect(() => {
@@ -325,6 +354,9 @@ export default function ConsolePage() {
       ws.onopen = () => {
         lastActivityAt = Date.now();
         setWsConnected(true);
+        if (authRef.current.loaded) {
+          void refreshAuth();
+        }
         try {
           ws.send(JSON.stringify({ type: "ping", ts: Date.now() }));
         } catch {}
@@ -357,10 +389,21 @@ export default function ConsolePage() {
           if (msg.type === "state") {
             setState(msg.data);
             setWsReadOnly(msg.readOnly !== false);
+            const snap = msg.data as ConsoleState;
+            const latestAnalyzed = snap.callLogs?.[0]?.analysis?.analyzedAt || snap.callLogs?.[0]?.sessionId || "";
+            const sig = `${snap.callLogs?.length || 0}:${snap.crm?.tickets?.length || 0}:${snap.crm?.customers?.length || 0}:${latestAnalyzed}`;
+            if (lastDataSigRef.current && lastDataSigRef.current !== sig) {
+              setSyncVersion((v) => v + 1);
+            }
+            lastDataSigRef.current = sig;
           } else if (msg.type === "meter") {
             setMeters(msg.levels || {});
           } else if (msg.type === "pong" && typeof msg.ts === "number") {
             setWsLatencyMs(Math.max(1, Date.now() - msg.ts));
+          } else if (msg.type === "data_sync") {
+            setSyncVersion((v) => v + 1);
+          } else if (msg.type === "admin_action" && msg.message) {
+            setToast(String(msg.message));
           } else if (msg.type === "callback_ticket" && msg.ticket) {
             const ticket = msg.ticket as CrmTicket;
             const merged = Math.max(1, Number(ticket.mergedCount || 1));
@@ -381,6 +424,7 @@ export default function ConsolePage() {
 
     const forceSyncOrReconnect = () => {
       if (unmounted) return;
+      void refreshAuth();
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
         try {
@@ -425,8 +469,10 @@ export default function ConsolePage() {
       if (watchdogTimer) clearInterval(watchdogTimer);
       wsRef.current?.close();
       bridge.destroy();
+      setAudioReady(false);
+      setMicWarning(null);
     };
-  }, [wsEpoch, announceCallbackTicket]);
+  }, [wsEpoch, announceCallbackTicket, refreshAuth]);
 
   useEffect(() => {
     const bridge = audioRef.current;
@@ -446,25 +492,44 @@ export default function ConsolePage() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  const activateAudio = useCallback(async () => {
-    if (!audioRef.current) return;
+  const activateAudio = useCallback(async (): Promise<boolean> => {
+    if (!audioRef.current) return false;
     await audioRef.current.ensureAudio();
-    setAudioReady(audioRef.current.isReady);
-    setMicWarning(audioRef.current.micError);
+    const ready = audioRef.current.isReady;
+    const warn = audioRef.current.micError;
+    setAudioReady(ready);
+    setMicWarning(warn);
+    return ready;
   }, []);
 
+  const toggleAudio = useCallback(async () => {
+    if (!audioRef.current) return;
+    if (audioReady) {
+      await audioRef.current.disableAudio();
+      setAudioReady(false);
+      setMicWarning(null);
+      setToast("ปิดเสียงและไมโครโฟนแล้ว");
+      return;
+    }
+    const ok = await activateAudio();
+    if (ok && !audioRef.current.micError) {
+      setToast("เปิดเสียงและไมโครโฟนแล้ว");
+    }
+  }, [audioReady, activateAudio]);
+
   const sendCmd = useCallback(
-    (payload: Record<string, unknown>) => {
+    (payload: Record<string, unknown>): boolean => {
       if (isReadOnly) {
         setToast("โหมดผู้ชม (ดูได้อย่างเดียว) — กรุณาเข้าสู่ระบบผู้ดูแลด้วย Google");
-        return;
+        return false;
       }
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         setToast("ยังไม่ได้เชื่อมต่อเซิร์ฟเวอร์");
-        return;
+        return false;
       }
       ws.send(JSON.stringify(payload));
+      return true;
     },
     [isReadOnly]
   );
@@ -485,6 +550,22 @@ export default function ConsolePage() {
     [activateAudio, sendCmd]
   );
 
+  const handleSelectAudio = useCallback(
+    async (lineId: number | null) => {
+      if (lineId === null) {
+        if (sendCmd({ type: "setActiveAudioLine", lineId: null })) {
+          setToast("ปิดการฟังเสียงสายนี้แล้ว");
+        }
+        return;
+      }
+      await activateAudio();
+      if (sendCmd({ type: "setActiveAudioLine", lineId })) {
+        setToast(`กำลังฟังเสียงคู่สาย ${lineId}`);
+      }
+    },
+    [activateAudio, sendCmd]
+  );
+
   const handleReject = useCallback((lineId: number) => sendCmd({ type: "reject", lineId }), [sendCmd]);
   const handleReanalyze = useCallback(
     (phone: string, sessionId: string) => sendCmd({ type: "reanalyze", phone, sessionId }),
@@ -493,16 +574,18 @@ export default function ConsolePage() {
   const handleAcknowledgeTicket = useCallback(
     (id: string) => {
       stopTicketSpeech();
-      sendCmd({ type: "crmAcknowledgeTicket", id });
-      setToast("บันทึกรับทราบเคสแล้ว");
+      if (sendCmd({ type: "crmAcknowledgeTicket", id })) {
+        setToast("บันทึกรับทราบเคสแล้ว");
+      }
     },
     [sendCmd]
   );
   const handleCloseTicket = useCallback(
     (id: string) => {
       stopTicketSpeech();
-      sendCmd({ type: "crmCloseTicket", id });
-      setToast("ปิด Ticket (พนักงานรับรู้แล้ว) เรียบร้อย");
+      if (sendCmd({ type: "crmCloseTicket", id })) {
+        setToast("ปิด Ticket (พนักงานรับรู้แล้ว) เรียบร้อย");
+      }
     },
     [sendCmd]
   );
@@ -532,26 +615,37 @@ export default function ConsolePage() {
     setActiveView("crm");
   }, []);
   const toggleVoiceAlert = useCallback(() => {
-    setVoiceAlertEnabled((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem("bc-cc-ticket-voice-alert", String(next));
-      } catch {}
-      if (next) {
-        audioRef.current?.unlockOutputOnly();
-        setAudioBlocked(false);
-        if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
-          void Notification.requestPermission().catch(() => {});
-        }
-        setToast("เปิดเสียงเตือนและเสียงพูด Ticket แล้ว");
-      } else {
-        stopTicketSpeech();
-        pendingSpokenTicketRef.current = null;
-        setToast("ปิดเสียงเตือน Ticket ชั่วคราว");
+    const next = !voiceAlertEnabled;
+    setVoiceAlertEnabled(next);
+    try {
+      localStorage.setItem("bc-cc-ticket-voice-alert", String(next));
+    } catch {}
+    if (next) {
+      audioRef.current?.unlockOutputOnly();
+      setAudioBlocked(false);
+      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
+        void Notification.requestPermission().catch(() => {});
       }
-      return next;
-    });
-  }, []);
+      setToast("เปิดเสียงเตือนและเสียงพูด Ticket แล้ว");
+    } else {
+      stopTicketSpeech();
+      pendingSpokenTicketRef.current = null;
+      setToast("ปิดเสียงเตือน Ticket ชั่วคราว");
+    }
+  }, [voiceAlertEnabled]);
+  const openQaLog = useCallback(
+    (sessionId: string) => {
+      if (!sessionId) return;
+      const inLogs = (state.callLogs || []).some((l) => l.sessionId === sessionId);
+      const inCallers = (state.callers || []).some((c) => c.sessions.some((s) => s.id === sessionId));
+      if (!inLogs && !inCallers) {
+        setToast("ไม่พบบันทึกสายนี้ในประวัติล่าสุด");
+        return;
+      }
+      setSelectedLogId(sessionId);
+    },
+    [state.callLogs, state.callers]
+  );
   const closeDrawer = useCallback(() => setSelectedLogId(null), []);
   const viewCaller = useCallback((phone: string) => {
     setSelectedCallerPhone(phone);
@@ -596,10 +690,32 @@ export default function ConsolePage() {
     return callers[0] || null;
   }, [callers, selectedCallerPhone]);
   // Looked up from live state so the drawer refreshes when DeepSeek analysis finishes
-  const selectedLog = useMemo(
-    () => (selectedLogId ? callLogs.find((l) => l.sessionId === selectedLogId) ?? null : null),
-    [callLogs, selectedLogId]
-  );
+  const selectedLog = useMemo(() => {
+    if (!selectedLogId) return null;
+    const direct = callLogs.find((l) => l.sessionId === selectedLogId);
+    if (direct) return direct;
+    for (const c of callers) {
+      const sess = c.sessions.find((s) => s.id === selectedLogId);
+      if (sess) {
+        return {
+          phone: c.phone,
+          callerTotalCalls: c.totalCalls,
+          sessionId: sess.id,
+          startedAt: sess.startedAt,
+          endedAt: sess.endedAt,
+          durationSec: sess.durationSec ?? 0,
+          status: sess.status || "answered",
+          direction: sess.direction,
+          messages: sess.messages,
+          hasRecording: sess.hasRecording,
+          recordingDurationSec: sess.recordingDurationSec,
+          analysisStatus: sess.analysisStatus || "idle",
+          analysis: sess.analysis ?? null,
+        } satisfies CallLogEntry;
+      }
+    }
+    return null;
+  }, [callLogs, callers, selectedLogId]);
 
   const busyCount = useMemo(() => state.lines.filter((l) => l.state !== "idle").length, [state.lines]);
   const aiCount = useMemo(() => state.lines.filter((l) => l.aiActive).length, [state.lines]);
@@ -721,22 +837,35 @@ export default function ConsolePage() {
             {!isReadOnly && (
               <button
                 type="button"
-                onClick={activateAudio}
-                className={`cc-btn cc-btn--tone h-9 ${audioReady ? "tone-live" : "tone-held"}`}
+                role="switch"
+                aria-checked={audioReady}
+                onClick={() => void toggleAudio()}
+                className={`cc-btn h-9 gap-2 tone-live ${audioReady ? "cc-btn--tone" : ""}`}
+                title={audioReady ? "กดเพื่อปิดเสียงและไมโครโฟน" : "กดเพื่อเปิดเสียงและไมโครโฟน"}
               >
                 {audioReady ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
-                <span>{audioReady ? "เปิดเสียงแล้ว" : "เปิดเสียง/ไมค์"}</span>
+                <span>เสียง/ไมค์</span>
+                <span className={`cc-switch ${audioReady ? "is-on" : ""}`} aria-hidden="true">
+                  <span className="cc-switch__knob" />
+                </span>
+                <span>{audioReady ? "เปิด" : "ปิด"}</span>
               </button>
             )}
 
             <button
               type="button"
+              role="switch"
+              aria-checked={voiceAlertEnabled}
               onClick={toggleVoiceAlert}
-              className={`cc-btn cc-btn--tone h-9 ${voiceAlertEnabled ? "tone-in" : "tone-idle"}`}
-              title={voiceAlertEnabled ? "ปิดเสียงเตือน + เสียงพูด Ticket" : "เปิดเสียงเตือน + เสียงพูด Ticket"}
+              className={`cc-btn h-9 gap-2 tone-in ${voiceAlertEnabled ? "cc-btn--tone" : ""}`}
+              title={voiceAlertEnabled ? "กดเพื่อปิดเสียงเตือน + เสียงพูด Ticket" : "กดเพื่อเปิดเสียงเตือน + เสียงพูด Ticket"}
             >
               {voiceAlertEnabled ? <BellRing className="h-3.5 w-3.5" /> : <BellOff className="h-3.5 w-3.5" />}
               <span>เสียงเตือน Ticket</span>
+              <span className={`cc-switch ${voiceAlertEnabled ? "is-on" : ""}`} aria-hidden="true">
+                <span className="cc-switch__knob" />
+              </span>
+              <span>{voiceAlertEnabled ? "เปิด" : "ปิด"}</span>
             </button>
 
             <button
@@ -750,8 +879,19 @@ export default function ConsolePage() {
             </button>
 
             {!isReadOnly && (
-              <button type="button" onClick={() => sendCmd({ type: "reregister" })} className="cc-btn h-9 w-9 px-0" title="เชื่อมต่อ SIP ใหม่">
-                <RefreshCw className="h-3.5 w-3.5" />
+              <button
+                type="button"
+                onClick={() => {
+                  if (sendCmd({ type: "reregister" })) {
+                    setReregistering(true);
+                    setToast("กำลังสั่งเชื่อมต่อ SIP Trunk ใหม่...");
+                    window.setTimeout(() => setReregistering(false), 1500);
+                  }
+                }}
+                className="cc-btn h-9 w-9 px-0"
+                title="เชื่อมต่อ SIP ใหม่"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${reregistering ? "animate-spin" : ""}`} />
               </button>
             )}
 
@@ -821,7 +961,7 @@ export default function ConsolePage() {
         )}
 
         {activeView === "analytics" ? (
-          <AnalyticsWorkspace readOnly={isReadOnly} onNotify={(m) => setToast(m)} />
+          <AnalyticsWorkspace readOnly={isReadOnly} syncVersion={syncVersion} onNotify={(m) => setToast(m)} />
         ) : activeView === "crm" ? (
           <CrmWorkspace
             crm={
@@ -836,19 +976,26 @@ export default function ConsolePage() {
             initialSubTab={crmSubTab}
             onSubTabChange={setCrmSubTab}
             readOnly={isReadOnly}
+            onNotify={(m) => setToast(m)}
             onUpsertCustomer={(customer) => {
-              sendCmd({ type: "crmUpsertCustomer", customer });
-              if (!isReadOnly) setToast("บันทึกข้อมูลลูกค้าลง CRM เรียบร้อยแล้ว");
+              if (sendCmd({ type: "crmUpsertCustomer", customer })) {
+                setToast("บันทึกข้อมูลลูกค้าลง CRM เรียบร้อยแล้ว");
+              }
             }}
             onCreateTicket={(ticket) => {
-              sendCmd({ type: "crmCreateTicket", ticket });
-              if (!isReadOnly) setToast("สร้างเคสติดตามงานใหม่เรียบร้อยแล้ว");
+              if (sendCmd({ type: "crmCreateTicket", ticket })) {
+                setToast("สร้างเคสติดตามงานใหม่เรียบร้อยแล้ว");
+              }
             }}
             onUpdateTicket={(id, patch) => sendCmd({ type: "crmUpdateTicket", id, patch })}
             onAcknowledgeTicket={handleAcknowledgeTicket}
             onCloseTicket={handleCloseTicket}
-            onDeleteTicket={(id) => sendCmd({ type: "crmDeleteTicket", id })}
-            onOpenQaLog={(_phone, sessionId) => setSelectedLogId(sessionId)}
+            onDeleteTicket={(id) => {
+              if (sendCmd({ type: "crmDeleteTicket", id })) {
+                setToast("ลบเคสเรียบร้อยแล้ว");
+              }
+            }}
+            onOpenQaLog={(_phone, sessionId) => openQaLog(sessionId)}
           />
         ) : (
           <>
@@ -900,7 +1047,7 @@ export default function ConsolePage() {
                       onHangup={(id) => sendCmd({ type: "hangup", lineId: id })}
                       onMute={(id) => sendCmd({ type: "mute", lineId: id })}
                       onHold={(id) => sendCmd({ type: "hold", lineId: id })}
-                      onSelectAudio={(id) => sendCmd({ type: "setActiveAudioLine", lineId: id })}
+                      onSelectAudio={(id) => void handleSelectAudio(id)}
                       onTakeOverAi={handleTakeOverAi}
                       onAttachAi={(id) => sendCmd({ type: "attachAi", lineId: id })}
                       onViewCallerHistory={(phone) => {
@@ -908,12 +1055,13 @@ export default function ConsolePage() {
                         viewCaller(phone);
                       }}
                       onChangeLanguage={(lineId, language) => {
-                        sendCmd({ type: "setLineLanguage", lineId, language });
-                        setToast(
-                          language
-                            ? `เปลี่ยนภาษาคู่สาย ${lineId} เป็น ${languageShortLabel(language)} และบันทึกลง CRM แล้ว`
-                            : `ตั้งค่าภาษาคู่สาย ${lineId} เป็นอัตโนมัติแล้ว`
-                        );
+                        if (sendCmd({ type: "setLineLanguage", lineId, language })) {
+                          setToast(
+                            language
+                              ? `เปลี่ยนภาษาคู่สาย ${lineId} เป็น ${languageShortLabel(language)} และบันทึกลง CRM แล้ว`
+                              : `ตั้งค่าภาษาคู่สาย ${lineId} เป็นอัตโนมัติแล้ว`
+                          );
+                        }
                       }}
                     />
                   ))}
@@ -987,9 +1135,9 @@ export default function ConsolePage() {
                       onOpenCrmTickets={handleOpenCrmTickets}
                     />
                   )}
-                  {rightTab === "qa" && <CallLogList logs={callLogs} onOpen={setSelectedLogId} />}
+                  {rightTab === "qa" && <CallLogList logs={callLogs} onOpen={openQaLog} />}
                   {rightTab === "callers" && (
-                    <CallerMemory callers={callers} active={activeCallerRecord} onSelect={setSelectedCallerPhone} onOpenLog={setSelectedLogId} />
+                    <CallerMemory callers={callers} active={activeCallerRecord} onSelect={setSelectedCallerPhone} onOpenLog={openQaLog} />
                   )}
                   {rightTab === "history" && <HistoryList history={state.history} onSelect={viewCaller} />}
                 </div>

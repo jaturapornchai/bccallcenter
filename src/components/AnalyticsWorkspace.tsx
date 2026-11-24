@@ -71,19 +71,23 @@ function formatDayShort(isoDate: string): string {
 
 export function AnalyticsWorkspace({
   readOnly = false,
+  syncVersion = 0,
   onNotify,
 }: {
   readOnly?: boolean;
+  syncVersion?: number;
   onNotify?: (msg: string) => void;
 }) {
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [entries, setEntries] = useState<TaughtEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [qInput, setQInput] = useState("");
   const [aInput, setAInput] = useState("");
   const [savingTeach, setSavingTeach] = useState(false);
 
-  const loadAll = useCallback(async () => {
+  const loadAll = useCallback(async (manual = false) => {
+    if (manual) setRefreshing(true);
     try {
       const [aRes, tRes] = await Promise.all([
         fetch("/api/analytics", { cache: "no-store" }),
@@ -97,18 +101,28 @@ export function AnalyticsWorkspace({
         const tj = (await tRes.json()) as { entries?: TaughtEntry[] };
         setEntries(Array.isArray(tj.entries) ? tj.entries : []);
       }
+      if (manual) {
+        onNotify?.(aRes.ok ? "อัปเดตข้อมูลสถิติล่าสุดแล้ว" : "ไม่สามารถโหลดข้อมูลสถิติล่าสุดได้");
+      }
     } catch {
-      // Keep last known snapshot on temporary network blip
+      if (manual) onNotify?.("ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์เพื่ออัปเดตข้อมูลได้");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
-  }, []);
+  }, [onNotify]);
 
   useEffect(() => {
-    void loadAll();
-    const t = setInterval(() => void loadAll(), 15000);
+    void loadAll(false);
+    const t = setInterval(() => void loadAll(false), 15000);
     return () => clearInterval(t);
   }, [loadAll]);
+
+  useEffect(() => {
+    if (syncVersion > 0) {
+      void loadAll(false);
+    }
+  }, [syncVersion, loadAll]);
 
   const handleAddTeach = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -133,7 +147,7 @@ export function AnalyticsWorkspace({
         setQInput("");
         setAInput("");
         onNotify?.("สอนคำตอบให้ J.A.R.V.I.S เรียบร้อย รอบหน้าตอบได้ทันที!");
-        void loadAll();
+        void loadAll(false);
       }
     } catch {
       onNotify?.("ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์เพื่อบันทึกคำตอบได้");
@@ -150,11 +164,16 @@ export function AnalyticsWorkspace({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ key }),
       });
-      if (res.ok) {
+      const j = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (res.ok && j?.ok !== false) {
         onNotify?.("ลบคำตอบออกจากคลัง FAQ แล้ว");
-        void loadAll();
+        void loadAll(false);
+      } else {
+        onNotify?.(j?.error || "ลบคำตอบไม่สำเร็จ");
       }
-    } catch {}
+    } catch {
+      onNotify?.("ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์เพื่อลบคำตอบได้");
+    }
   };
 
   const summary = data?.summary;
@@ -180,9 +199,9 @@ export function AnalyticsWorkspace({
             </p>
           </div>
         </div>
-        <button type="button" onClick={() => void loadAll()} className="cc-btn h-9">
-          <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-          <span>อัปเดตข้อมูล</span>
+        <button type="button" disabled={refreshing} onClick={() => void loadAll(true)} className="cc-btn h-9">
+          <RefreshCw className={`h-3.5 w-3.5 ${loading || refreshing ? "animate-spin" : ""}`} />
+          <span>{refreshing ? "กำลังอัปเดต..." : "อัปเดตข้อมูล"}</span>
         </button>
       </div>
 
