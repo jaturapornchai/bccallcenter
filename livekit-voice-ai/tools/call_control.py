@@ -285,48 +285,91 @@ def build_call_tools(ctx: CallCenterContext) -> list[Any]:
             logger.warning("BC Brain /api/fast fallback %s failed: %s", tool_name, rest_exc)
         return None
 
+    async def _post_mcp(tool_name: str, arguments: dict[str, Any], timeout: float = 8.0) -> list[str]:
+        client = _get_mcp_http_client()
+        res = await client.post(
+            mcp_url,
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": tool_name, "arguments": arguments},
+            },
+            timeout=timeout,
+        )
+        if res.status_code != 200:
+            return []
+        raw = res.text
+        if "event-stream" in res.headers.get("content-type", ""):
+            data_lines = [ln[5:] for ln in raw.splitlines() if ln.startswith("data:")]
+            raw = data_lines[-1] if data_lines else raw
+        body = json.loads(raw)
+        content = body.get("result", {}).get("content", [])
+        return [c.get("text", "") for c in content if isinstance(c, dict) and c.get("text")]
+
+    async def _search_nearby_mcp(query: str, audience: str = "user") -> str | None:
+        clean_q = " ".join(str(query or "").split())[:200]
+        if not clean_q:
+            return None
+        try:
+            hits_texts = await _post_mcp("search_brain", {"query": clean_q, "audience": audience, "limit": 3}, timeout=5.0)
+            if not hits_texts:
+                return None
+            hits = [
+                h for h in json.loads("\n".join(hits_texts))
+                if isinstance(h, dict) and h.get("slug") and h.get("score", 0) >= 35
+            ]
+            slugs = [str(h["slug"]) for h in hits[:2]]
+            if not slugs:
+                return None
+            batch_texts = await _post_mcp(
+                "batch_read",
+                {"slugs": slugs, "audience": audience, "query": clean_q, "max_chars_per_note": 700},
+                timeout=5.0,
+            )
+            if not batch_texts:
+                return None
+            joined_nearby = "\n".join(batch_texts).strip()
+            if not joined_nearby or "🛑" in joined_nearby or "abstain" in joined_nearby.lower():
+                return None
+            return (
+                "ไม่พบคำตอบตรงเป๊ะในระบบ (Abstain) — ห้ามเดาและห้ามแต่งเติมเอง ให้บอกลูกค้าสั้นๆ ตรงๆ ว่าส่วนที่ถามตรงๆ ยังไม่มีข้อมูลยืนยัน "
+                "แต่มีข้อมูลใกล้เคียงที่มีอยู่จริงด้านล่างให้เล่าเฉพาะข้อเท็จจริงนี้เท่านั้น:\n\n"
+                + joined_nearby[:1400]
+            )
+        except Exception as exc:
+            logger.warning("BC Brain nearby fallback failed: %s", exc)
+            return None
+
     async def _call_bc_brain_mcp(tool_name: str, arguments: dict[str, Any], timeout: float = 8.0) -> str:
         cache_key = f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
         if cached := _cache_get(cache_key):
             return cached
+        q_text = str(arguments.get("question") or " ".join(arguments.get("questions") or [])).strip()
         try:
-            client = _get_mcp_http_client()
-            res = await client.post(
-                mcp_url,
-                headers={
-                    "Accept": "application/json, text/event-stream",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "tools/call",
-                    "params": {"name": tool_name, "arguments": arguments},
-                },
-                timeout=timeout,
-            )
-            if res.status_code == 200:
-                raw = res.text
-                if "event-stream" in res.headers.get("content-type", ""):
-                    data_lines = [ln[5:] for ln in raw.splitlines() if ln.startswith("data:")]
-                    raw = data_lines[-1] if data_lines else raw
-                body = json.loads(raw)
-                content = body.get("result", {}).get("content", [])
-                texts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("text")]
-                if texts:
-                    joined = "\n".join(texts)
-                    if ("🛑" in joined or "abstain" in joined.lower()) and not (
-                        "[batch_ask" in joined and re.search(r"confidence=(?:high|medium)\b", joined, re.I)
-                    ):
-                        return "ไม่พบข้อมูลยืนยันในระบบ (Abstain): ห้ามเดาหรือแต่งข้อมูลเอง ให้แจ้งลูกค้าตรงๆ ว่ายังไม่มีข้อมูลยืนยันในระบบ แล้วชวนคุยตอบเรื่องอื่นต่ออย่างเป็นธรรมชาติ (ไม่ต้องเสนอโทรกลับทุกครั้ง เสนอเฉพาะเมื่อลูกค้าขอ จำเป็นจริงๆ หรือเป็น BC Account เวอร์ชันเก่า)"
-                    limit_chars = 2400 if tool_name == "batch_read" else 1400
-                    out = joined[:limit_chars]
-                    _cache_put(cache_key, out)
-                    return out
+            texts = await _post_mcp(tool_name, arguments, timeout=timeout)
+            if texts:
+                joined = "\n".join(texts)
+                if ("🛑" in joined or "abstain" in joined.lower()) and not (
+                    "[batch_ask" in joined and re.search(r"confidence=(?:high|medium)\b", joined, re.I)
+                ):
+                    if nearby := await _search_nearby_mcp(q_text, audience=str(arguments.get("audience") or "user")):
+                        return nearby
+                    return "ไม่พบข้อมูลยืนยันในระบบ (Abstain): ห้ามเดาหรือแต่งข้อมูลเอง ให้แจ้งลูกค้าตรงๆ ว่ายังไม่มีข้อมูลยืนยันในระบบ แล้วชวนคุยตอบเรื่องอื่นต่ออย่างเป็นธรรมชาติ (ไม่ต้องเสนอโทรกลับทุกครั้ง เสนอเฉพาะเมื่อลูกค้าขอ จำเป็นจริงๆ หรือเป็น BC Account เวอร์ชันเก่า)"
+                limit_chars = 2400 if tool_name == "batch_read" else 1400
+                out = joined[:limit_chars]
+                _cache_put(cache_key, out)
+                return out
         except Exception as exc:
             logger.warning("BC Brain MCP %s failed: %s", tool_name, exc)
         if rest_txt := await _fast_rest_fallback(tool_name, arguments):
             if "🛑" in rest_txt or "abstain" in rest_txt.lower():
+                if nearby := await _search_nearby_mcp(q_text, audience=str(arguments.get("audience") or "user")):
+                    return nearby
                 return "ไม่พบข้อมูลยืนยันในระบบ (Abstain): ห้ามเดาหรือแต่งข้อมูลเอง ให้แจ้งลูกค้าตรงๆ ว่ายังไม่มีข้อมูลยืนยันในระบบ แล้วชวนคุยต่ออย่างเป็นธรรมชาติ"
             _cache_put(cache_key, rest_txt)
             return rest_txt

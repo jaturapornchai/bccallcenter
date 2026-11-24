@@ -335,7 +335,8 @@ def test_incomplete_tail_and_phone_fallback_queries():
     scope = load_symbols({
         "_INCOMPLETE_TAIL_RE", "_is_incomplete_thai_tail", "_FOLLOWUP_START_RE",
         "_VAGUE_FOLLOWUP_RE", "_stt_ears_diverge", "_PHONE_INTENT_HINTS",
-        "_expand_phone_intent_queries", "_STANDALONE_TOPIC_RE", "_build_phone_fallback_queries", "BC_STT_PROMPT",
+        "_expand_phone_intent_queries", "_STANDALONE_TOPIC_RE", "_BOILERPLATE_CTX_RE",
+        "_extract_recent_topic", "_build_phone_fallback_queries", "BC_STT_PROMPT",
     })
     incomplete = scope["_is_incomplete_thai_tail"]
     fallback = scope["_build_phone_fallback_queries"]
@@ -635,6 +636,7 @@ def test_log_and_audio_6_improvements():
         "_STT_DOMAIN_FIX_RE", "_prefer_openthai_domain",
         "_URL_LINE_TTS_RULES", "_THAI_TERMS", "_TERM_RE", "_TERM_MAP", "_LETTER_TH", "_thai_pronounce",
         "_phone_grounding_numbers", "_NON_SEARCH_STRIP_RE", "_CB_INTENT_ONLY_RE", "_REAL_Q_OR_PRODUCT_RE",
+        "_CALL_META_ASK_RE", "_CLOSING_ONLY_RE", "_BOILERPLATE_CTX_RE", "_extract_recent_topic",
         "_is_non_search_phone_turn", "_FOLLOWUP_START_RE", "_VAGUE_FOLLOWUP_RE", "_stt_ears_diverge",
         "_PHONE_INTENT_HINTS", "_expand_phone_intent_queries", "_STANDALONE_TOPIC_RE", "_build_phone_fallback_queries",
         "FILLER_TEXT", "LEAD_PROMISE",
@@ -687,6 +689,115 @@ def test_log_and_audio_6_improvements():
     assert 'req.headers["next-action"]' in (ROOT / "server.mjs").read_text(encoding="utf-8")
 
 
+def test_abstain_nearby_fallback_zero_hallucination():
+    from brain_mirror import BrainVaultMirror
+
+    mirror = BrainVaultMirror("https://brain.bcsmethai.com/api/vault-pack", ttl_s=1800)
+    mirror.load_notes_payload(
+        {
+            "version": "2.3.0",
+            "syncCommit": "test",
+            "notes": [
+                {
+                    "slug": "sys-companybrain-briefing",
+                    "folder": "systems",
+                    "raw": "---\ntitle: ศูนย์แจ้งเตือนยามเช้า\ntags: [แจ้งเตือน]\nsources:\n  - secret/briefing.go:1\n---\n# ศูนย์แจ้งเตือนยามเช้า\n## 1. การ์ดสรุป 6 ด้าน\nรวมลูกหนี้เกินกำหนดชำระ บิลขายรอวางบิล และเจ้าหนี้ครบกำหนดใน 7 วัน",
+                },
+                {
+                    "slug": "howto-setup-branch-dept",
+                    "folder": "howto",
+                    "raw": "---\ntitle: ตั้งค่าสาขา สำนักงานใหญ่ แผนก\ntags: [สาขา]\n---\n# ตั้งค่าสาขา\n## 1. กำหนดรายละเอียดสาขา\nช่วยให้แยกยอดขาย ต้นทุน และกำไรขาดทุนตามสาขาได้ชัดเจนที่เมนู 1007",
+                },
+                {
+                    "slug": "rpt-sale-so",
+                    "folder": "reports",
+                    "raw": "---\ntitle: รายงานระบบขาย\ntags: [ยอดขาย]\n---\n# รายงานระบบขาย\n## 2. สรุปยอดขายและบิลขาย\nดูรายงานสรุปยอดขายสินค้าตามวันที่ ใบสั่งขาย และกำไรขั้นต้น",
+                },
+                {
+                    "slug": "sales-overview",
+                    "folder": "sales",
+                    "raw": "---\ntitle: ภาพรวมจุดเด่น BC Ai Account\ntags: [คลาวด์, นิติบุคคล]\n---\n# ภาพรวม BC Ai Account\n## รุ่น Enterprise\nทำงานบนเว็บ รองรับกลุ่มบริษัทหลายนิติบุคคล และ Private Cloud",
+                },
+                {
+                    "slug": "menu-cat-4-sales",
+                    "folder": "start",
+                    "raw": "---\ntitle: ผังเมนูหมวดขาย\ntags: [menu]\n---\n| **4052** | **4.23.3** | **รายงานสรุปยอดขายสินค้า-สรุปตามวันที่**<br>ขาย > รายงานสรุปยอดขาย | ทุกรุ่น (Starter+) |\n| **9063** | **9.24.8** | **งบกำไรขาดทุน (แยกสาขา)**<br>บัญชี > งบการเงิน | รุ่น Standard+ |\n",
+                },
+                {
+                    "slug": "api-secret-cloud-branch",
+                    "folder": "api",
+                    "raw": "---\ntitle: Internal Cloud SQL Schema\naudience: dev\nsources:\n  - backend/db.go:99\n---\nSELECT branch_id FROM ic_trans FOR แจ้งเตือน คลาวด์ ยอดขาย สาขา",
+                },
+            ],
+        },
+        etag='"nearby-test"',
+    )
+
+    n1 = mirror.search_nearby("มีเตือนถึงดีลเก็บเงินจ่ายเงินไหม", audience="user")
+    assert n1 and "sys-companybrain-briefing" in n1["slugs"]
+    assert "ic_trans" not in n1["text"] and "secret/" not in n1["text"] and "api-secret-cloud-branch" not in n1["slugs"]
+
+    n2 = mirror.search_nearby("อีกที่มีสาขาจะมีปัญหาเรื่องคราวกไหมเพราะเป็นนิติบุคคล", audience="user")
+    assert n2 and ("sales-overview" in n2["slugs"] or "howto-setup-branch-dept" in n2["slugs"])
+    assert "ic_trans" not in n2["text"]
+
+    n3 = mirror.search_nearby("ออกบินแล้วสรุปยอดขายแยกสาขาได้ไหม", audience="user")
+    assert n3 and ("rpt-sale-so" in n3["slugs"] or "howto-setup-branch-dept" in n3["slugs"])
+    assert "4052" in n3["menus"] or "9063" in n3["menus"]
+
+    for neg in ("ผมโทรหาคุณกี่รอบแล้วจำได้หรือเปล่า", "คุณสรุปให้หน่อยว่าผมเป็นคนนิสัยยังไง", "วันนี้อากาศดีไหม"):
+        assert mirror.search_nearby(neg, audience="user") is None, f"off-topic query must not match nearby note: {neg}"
+
+    # Verify mcp_tool Abstain path attaches nearby info while keeping strict Abstain guard
+    class StubClient:
+        def call(self, name, args):
+            return "🛑 Abstain — Insufficient Grounded Evidence in BC Brain"
+
+    scope = load_symbols(
+        {"LEGACY_BRAIN_TOOLS", "MENU_CODE_ASK", "_is_brain_abstain", "_mcp_nearby_fallback", "mcp_tool"},
+        extra_scope={"BRAIN_MIRROR": mirror},
+    )
+    qa_fn = scope["mcp_tool"]("bcbrain", StubClient(), "quick_answer")
+    _, res_txt = qa_fn(question="มีเตือนถึงดีลเก็บเงินจ่ายเงินไหม", audience="user")
+    assert scope["_is_brain_abstain"](res_txt) is True, "nearby fallback must keep Abstain marker so QA cache skips it"
+    assert "[ข้อมูลใกล้เคียงจากคลังความรู้ BC" in res_txt and "ศูนย์แจ้งเตือนยามเช้า" in res_txt and "ห้ามเดา" in res_txt
+    assert "ic_trans" not in res_txt
+
+    # Verify caller-meta skip, boilerplate context filter, and intent expanders
+    s2 = load_symbols({
+        "_NON_SEARCH_STRIP_RE", "_CB_INTENT_ONLY_RE", "_REAL_Q_OR_PRODUCT_RE",
+        "_CALL_META_ASK_RE", "_CLOSING_ONLY_RE", "_BOILERPLATE_CTX_RE",
+        "_extract_recent_topic", "_is_non_search_phone_turn",
+        "_FOLLOWUP_START_RE", "_VAGUE_FOLLOWUP_RE", "_stt_ears_diverge",
+        "_PHONE_INTENT_HINTS", "_expand_phone_intent_queries", "_STANDALONE_TOPIC_RE",
+        "_build_phone_fallback_queries", "TALK_WORDS",
+    })
+    assert s2["_is_non_search_phone_turn"]("ผมโทรหาคุณกี่รอบแล้วจำได้หรือเปล่า", "", []) is True
+    assert s2["_is_non_search_phone_turn"]("แล้วเราคุยอะไรกันมาบ้าง", "", []) is True
+    assert s2["_is_non_search_phone_turn"]("โอเคค่ะขอบคุณนะคะไม่มีอะไรแล้วครับ", "", []) is True
+    assert s2["_is_non_search_phone_turn"]("เบอร์โทรติดต่อบริษัทเบอร์อะไร", "", []) is False
+    assert s2["_is_non_search_phone_turn"]("โปรแกรมนี้มีรายงานสรุปยอดขายแยกสาขาไหม", "", []) is False
+
+    hist = [
+        {"role": "assistant", "content": "สวัสดีครับ ลุงจืด เจาร์วิสครับ ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์"},
+        {"role": "user", "content": "เรื่องสต็อกสินค้าและซีเรียลนัมเบอร์"},
+        {"role": "assistant", "content": "เรื่องนี้ผมยังไม่มีข้อมูลยืนยันในระบบครับ"},
+    ]
+    assert "ซีเรียล" in s2["_extract_recent_topic"](hist)
+    qs = s2["_build_phone_fallback_queries"]("แล้วดูยังไง", [], hist)
+    assert qs and "ซีเรียล" in qs[0] and "เจาร์วิสครับ" not in qs[0] and "ยังไม่มีข้อมูลยืนยัน" not in qs[0]
+
+    for phrase in ("เตือนถึงดีลเก็บเงินจ่ายเงิน", "มีสาขาอีกที่นึงปัญหาเรื่องคราวก", "ออกบินแล้วมาสรุปยอดขายแยกสาขา"):
+        assert s2["_expand_phone_intent_queries"](phrase), f"expected intent hint for {phrase!r}"
+
+    assert "ใกล้เคียง" in s2["TALK_WORDS"]
+    assert "ใกล้เคียง" in C.SYSTEM_PROMPT and "ใกล้เคียง" in C.PHONE_PROMPT
+    assert "BRAIN-NEARBY-FALLBACK" in SOURCE.read_text(encoding="utf-8")
+    assert "used_nearby_only" in SOURCE.read_text(encoding="utf-8")
+    assert "_search_nearby_mcp" in (ROOT / "livekit-voice-ai" / "tools" / "call_control.py").read_text(encoding="utf-8")
+    assert "ข้อมูลใกล้เคียง" in (ROOT / "livekit-voice-ai" / "llm" / "thai_llm.py").read_text(encoding="utf-8")
+
+
 TESTS = [
     test_caller_name_rejects_connectors_and_accepts_real_names,
     test_stt_stutter_detector_and_ear2_fallback,
@@ -702,6 +813,7 @@ TESTS = [
     test_callback_restraint_qa_cache_fast_chat_and_batch,
     test_vault_mirror_intent_expander_planner_and_ice_filter,
     test_log_and_audio_6_improvements,
+    test_abstain_nearby_fallback_zero_hallucination,
 ]
 
 

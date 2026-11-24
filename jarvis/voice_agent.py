@@ -1783,6 +1783,37 @@ def brain_media(server, client, args, found):
     return ([card] if media else []), json.dumps({**found, "count": len(items), "items": items}, ensure_ascii=False)
 
 
+def _mcp_nearby_fallback(client, question: str, audience: str = "user") -> dict | None:
+    """Fallback nearby note lookup via MCP search_brain + batch_read when RAM mirror is unavailable."""
+    q = " ".join(str(question or "").split())[:200]
+    if not q or client is None:
+        return None
+    aud = (audience or "user").strip() or "user"
+    try:
+        raw_hits = client.call("search_brain", {"query": q, "audience": aud, "limit": 3})
+        hits = [h for h in json.loads(raw_hits) if isinstance(h, dict) and h.get("slug") and h.get("score", 0) >= 35]
+        slugs = [str(h["slug"]) for h in hits[:2]]
+        if not slugs:
+            return None
+        batch_txt = client.call(
+            "batch_read",
+            {"slugs": slugs, "audience": aud, "query": q, "max_chars_per_note": 650},
+        )
+        if not batch_txt or _is_brain_abstain(batch_txt):
+            return None
+        return {
+            "text": (
+                "[ข้อมูลใกล้เคียงจากคลังความรู้ BC (ไม่ใช่คำตอบตรงเป๊ะ — เล่าเฉพาะข้อเท็จจริงที่มีอยู่จริงด้านล่าง ห้ามเดา ห้ามแต่งเติม)]\n\n"
+                + str(batch_txt)[:1600]
+            ),
+            "slugs": slugs,
+            "menus": [],
+            "top_score": float(hits[0].get("score", 0) or 0),
+        }
+    except Exception:
+        return None
+
+
 MENU_CODE_ASK = re.compile(r"(?:\b[1-9]\d{3}\b|\b\d+\.\d+(?:\.\d+)?\b|รหัสเมนู|เมนูไหน|เมนูอะไร|อยู่เมนู|หน้าจอไหน|เข้าตรงไหน)")
 
 
@@ -1819,7 +1850,40 @@ def mcp_tool(server, client, name):
                 if text is None:
                     raise
         if _is_brain_abstain(text):
-            return [], f"{text}\n(ระบบ: สมองคืน Abstain ไม่มีข้อมูลยืนยัน ห้ามเดาหรือแต่งคำตอบเอง ให้แจ้งตรงๆ ว่าไม่มีข้อมูลยืนยันในระบบ)"
+            nearby = None
+            if server == "bcbrain" and name in ("quick_answer", "batch_ask"):
+                q_text = str(args.get("question") or " ".join(args.get("questions") or [])).strip()
+                aud = (args.get("audience") or "user").strip() or "user"
+                if q_text:
+                    if mirror is not None and mirror.ready:
+                        nearby = mirror.search_nearby(
+                            q_text,
+                            audience=aud,
+                            limit_notes=2,
+                            limit_menus=4,
+                            max_chars_per_note=650,
+                        )
+                    if nearby is None:
+                        nearby = _mcp_nearby_fallback(client, q_text, audience=aud)
+            if nearby and nearby.get("text"):
+                log.info(
+                    "BRAIN-NEARBY-FALLBACK (%s): slugs=%s menus=%d score=%.1f",
+                    name,
+                    nearby.get("slugs"),
+                    len(nearby.get("menus") or ()),
+                    float(nearby.get("top_score") or 0.0),
+                )
+                return [], (
+                    f"{text}\n\n{nearby['text']}\n"
+                    "(ระบบ: สมองไม่พบคำตอบตรงเป๊ะ [Abstain] แต่ค้นพบข้อมูลใกล้เคียงที่มีอยู่จริงด้านบน "
+                    "ห้ามเดาและห้ามแต่งเติมเองเด็ดขาด ให้บอกลูกค้าสั้นๆ ตรงๆ ว่าส่วนที่ถามตรงๆ ยังไม่มีข้อมูลยืนยัน "
+                    "แต่ในระบบมีส่วนที่ใกล้เคียงคือ ... แล้วเล่าเฉพาะข้อเท็จจริงที่มีในข้อมูลใกล้เคียงด้านบนเท่านั้น ห้ามโมเมว่าทำได้ในส่วนที่ไม่ได้ระบุไว้)"
+                )
+            return [], (
+                f"{text}\n(ระบบ: สมองคืน Abstain และไม่พบข้อมูลใกล้เคียงในคลัง ห้ามเดาหรือแต่งคำตอบเองเด็ดขาด "
+                "ให้แจ้งตรงๆ ว่าเรื่องนี้ยังไม่มีข้อมูลยืนยันในระบบ — แต่หากลูกค้าถามเรื่องประวัติการโทร จำนวนครั้งที่โทร "
+                "ชื่อ หรือเบอร์โทรในสายนี้ ให้ตอบจากข้อมูลลูกค้าที่ระบบส่งให้ในรอบนี้ได้เลย)"
+            )
         if name == "search_brain":
             return brain_hits(server, text)
         if name in ("read_note", "quick_answer", "batch_read", "batch_ask"):
@@ -2405,6 +2469,7 @@ OWN_WORDS = "\n".join([
 # ได้ไหมครับ", "ขอโทษที่เข้าใจคลาดไป", "ได้ยินชัดครับ"): no product, offer, person, place or time word may go in here.
 # These shrink the new-word list only: in the judge's SOURCES they flipped small talk (A/B 2026-11-10: 3/5 -> 2/5)
 TALK_WORDS = ("หมายถึง ความหมาย เข้าใจ คลาด อธิบาย สะกด อีกครั้ง ซ้ำ เล่าเพิ่ม อีกนิด สั้นๆ ได้ยิน ชัด อ๋อ งั้น ไม่เจอ ไม่พบ ไม่มีข้อมูล รู้เรื่อง "
+              "ใกล้เคียง ประเด็น ส่วน "
               "เขียน บน จอ หน้าจอ ตาราง แสดง สรุป เปรียบเทียบ เทียบ ไล่ ทีละ บรรทัด แถว หัวข้อ รายการ ตรงๆ โดยตรง เฉพาะ ทั้งก้อน")
 ABOUT_ASK = "\nถ้าถูกถามว่าเป็นใครหรือทำอะไรได้ ให้ตอบว่า "  # the public prompt's last line: its self-description
 
@@ -2531,6 +2596,9 @@ _PHONE_INTENT_HINTS = (
     (re.compile(r"(?:ฟรี(?:ศูนย์|0)?บาท.*(?:ได้เงิน|กำไร|รายได้|ยังไง|ทำไม|ค่าใช้จ่าย)|Starter.*(?:ฟรี|จำกัด|ต่าง))", re.I), "ตารางราคาและแพ็กเกจ BC Ai Account 4 รุ่น Starter ฟรี 0 บาท เงื่อนไข"),
     (re.compile(r"(?:ส่วนลดรับ|ปัดเศษ|เศษสตางค์|ช่องส่วนลด.*จ่าย|จ่าย(?:ชำระ)?เจ้าหนี้.*ส่วนลด|ค้างไม่ตรงบิล)"), "จ่ายชำระหนี้ เจ้าหนี้ ส่วนลดรับ ปัดเศษ ยอดค้างไม่ตรงบิล วิธีบันทึก"),
     (re.compile(r"(?:สต(?:็อก|๊อก|อก|็อค|อค).*(?:ผิด|ไม่ตรง|เพี้ยน|ติดลบ)|ต้นทุน.*(?:ผิด|ไม่ตรง|เพี้ยน))"), "สต็อกไม่ตรง ต้นทุนผิด คำนวณยอดคงเหลือใหม่ เช็กสต็อก"),
+    (re.compile(r"(?:แจ้งเตือน|เตือน).*(?:ถึงกำหนด|ครบกำหนด|ถึกดีล|ถึงดีล|ถึงดิว|เก็บเงิน|จ่ายเงิน|ลูกหนี้|เจ้าหนี้)|(?:ถึกดีล|ถึงดีล|ถึงดิว).*(?:เก็บเงิน|จ่ายเงิน)"), "ศูนย์แจ้งเตือนยามเช้า 1001 ลูกหนี้เกินกำหนดชำระ เจ้าหนี้ครบกำหนด อายุหนี้"),
+    (re.compile(r"(?:(?:มี|หลาย|อีก)\s*สาขา|แยกสาขา).*(?:คลาวด์|คราว|คาว|cloud|นิติ|ยอดขาย|บิล|ออกบิน)|(?:คลาวด์|คราวก|บนคราว|เรื่องคราว|on.?cloud).*(?:สาขา|นิติ)", re.I), "ตั้งค่าสาขา 1007 แยกยอดขาย กำไรขาดทุนแยกสาขา 9063 Private Cloud หลายนิติบุคคล"),
+    (re.compile(r"(?:สรุป|แยก).*ยอดขาย.*สาขา|(?:ออกบิล|ออกบิน).*สรุป.*ยอดขาย"), "รายงานสรุปยอดขาย 4052 รายงานการขาย ตั้งค่าสาขา 1007 แยกยอดขายตามสาขา"),
 )
 
 
@@ -2620,12 +2688,35 @@ _NON_SEARCH_STRIP_RE = re.compile(
 _CB_INTENT_ONLY_RE = re.compile(r"(?:ฝากเบอร์|โทรกลับ|ติดต่อกลับ|คุยกับพนักงาน|ขอพบพนักงาน|เบอร์นี้|เบอร์เดิม|ใช่เบอร์นี้)")
 _REAL_Q_OR_PRODUCT_RE = re.compile(
     r"(?:ราคาเท่าไหร่|ราคา|กี่บาท|แพ็กเกจ|รุ่น|เวอร์ชัน|เวอร์ชั่น|ทำได้ไหม|ทำได้มั้ย|ยังไง|อย่างไร|เมนูไหน|คืออะไร|ต่างกัน|"
-    r"เว็บไซต์|เว็บไหน|เบอร์อะไร|ติดต่อที่ไหน|สินค้า|สต็อก|สต๊อก|บัญชี|ภาษี|รายงาน|ติดตั้ง|คลาวด์|ออฟฟิศ|ลองใช้|เดโม)"
+    r"เว็บไซต์|เว็บไหน|เบอร์อะไร|ติดต่อที่ไหน|สินค้า|สต็อก|สต๊อก|บัญชี|ภาษี|รายงาน|ติดตั้ง|คลาวด์|ออฟฟิศ|ลองใช้|เดโม|โปรแกรม|ระบบ)"
+)
+_CALL_META_ASK_RE = re.compile(
+    r"(?:โทร(?:หา|มา|เข้า).*กี่(?:รอบ|ครั้ง)|รวมแล้วโทรกี่ครั้ง|จำได้(?:ไหม|หรือเปล่า|รึเปล่า).*(?:กี่รอบ|กี่ครั้ง|คุยอะไร)|"
+    r"(?:เคย)?คุยอะไรกัน(?:มา)?บ้าง|เบอร์(?:ที่)?(?:ผม|ฉัน|หนู)?โทร(?:เข้า)?มา)"
+)
+_CLOSING_ONLY_RE = re.compile(r"(?:ไม่มีอะไรแล้ว|แค่นี้(?:แหละ|ก่อน)|ขอบคุณ(?:มาก)?(?:นะ)?(?:ครับ|ค่ะ|คะ).*ไม่มีอะไร)")
+_BOILERPLATE_CTX_RE = re.compile(
+    r"(?:เจาร์วิสครับ|เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์|ผู้ช่วยเอไอของบีซีคอลเซ็นเตอร์|ยินดีที่ได้คุยกันอีกครั้ง|"
+    r"ยังไม่มีข้อมูลยืนยัน|ไม่มีข้อมูลยืนยัน|สัญญาณไม่ค่อยชัด|ขอฟังอีกครั้ง|มีอะไรอยากรู้เพิ่ม|ขอบคุณที่โทรมานะครับ)"
 )
 
 
+def _extract_recent_topic(history: list[dict]) -> str:
+    """Return the most recent substantive non-greeting/non-abstain topic snippet from conversation history."""
+    for m in reversed((history or [])[-6:]):
+        c = (m.get("content") or "").partition(C.SCREEN_MARK)[0].strip()
+        if not c or c.startswith(("(", C.SILENT_MARK)) or len(c) < 6:
+            continue
+        if _BOILERPLATE_CTX_RE.search(c):
+            continue
+        if re.fullmatch(r"(?:สวัสดี|ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|อืม|ใช่|ใช่ค่ะ|ใช่ครับ|โอเค)[\s.,!?…]*", c):
+            continue
+        return c[:60]
+    return ""
+
+
 def _is_non_search_phone_turn(heard: str, detected_name: str, history: list[dict]) -> bool:
-    """True when phone turn is pure name introduction or callback confirmation/request needing no BC Brain search."""
+    """True when phone turn is pure name intro, callback confirm/request, caller-meta question, or closing."""
     s = (heard or "").strip()
     if not s:
         return False
@@ -2640,6 +2731,10 @@ def _is_non_search_phone_turn(heard: str, detected_name: str, history: list[dict
     if prev_asked_cb and re.search(r"(?:ใช่|เบอร์นี้|เบอร์เดิม|ฝากเบอร์|โทรกลับ|ติดต่อกลับ)", s):
         if not re.search(r"(?:ราคาเท่าไหร่|กี่บาท|ทำได้ไหม|ยังไง|อย่างไร|เมนูไหน|คืออะไร|ต่างกัน|เว็บไหน|เบอร์อะไร)", s):
             return True
+    if _CALL_META_ASK_RE.search(s) and not re.search(r"(?:ติดต่อ|บริษัท|ออฟฟิศ|ราคา|แพ็กเกจ|รุ่น|เวอร์ชัน|ทำได้ไหม|เมนูไหน|โปรแกรม|ระบบ|สต็อก|บัญชี|ภาษี|รายงาน|คลาวด์)", s):
+        return True
+    if _CLOSING_ONLY_RE.search(s) and not _REAL_Q_OR_PRODUCT_RE.search(s):
+        return True
     if _CB_INTENT_ONLY_RE.search(s) and not _REAL_Q_OR_PRODUCT_RE.search(s):
         return True
     return False
@@ -2655,11 +2750,7 @@ def _build_phone_fallback_queries(heard: str, alt_heard: list[str], history: lis
     ctx_anchor = ""
     standalone_topic = len(base) >= 14 and bool(_STANDALONE_TOPIC_RE.search(base))
     if history and not standalone_topic and (len(base) <= 20 or bool(_FOLLOWUP_START_RE.match(base)) or bool(_VAGUE_FOLLOWUP_RE.search(base))):
-        for m in reversed(history[-4:]):
-            c = (m.get("content") or "").partition(C.SCREEN_MARK)[0].strip()
-            if c and not c.startswith(("(", C.SILENT_MARK)):
-                ctx_anchor = c[:60]
-                break
+        ctx_anchor = _extract_recent_topic(history)
     queries: list[str] = []
     q_primary = f"{base} {ctx_anchor}".strip()[:120] if ctx_anchor and ctx_anchor not in base else base[:120]
     queries.append(q_primary)
@@ -3060,6 +3151,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
         # (ลุงจืด 2026-11-09 "ต้องแสดงตัวอย่างด้วยทุกครั้ง"). ponytail: one more boss round before the first word on
         # every BC answer; asked by how-words only, "แล้วต้นทุนแบบไฟโฟล่ะ" got no calc and every example row was cut
         read, query = False, ""
+        used_nearby_only = False
         if "web_search" in tools and LATEST_ASK.search(heard):  # changes daily: only a fresh search may answer it
             if on_phone() and (wait := _pick_wait_filler(active_lang)):
                 yield bot_out(wait[0], wait[1], lead=0.05, filler=True)
@@ -3067,7 +3159,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
         elif heard and (FAST_CHAT.match(heard.strip()) or MULTILANG_FAST_CHAT.match(heard.strip())):  # bare hello/thanks/hold: answer right away (~0.9 s faster, no wasted search)
             pass
         elif heard and on_phone() and _is_non_search_phone_turn(heard, detected_name, history):
-            pass  # name intro or pure callback confirm/request: answer directly with 0ms wait filler / 0 MCP call
+            pass  # name intro, caller-meta question, closing, or pure callback confirm/request: 0ms wait filler / 0 MCP call
         elif heard and not on_phone() and not stay_topic and (wording := search_words(history, heard))[1] and not was:  # off the topic, maybe misheard: ask, search nothing
             topic, new = wording[1]
             log.info("topic jump? %s -> %s", topic, new)  # the log watcher learns from these
@@ -3173,6 +3265,50 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                                 log.info("note on screen: %s", slugs[0])
                                 yield AdditionalOutputs({"kind": "panel", "text": note_panel(note, part)})
                 read = any(n in ("read_note", "batch_read") for n, _ in calls)
+            has_nearby = "[ข้อมูลใกล้เคียงจากคลังความรู้ BC" in " ".join(texts)
+            ctx_topic = _extract_recent_topic(history)
+            if abstained and not has_nearby and BRAIN_MIRROR.ready:
+                nearby_q = " ".join(x for x in (clean_q0 or heard, ctx_topic) if x).strip()
+                nearby = BRAIN_MIRROR.search_nearby(
+                    nearby_q,
+                    audience=zone.get("audience", "user"),
+                    limit_notes=2,
+                    limit_menus=4,
+                    max_chars_per_note=650,
+                )
+                if nearby and nearby.get("text"):
+                    log.info(
+                        "BRAIN-NEARBY-FALLBACK (ctx): slugs=%s menus=%d score=%.1f",
+                        nearby.get("slugs"),
+                        len(nearby.get("menus") or ()),
+                        float(nearby.get("top_score") or 0.0),
+                    )
+                    calls.append(("nearby_mirror", {}))
+                    texts.append(nearby["text"])
+                    has_nearby = True
+            elif not abstained and BRAIN_MIRROR.ready and zone.get("audience") == "user" and "confidence=high" not in (qa_text or "").lower():
+                returned_slugs = set(re.findall(r"slug:\s*([\w.-]+)", " ".join(texts)))
+                sup_q = " ".join(x for x in (heard, ctx_topic if len(heard) <= 45 else "") if x).strip()
+                nearby = BRAIN_MIRROR.search_nearby(
+                    sup_q,
+                    audience="user",
+                    limit_notes=2,
+                    limit_menus=3,
+                    max_chars_per_note=450,
+                    exclude_slugs=returned_slugs,
+                    min_score=5.0,
+                )
+                if nearby and nearby.get("text"):
+                    log.info(
+                        "BRAIN-NEARBY-SUPPLEMENT: slugs=%s menus=%d score=%.1f",
+                        nearby.get("slugs"),
+                        len(nearby.get("menus") or ()),
+                        float(nearby.get("top_score") or 0.0),
+                    )
+                    calls.append(("nearby_mirror", {}))
+                    texts.append(nearby["text"])
+                    has_nearby = True
+            used_nearby_only = abstained and has_nearby
             found = " ".join(f"[{n}] {t}" for (n, _), t in zip(calls, texts))
             prev_kb = any(m["role"] == "assistant" and C.SCREEN_MARK in m["content"] for m in history[-2:])
             sample_hint = (
@@ -3184,14 +3320,27 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                  "(ตารางคำนวณ แถบ [การ์ด]+กล่องเคส > ผังโครงสร้างย่อหน้า - /   - กล่องเคส >+[ขั้นตอน] หรือกรอบ ```sql+> พารามิเตอร์) "
                  "ห้ามครอบผังย่อหน้าด้วย ``` และห้ามใส่ตัวเลขสองหลักขึ้นไปหรือวันที่สมมติเองโดยไม่ผ่าน calc ถ้าไม่ได้เรียก calc ให้ใช้รหัสติดตัวอักษรเช่น WH01, A01, SKU01)")
             )
-            reuse_hint = (
-                "สมองคืนค่า Abstain (ไม่มีข้อมูลยืนยันในระบบ) ห้ามเดาหรือแต่งคำตอบเองเด็ดขาด ให้แจ้งลูกค้าตรงๆ ว่ายังไม่มีข้อมูลยืนยันในระบบ แล้วชวนคุยต่ออย่างเป็นธรรมชาติ ไม่ต้องรีบถามเรื่องโทรกลับทุกครั้ง (เสนอให้ฝากเบอร์โทรกลับเฉพาะเมื่อจำเป็นจริงๆ ลูกค้าขอเอง หรือเป็นบีซีแอคเคาท์เวอร์ชันเก่าเท่านั้น) "
-                if abstained else
-                ("ผลค้นจาก quick_answer/batch_ask ด้านบนมีข้อมูลพร้อมแล้ว ให้ใช้ตอบทันทีได้เลย ห้ามเรียก quick_answer ซ้ำด้วยคำถามเดิม "
-                 "เรียก lookup_menu หรือ batch_read เพิ่มเฉพาะเมื่อข้อมูลด้านบนยังขาดรหัสเมนูหรือรายละเอียดสำคัญจริงๆ เท่านั้น "
-                 if read else
-                 "ถ้าไม่มีส่วนไหนตรง ให้สั่งลูกทีมค้นสมองในรอบเดียวก่อน (quick_answer / batch_ask / lookup_menu / batch_read หรือ web_search) ")
-            )
+            if abstained and has_nearby:
+                reuse_hint = (
+                    "สมองไม่พบคำตอบตรงเป๊ะ [Abstain] แต่มี [ข้อมูลใกล้เคียงจากคลังความรู้ BC] ที่มีอยู่จริงด้านบนแล้ว "
+                    "ห้ามเดาและห้ามแต่งเติมเองเด็ดขาด ให้บอกลูกค้าสั้นๆ ตรงๆ ว่าส่วนที่ถามตรงๆ ยังไม่มีข้อมูลยืนยัน "
+                    "แล้วเล่าเฉพาะข้อเท็จจริงจากข้อมูลใกล้เคียงด้านบน (ชื่อฟีเจอร์ รายงาน หรือรหัสเมนู) เพื่อช่วยลูกค้าต่อ "
+                    "ห้ามโมเมว่าทำได้ในส่วนที่ไม่ได้เขียนไว้ และไม่ต้องรีบถามเรื่องโทรกลับทุกครั้ง "
+                )
+            elif abstained:
+                reuse_hint = (
+                    "สมองคืนค่า Abstain (ไม่มีข้อมูลยืนยันในระบบ) ห้ามเดาหรือแต่งคำตอบเองเด็ดขาด ให้แจ้งลูกค้าตรงๆ ว่ายังไม่มีข้อมูลยืนยันในระบบ แล้วชวนคุยต่ออย่างเป็นธรรมชาติ ไม่ต้องรีบถามเรื่องโทรกลับทุกครั้ง (เสนอให้ฝากเบอร์โทรกลับเฉพาะเมื่อจำเป็นจริงๆ ลูกค้าขอเอง หรือเป็นบีซีแอคเคาท์เวอร์ชันเก่าเท่านั้น) "
+                )
+            elif read:
+                reuse_hint = (
+                    "ผลค้นจาก quick_answer/batch_ask ด้านบนมีข้อมูลพร้อมแล้ว ให้ใช้ตอบทันทีได้เลย ห้ามเรียก quick_answer ซ้ำด้วยคำถามเดิม "
+                    "และหากผลค้นหลักยังไม่ตอบตรงคำถามเป๊ะแต่มีส่วน [ข้อมูลใกล้เคียงจากคลังความรู้ BC ...] ให้บอกตรงๆ ว่าประเด็นตรงๆ ยังไม่มีข้อมูลยืนยัน แล้วเล่าเฉพาะข้อมูลใกล้เคียงที่มีจริงด้านบน ห้ามเดา ห้ามแต่งเติม "
+                    "เรียก lookup_menu หรือ batch_read เพิ่มเฉพาะเมื่อข้อมูลด้านบนยังขาดรหัสเมนูหรือรายละเอียดสำคัญจริงๆ เท่านั้น "
+                )
+            else:
+                reuse_hint = (
+                    "ถ้าไม่มีส่วนไหนตรง ให้สั่งลูกทีมค้นสมองในรอบเดียวก่อน (quick_answer / batch_ask / lookup_menu / batch_read หรือ web_search) "
+                )
             now += (f"\n(ระบบ: คำพูดนี้น่าจะหมายถึง {query} ลูกทีม Swarm ค้นสมองให้แล้ว {found} "
                     "ใช้เฉพาะข้อมูลที่มีอยู่จริงในผลค้นสมองนี้เท่านั้น ห้ามเดาหรือแต่งเติมเองเด็ดขาด เวลาพูดให้คุยเป็นกันเองเหมือนเพื่อนโดยไม่ต้องพูดคำว่า จากคลังความรู้บีซี "
                     + reuse_hint +
@@ -3394,6 +3543,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 and not turn.get("cut")
                 and not used_lead
                 and not locals().get("abstained")
+                and not locals().get("used_nearby_only")
                 and not _FOLLOWUP_START_RE.match((heard or "").strip())
                 and said
                 and said[0] not in (CUT_ALL, SCREEN_ONLY, BRAIN_DOWN, BRAIN_DOWN_BODY)
