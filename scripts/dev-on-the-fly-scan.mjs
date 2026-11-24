@@ -13,6 +13,7 @@
  *   --unlock                  release the lock without recording anything (aborted run)
  */
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
@@ -103,25 +104,32 @@ function jarvisLogLines(fromMs, toMs) {
 /** State of every line on the running server, or null when it cannot be asked (down, or not answering in 3 s). */
 function liveLineStates() {
   return new Promise((resolve) => {
-    let socket = null;
-    const finish = (states) => {
-      clearTimeout(timer);
-      socket?.close();
-      resolve(states);
+    let settled = false;
+    const finish = (val) => {
+      if (settled) return;
+      settled = true;
+      resolve(val);
     };
-    const timer = setTimeout(() => finish(null), 3000);
-    try {
-      socket = new WebSocket("ws://127.0.0.1:3000/ws/sip"); // the port restart-services.ps1 restarts
-    } catch {
-      return finish(null);
-    }
-    socket.onerror = () => finish(null);
-    socket.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data);
-        if (message.type === "state") finish((message.data?.lines || []).map((line) => line.state));
-      } catch {}
-    };
+    const req = http.get({ hostname: "127.0.0.1", port: 3000, path: "/api/internal/idle", agent: false }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        try {
+          if (res.statusCode !== 200) return finish(null);
+          const data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          const active = Number(data?.activeCalls);
+          if (!Number.isFinite(active) || active < 0) return finish(null);
+          finish(Array.from({ length: active }, () => "connected"));
+        } catch {
+          finish(null);
+        }
+      });
+    });
+    req.setTimeout(3000, () => {
+      try { req.destroy(); } catch {}
+      finish(null);
+    });
+    req.on("error", () => finish(null));
   });
 }
 

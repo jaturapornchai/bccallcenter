@@ -248,7 +248,7 @@ export function LineCard({
                 <span>{statusLabel}</span>
               </span>
 
-              {(isConnected || isHeld) && isActiveAudio && (
+              {!line.aiActive && (isConnected || isHeld) && isActiveAudio && (
                 <span className="cc-chip tone-live">
                   <Headphones className="h-3 w-3" />
                   <span>กำลังฟังสายนี้</span>
@@ -433,7 +433,7 @@ export function LineCard({
                 </button>
               )}
 
-              {!isActiveAudio && (
+              {!line.aiActive && !isActiveAudio && (
                 <button type="button" onClick={() => onSelectAudio(line.lineId)} className="cc-btn cc-btn--tone tone-live">
                   <Headphones className="h-3.5 w-3.5" />
                   <span>ฟังเสียง</span>

@@ -7,8 +7,6 @@ import {
   buildClearSessionCookie,
   buildSessionSetCookie,
   createSessionToken,
-  sanitizeStateForViewer,
-  sanitizeTicketForViewer,
   verifyGoogleIdToken,
   verifySessionFromCookieHeader,
 } from "./lib/auth.mjs";
@@ -80,21 +78,49 @@ function isRequestHttps(req) {
   return proto === "https" || Boolean(req.socket?.encrypted);
 }
 
+function isDirectLoopback(req) {
+  const addr = String(req.socket?.remoteAddress || "");
+  const isLoop = addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
+  const host = String(req.headers.host || "").toLowerCase();
+  const localHost =
+    host.startsWith("127.0.0.1:") ||
+    host.startsWith("localhost:") ||
+    host === "127.0.0.1" ||
+    host === "localhost";
+  const hasProxy = Boolean(
+    req.headers["x-forwarded-for"] ||
+    req.headers["x-forwarded-proto"] ||
+    req.headers["x-forwarded-host"] ||
+    req.headers["x-real-ip"]
+  );
+  return isLoop && localHost && !hasProxy;
+}
+
 app.prepare().then(async () => {
   await sip.start();
 
   const server = http.createServer(async (req, res) => {
     const urlPath = (req.url || "").split("?")[0];
 
-    // --- Auth Endpoints (Google Sign-In + HttpOnly Session Cookie) ---
+    // --- Internal Loopback-Only Idle Check (no PII, blocked from public/proxy requests) ---
+    if (urlPath === "/api/internal/idle" && req.method === "GET") {
+      if (!isDirectLoopback(req)) {
+        return sendJson(res, 403, { ok: false, error: "Forbidden" });
+      }
+      const activeCalls = sip.lines.filter((l) => l.state !== "idle").length;
+      return sendJson(res, 200, { idle: activeCalls === 0, activeCalls });
+    }
+
+    // --- Auth Endpoints (Strict Single-Admin Google Sign-In + HttpOnly Session Cookie) ---
     if (urlPath === "/api/auth/me" && req.method === "GET") {
       const session = verifySessionFromCookieHeader(req.headers.cookie);
+      const isAdmin = Boolean(session?.isAdmin);
       return sendJson(res, 200, {
-        authenticated: Boolean(session),
-        isAdmin: Boolean(session?.isAdmin),
-        email: session?.email || null,
-        name: session?.name || null,
-        picture: session?.picture || null,
+        authenticated: isAdmin,
+        isAdmin,
+        email: isAdmin ? session.email : null,
+        name: isAdmin ? session.name : null,
+        picture: isAdmin ? session.picture : null,
         googleClientId: process.env.GOOGLE_CLIENT_ID || "",
       });
     }
@@ -103,6 +129,20 @@ app.prepare().then(async () => {
       try {
         const body = await readJsonBody(req);
         const user = await verifyGoogleIdToken(body.credential);
+        if (!user.isAdmin) {
+          const clearCookie = buildClearSessionCookie(isRequestHttps(req));
+          return sendJson(
+            res,
+            403,
+            {
+              ok: false,
+              authenticated: false,
+              isAdmin: false,
+              error: "บัญชีนี้ไม่มีสิทธิ์เข้าใช้งานระบบ (สงวนสิทธิ์เฉพาะผู้ดูแลระบบเท่านั้น)",
+            },
+            { "Set-Cookie": clearCookie }
+          );
+        }
         const token = createSessionToken(user);
         const cookie = buildSessionSetCookie(token, isRequestHttps(req));
         return sendJson(
@@ -111,13 +151,11 @@ app.prepare().then(async () => {
           {
             ok: true,
             authenticated: true,
-            isAdmin: user.isAdmin,
+            isAdmin: true,
             email: user.email,
             name: user.name,
             picture: user.picture,
-            message: user.isAdmin
-              ? "เข้าสู่ระบบผู้ดูแลสำเร็จ"
-              : "เข้าสู่ระบบแล้ว แต่บัญชีนี้ไม่มีสิทธิ์ผู้ดูแล (โหมดผู้ชมดูได้อย่างเดียว)",
+            message: "เข้าสู่ระบบผู้ดูแลสำเร็จ",
           },
           { "Set-Cookie": cookie }
         );
@@ -169,9 +207,12 @@ app.prepare().then(async () => {
       return;
     }
 
-    // --- 1-Click Teach AI (Admin-Verified FAQ -> J.A.R.V.I.S QA Cache) ---
+    // --- 1-Click Teach AI (Strict Admin Only -> J.A.R.V.I.S QA Cache) ---
     if (urlPath === "/api/teach") {
       const session = verifySessionFromCookieHeader(req.headers.cookie);
+      if (!session?.isAdmin) {
+        return sendJson(res, 403, { ok: false, error: "สงวนสิทธิ์เฉพาะผู้ดูแลระบบเท่านั้น" });
+      }
       if (req.method === "GET") {
         try {
           const r = await fetch(`${sip.jarvisUrl}/teach`, { signal: AbortSignal.timeout(4000) });
@@ -180,9 +221,6 @@ app.prepare().then(async () => {
         } catch {
           return sendJson(res, 200, { ok: false, entries: [] });
         }
-      }
-      if (!session?.isAdmin) {
-        return sendJson(res, 403, { ok: false, error: "ต้องเข้าสู่ระบบผู้ดูแลก่อนสอนหรือลบคำตอบ AI" });
       }
       if (req.method === "POST") {
         try {
@@ -220,8 +258,12 @@ app.prepare().then(async () => {
       }
     }
 
-    // --- Analytics & Cache ROI Endpoint (Safe Aggregate Data, No PII) ---
+    // --- Analytics & Cache ROI Endpoint (Strict Admin Only) ---
     if (urlPath === "/api/analytics" && req.method === "GET") {
+      const session = verifySessionFromCookieHeader(req.headers.cookie);
+      if (!session?.isAdmin) {
+        return sendJson(res, 403, { ok: false, error: "สงวนสิทธิ์เฉพาะผู้ดูแลระบบเท่านั้น" });
+      }
       const allLogs = sip.memory.listCallLogs(300);
       const crmState = sip.crm.publicState();
       const now = new Date();
@@ -343,7 +385,14 @@ app.prepare().then(async () => {
   server.on("upgrade", (req, socket, head) => {
     const urlPath = (req.url || "").split("?")[0];
     if (urlPath === "/ws/sip") {
+      const session = verifySessionFromCookieHeader(req.headers.cookie);
+      if (!session?.isAdmin) {
+        socket.write("HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nUnauthorized");
+        socket.destroy();
+        return;
+      }
       wss.handleUpgrade(req, socket, head, (ws) => {
+        ws.adminSession = session;
         wss.emit("connection", ws, req);
       });
     } else {
@@ -353,14 +402,9 @@ app.prepare().then(async () => {
 
   function broadcastState(state) {
     const adminPayload = JSON.stringify({ type: "state", data: state, readOnly: false });
-    const viewerPayload = JSON.stringify({
-      type: "state",
-      data: sanitizeStateForViewer(state),
-      readOnly: true,
-    });
     for (const client of wss.clients) {
-      if (client.readyState === 1) {
-        client.send(client.isAdmin ? adminPayload : viewerPayload);
+      if (client.readyState === 1 && client.isAdmin) {
+        client.send(adminPayload);
       }
     }
   }
@@ -368,15 +412,10 @@ app.prepare().then(async () => {
   sip.on("state", broadcastState);
 
   sip.on("callback_ticket", (ticket) => {
-    const publicTrunk = sip.publicState().trunk?.user || "";
     const adminPayload = JSON.stringify({ type: "callback_ticket", ticket });
-    const viewerPayload = JSON.stringify({
-      type: "callback_ticket",
-      ticket: sanitizeTicketForViewer(ticket, publicTrunk),
-    });
     for (const client of wss.clients) {
-      if (client.readyState === 1) {
-        client.send(client.isAdmin ? adminPayload : viewerPayload);
+      if (client.readyState === 1 && client.isAdmin) {
+        client.send(adminPayload);
       }
     }
   });
@@ -385,7 +424,7 @@ app.prepare().then(async () => {
     if (wss.clients.size === 0) return;
     const payload = JSON.stringify({ type: "meter", levels, ts: Date.now() });
     for (const client of wss.clients) {
-      if (client.readyState === 1) {
+      if (client.readyState === 1 && client.isAdmin) {
         client.send(payload);
       }
     }
@@ -409,12 +448,13 @@ app.prepare().then(async () => {
   wsHeartbeatTimer.unref?.();
 
   sip.on("rtp", ({ lineId, payload }) => {
-    if (sip.activeAudioLine !== lineId) return;
+    const line = sip.lines[lineId - 1];
+    if (!line || line.aiActive || sip.activeAudioLine !== lineId) return;
     const frame = Buffer.allocUnsafe(1 + payload.length);
     frame[0] = lineId & 0xff;
     payload.copy(frame, 1);
     for (const client of wss.clients) {
-      // Only authenticated admin can listen to live audio stream
+      // Only authenticated admin can listen to live audio stream on non-AI human calls
       if (client.readyState === 1 && client.isAdmin) {
         client.send(frame, { binary: true });
       }
@@ -422,10 +462,14 @@ app.prepare().then(async () => {
   });
 
   wss.on("connection", (ws, req) => {
-    const session = verifySessionFromCookieHeader(req.headers.cookie);
-    ws.isAdmin = Boolean(session?.isAdmin);
-    ws.userEmail = session?.email || null;
-    ws.userName = session?.name || session?.email || "ผู้ดูแลระบบ";
+    const session = ws.adminSession || verifySessionFromCookieHeader(req.headers.cookie);
+    if (!session?.isAdmin) {
+      try { ws.close(4401, "Unauthorized"); } catch {}
+      return;
+    }
+    ws.isAdmin = true;
+    ws.userEmail = session.email || null;
+    ws.userName = session.name || session.email || "ผู้ดูแลระบบ";
     ws.isAlive = true;
     ws.on("pong", () => {
       ws.isAlive = true;
@@ -435,15 +479,15 @@ app.prepare().then(async () => {
     ws.send(
       JSON.stringify({
         type: "state",
-        data: ws.isAdmin ? current : sanitizeStateForViewer(current),
-        readOnly: !ws.isAdmin,
+        data: current,
+        readOnly: false,
         serverTime: Date.now(),
       })
     );
 
     ws.on("message", async (data, isBinary) => {
       ws.isAlive = true;
-      // Allow lightweight ping/sync from all connected viewers for true realtime monitoring
+      if (!ws.isAdmin) return;
       if (!isBinary) {
         try {
           const probe = JSON.parse(data.toString("utf8"));
@@ -456,27 +500,14 @@ app.prepare().then(async () => {
             ws.send(
               JSON.stringify({
                 type: "state",
-                data: ws.isAdmin ? snap : sanitizeStateForViewer(snap),
-                readOnly: !ws.isAdmin,
+                data: snap,
+                readOnly: false,
                 serverTime: Date.now(),
               })
             );
             return;
           }
         } catch {}
-      }
-
-      // Strict server-side read-only enforcement for non-admin viewers
-      if (!ws.isAdmin) {
-        if (!isBinary) {
-          ws.send(
-            JSON.stringify({
-              type: "error",
-              message: "โหมดผู้ชม (ดูได้อย่างเดียว) กรุณาเข้าสู่ระบบผู้ดูแลด้วย Google ก่อนดำเนินการ",
-            })
-          );
-        }
-        return;
       }
 
       if (isBinary) {
@@ -492,7 +523,7 @@ app.prepare().then(async () => {
         const msg = JSON.parse(data.toString("utf8"));
         switch (msg.type) {
           case "answer":
-            await sip.answer(Number(msg.lineId));
+            await sip.answer(Number(msg.lineId), { enableWebAudio: true });
             break;
           case "reject":
             sip.reject(Number(msg.lineId));

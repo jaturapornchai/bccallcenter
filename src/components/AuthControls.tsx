@@ -16,6 +16,7 @@ export interface AuthState {
 interface AuthControlsProps {
   auth: AuthState;
   isDark: boolean;
+  compact?: boolean;
   onGoogleCredential: (credential: string) => void;
   onLogout: () => void;
 }
@@ -46,7 +47,7 @@ declare global {
   }
 }
 
-export function AuthControls({ auth, isDark, onGoogleCredential, onLogout }: AuthControlsProps) {
+export function AuthControls({ auth, isDark, compact = true, onGoogleCredential, onLogout }: AuthControlsProps) {
   const btnRef = useRef<HTMLDivElement | null>(null);
   const cbRef = useRef(onGoogleCredential);
   cbRef.current = onGoogleCredential;
@@ -66,7 +67,7 @@ export function AuthControls({ auth, isDark, onGoogleCredential, onLogout }: Aut
       });
       window.google.accounts.id.renderButton(btnRef.current, {
         theme: isDark ? "filled_black" : "outline",
-        size: "medium",
+        size: compact ? "medium" : "large",
         shape: "pill",
         text: "signin_with",
         locale: "th",
@@ -99,7 +100,7 @@ export function AuthControls({ auth, isDark, onGoogleCredential, onLogout }: Aut
     return () => {
       cancelled = true;
     };
-  }, [auth.loaded, auth.isAdmin, auth.googleClientId, isDark]);
+  }, [auth.loaded, auth.isAdmin, auth.googleClientId, isDark, compact]);
 
   if (!auth.loaded) return null;
 
@@ -124,18 +125,14 @@ export function AuthControls({ auth, isDark, onGoogleCredential, onLogout }: Aut
   }
 
   return (
-    <div className="inline-flex flex-wrap items-center gap-2">
-      <span className="cc-chip tone-held h-9 rounded-xl px-3">
-        <Lock className="h-3.5 w-3.5" />
-        <span>{auth.authenticated ? `ดูอย่างเดียว (${auth.email})` : "โหมดผู้ชม (ดูอย่างเดียว)"}</span>
-      </span>
-      {auth.authenticated && (
-        <button type="button" onClick={onLogout} className="cc-btn h-9 gap-1.5" title="ออกจากระบบ">
-          <LogOut className="h-3.5 w-3.5" />
-          <span>ออก</span>
-        </button>
+    <div className={`inline-flex flex-wrap items-center justify-center gap-2.5 ${compact ? "" : "flex-col"}`}>
+      {compact && (
+        <span className="cc-chip tone-held h-9 rounded-xl px-3">
+          <Lock className="h-3.5 w-3.5" />
+          <span>สงวนสิทธิ์ผู้ดูแลระบบ</span>
+        </span>
       )}
-      {auth.googleClientId && <div ref={btnRef} className="inline-flex items-center" />}
+      {auth.googleClientId && <div ref={btnRef} className="inline-flex min-h-[40px] items-center justify-center" />}
     </div>
   );
 }

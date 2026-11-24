@@ -137,6 +137,13 @@ export default function ConsolePage() {
   const isReadOnlyRef = useRef(isReadOnly);
   const pendingSpokenTicketRef = useRef<CrmTicket | null>(null);
   const repeatCountsRef = useRef<Map<string, number>>(new Map());
+  const linesRef = useRef<SipLine[]>(state.lines);
+  const activeAudioLineRef = useRef<number | null>(state.activeAudioLine);
+
+  useEffect(() => {
+    linesRef.current = state.lines;
+    activeAudioLineRef.current = state.activeAudioLine;
+  }, [state.lines, state.activeAudioLine]);
 
   useEffect(() => {
     voiceAlertEnabledRef.current = voiceAlertEnabled;
@@ -212,7 +219,7 @@ export default function ConsolePage() {
         name: data.name || null,
         picture: data.picture || null,
       }));
-      setToast(data.message || (data.isAdmin ? "เข้าสู่ระบบผู้ดูแลสำเร็จ" : "เข้าสู่ระบบในโหมดผู้ชม"));
+      setToast(data.message || "เข้าสู่ระบบผู้ดูแลสำเร็จ");
       setWsEpoch((v) => v + 1);
     } catch {
       setToast("ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ยืนยันตัวตนได้");
@@ -233,9 +240,14 @@ export default function ConsolePage() {
       picture: null,
     }));
     setWsReadOnly(true);
+    setState(INITIAL_STATE);
+    setMeters({});
+    setSelectedLogId(null);
     setSelectedCallerPhone(null);
     setCrmFocusPhone(null);
-    setToast("ออกจากระบบแล้ว — สลับกลับเป็นโหมดผู้ชม (ดูได้อย่างเดียว)");
+    stopTicketSpeech();
+    audioRef.current?.stopRingtone();
+    setToast("ออกจากระบบผู้ดูแลแล้ว");
     setWsEpoch((v) => v + 1);
   }, []);
 
@@ -281,6 +293,12 @@ export default function ConsolePage() {
   }, []);
 
   useEffect(() => {
+    if (!auth.loaded || !auth.isAdmin) {
+      setWsConnected(false);
+      setWsLatencyMs(null);
+      setMeters({});
+      return;
+    }
     const bridge = new AudioBridge();
     audioRef.current = bridge;
 
@@ -331,7 +349,13 @@ export default function ConsolePage() {
         lastActivityAt = Date.now();
         if (ev.data instanceof ArrayBuffer) {
           const bytes = new Uint8Array(ev.data);
-          if (bytes.length > 1) bridge.playIncomingPcmu(bytes.subarray(1));
+          if (bytes.length > 1) {
+            const lineId = bytes[0];
+            const line = linesRef.current.find((l) => l.lineId === lineId);
+            if (line && !line.aiActive && line.state === "connected" && activeAudioLineRef.current === lineId) {
+              bridge.playIncomingPcmu(bytes.subarray(1));
+            }
+          }
           return;
         }
         try {
@@ -402,22 +426,18 @@ export default function ConsolePage() {
       wsRef.current?.close();
       bridge.destroy();
     };
-  }, [wsEpoch, announceCallbackTicket]);
+  }, [auth.loaded, auth.isAdmin, wsEpoch, announceCallbackTicket]);
 
   useEffect(() => {
     const bridge = audioRef.current;
     if (!bridge) return;
+    bridge.stopRingtone();
     if (isReadOnly) {
       bridge.setActiveLine(null);
-      bridge.stopRingtone();
       return;
     }
     const activeLine = state.lines.find((l) => l.lineId === state.activeAudioLine);
     bridge.setActiveLine(activeLine && !activeLine.aiActive ? activeLine.lineId : null);
-
-    const hasIncoming = !state.autoAnswerAi && state.lines.some((l) => l.state === "ringing_in");
-    if (hasIncoming) bridge.startRingtone();
-    else bridge.stopRingtone();
   }, [state, isReadOnly]);
 
   useEffect(() => {
@@ -590,6 +610,84 @@ export default function ConsolePage() {
   const trunkOnline = state.trunk.status === "registered" && wsConnected;
   const trunkTone = trunkOnline ? "tone-in" : state.trunk.status === "error" ? "tone-danger" : "tone-held";
   const clock = new Date(nowMs).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  if (!auth.loaded) {
+    return (
+      <div data-theme={theme} className="cc-root relative flex min-h-screen items-center justify-center px-4">
+        <div className="cc-ambient" aria-hidden="true" />
+        <div className="cc-grid-bg" aria-hidden="true" />
+        <div className="cc-scanline" aria-hidden="true" />
+        <div className="cc-panel relative flex items-center gap-3 px-6 py-4 text-sm font-medium cc-text">
+          <Lock className="h-4 w-4 animate-pulse" />
+          <span>กำลังตรวจสอบสิทธิ์ผู้ดูแลระบบ...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!auth.isAdmin) {
+    return (
+      <div data-theme={theme} className="cc-root relative flex min-h-screen flex-col items-center justify-center px-4 py-10">
+        <div className="cc-ambient" aria-hidden="true" />
+        <div className="cc-grid-bg" aria-hidden="true" />
+        <div className="cc-scanline" aria-hidden="true" />
+
+        <div className="fixed right-4 top-4 z-10">
+          <button
+            type="button"
+            onClick={toggleTheme}
+            className="cc-btn h-9"
+            title={isDark ? "สลับเป็นโหมดสว่าง" : "สลับเป็นโหมดมืด"}
+          >
+            {isDark ? <Sun className="h-3.5 w-3.5 text-amber-300" /> : <Moon className="h-3.5 w-3.5 text-indigo-600" />}
+            <span>{isDark ? "โหมดสว่าง" : "โหมดมืด"}</span>
+          </button>
+        </div>
+
+        <main className="cc-panel relative w-full max-w-md space-y-5 p-7 text-center">
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-[var(--tone-line)] bg-[var(--tone-soft)] tone-in">
+            <ShieldCheck className="h-7 w-7 cc-ink" />
+          </div>
+
+          <div className="space-y-2">
+            <h1 className="text-xl font-bold tracking-tight cc-text">ระบบ BC Call Center</h1>
+            <p className="text-xs leading-relaxed cc-muted">
+              ระบบนี้เป็นข้อมูลความลับ สงวนสิทธิ์เฉพาะผู้ดูแลระบบที่ได้รับอนุญาตเท่านั้น กรุณาเข้าสู่ระบบด้วยบัญชี Google ผู้ดูแล
+            </p>
+          </div>
+
+          {toast && (
+            <div
+              role="alert"
+              className={`cc-banner px-3.5 py-2.5 text-left ${
+                toast.includes("ไม่มีสิทธิ์") || toast.includes("ไม่สำเร็จ") || toast.includes("ไม่สามารถ")
+                  ? "tone-danger"
+                  : "tone-held"
+              }`}
+            >
+              <TriangleAlert className="h-4 w-4 shrink-0" />
+              <span>{toast}</span>
+            </div>
+          )}
+
+          <div className="flex justify-center pt-1">
+            <AuthControls
+              auth={auth}
+              isDark={isDark}
+              compact={false}
+              onGoogleCredential={handleGoogleCredential}
+              onLogout={handleLogout}
+            />
+          </div>
+
+          <p className="text-[11px] cc-dim">
+            <Lock className="mr-1 inline h-3 w-3 align-text-bottom" />
+            <span>ปิดเสียงโทรศัพท์แบบเรียลไทม์ • ปกป้องข้อมูลลูกค้าและการสนทนาทุกสาย</span>
+          </p>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div data-theme={theme} data-alert={ringingLine ? "in" : activeAiLine ? "ai" : "none"} className="cc-root relative min-h-screen">
@@ -1234,8 +1332,8 @@ function StandbyStrip({ busyCount, autoAnswerAi }: { busyCount: number; autoAnsw
             </div>
             <p className="mt-1.5 text-xs leading-none cc-muted">
               {autoAnswerAi
-                ? "เมื่อมีสายเข้า J.A.R.V.I.S จะรับสายอัตโนมัติ"
-                : "เมื่อมีสายเข้า ระบบจะส่งเสียงเรียกและแจ้งเตือนให้กดรับสาย"}
+                ? "เมื่อมีสายเข้า J.A.R.V.I.S จะรับสายอัตโนมัติ (ไม่มีเสียงโทรศัพท์เรียลไทม์บนเว็บ)"
+                : "เมื่อมีสายเข้า ระบบจะแสดงสถานะบนหน้าจอโดยไม่เปิดเสียงโทรศัพท์เรียลไทม์"}
             </p>
           </div>
         </div>

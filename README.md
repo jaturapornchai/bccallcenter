@@ -52,10 +52,10 @@
   - แนบข้อมูล CRM + โน้ต + เคสค้าง + ประวัติการคุยเดิมให้ **J.A.R.V.I.S** เพื่อคุยต่อเนื่องได้เหมือนพนักงานคนจริง
   - สร้างเคสติดตาม (`TCK-...`) ให้อัตโนมัติเมื่อ DeepSeek QA พบว่าสายนั้นยังแก้ไม่จบหรือต้องให้เจ้าหน้าที่ติดต่อกลับ
 - **วิเคราะห์คุณภาพสายอัตโนมัติหลังวางสาย (Post-Call QA)** ด้วย **Ollama Cloud (`deepseek-v4.1-flash`)** แสดงคะแนน CSAT (`/10`), คะแนนคุณภาพ AI (`/10`), อารมณ์และแนวโน้มอารมณ์ลูกค้า, หัวข้อ/สรุปบทสนทนา, สถานะและวิธีแก้ไข, ความเร่งด่วน/Follow-up และ AI Coaching Tip
-- **ระบบยืนยันตัวตนด้วย Google Sign-In และโหมดผู้ชมแบบปกปิดเบอร์ (Privacy & Read-Only Mode)**:
-  - หากยังไม่ได้เข้าสู่ระบบด้วยบัญชีผู้ดูแล (`ADMIN_EMAIL`) หน้าเว็บจะเข้าสู่ **โหมดผู้ชม (ดูได้อย่างเดียว)** โดยอัตโนมัติ
-  - เซิร์ฟเวอร์จะปกปิดหมายเลขโทรศัพท์ของผู้โทรทุกเบอร์ (เป็นรหัสแทน เช่น `•••-•••-••#01`), ชื่อ/บริษัทลูกค้า, IP ของ SIP Trunk และเบอร์โทรในบทสนทนา/สรุป QA ก่อนส่งผ่าน WebSocket (โดยยังแสดงเบอร์ Call Center หลักจาก `SIP_USER` ได้)
-  - ปิดกั้นคำสั่งควบคุมสาย, การแก้ไข CRM/เคส, การสั่งวิเคราะห์ QA ใหม่ และการรับ-ส่งเสียงสนทนาทั้งฝั่ง UI และฝั่งเซิร์ฟเวอร์ WebSocket จนกว่าจะเข้าสู่ระบบด้วยบัญชีผู้ดูแลผ่าน Google Sign-In (`HttpOnly` HMAC-signed cookie)
+- **ระบบยืนยันตัวตนผู้ดูแลคนเดียวแบบ Strict Admin Lock + ปิดเสียงโทรศัพท์เรียลไทม์บนเว็บ (Single-Admin Privacy & Silent Inbound)**:
+  - **หน้าจอล็อกความลับ (Private Admin Gate)**: ผู้ที่ยังไม่ได้เข้าสู่ระบบด้วยบัญชี Google ที่ตรงกับ `ADMIN_EMAIL` (ใน `.env.local`) จะเห็นเฉพาะหน้าจอเข้าสู่ระบบเท่านั้น — ไม่เปิด WebSocket และไม่ส่งข้อมูลคู่สาย เบอร์โทร ประวัติการสนทนา QA หรือ CRM ใดๆ ออกไป
+  - **บังคับสิทธิ์ทุก Endpoint & WebSocket**: `/ws/sip` ปฏิเสธด้วย `401 Unauthorized` ตั้งแต่ขั้นตอน Upgrade, `/api/analytics`, `/api/teach`, `/api/recordings/*` คืน `403`, `/api/auth/google` ปฏิเสธบัญชีอื่นด้วย `403` และ `/api/internal/idle` จำกัดเฉพาะ loopback (`127.0.0.1`) โดยไม่ส่งข้อมูลส่วนบุคคล
+  - **ไม่มีเสียงโทรศัพท์แบบ Real-Time เมื่อลูกค้าโทรเข้า**: ปิดเสียงเรียกเข้า (Ringtone) และปิดสตรีมเสียง RTP เรียลไทม์ออกลำโพงหน้าเว็บโดยอัตโนมัติสำหรับสายที่ลูกค้าโทรเข้าคุยกับ AI (ยังคงบันทึก WAV สำหรับฟังย้อนหลังในหน้า QA และยังคงเสียงแจ้งเตือน Callback Ticket แยกต่างหาก; ชุดทดสอบ: `node scripts/test-security-and-audio.mjs`)
 
 ---
 
@@ -73,8 +73,8 @@ flowchart LR
 ```
 
 ### โครงสร้างโปรเจกต์
-- `server.mjs` — Next.js Production/Dev Server + Auth API (`/api/auth/*`) + WebSocket (`/ws/sip`) พร้อมบังคับสิทธิ์ผู้ดูแล/ผู้ชม
-- `lib/auth.mjs` — ตรวจสอบ Google ID Token, ออก/ตรวจ `HttpOnly` HMAC-SHA256 Session Cookie และปกปิดข้อมูลหมายเลขโทรศัพท์ผู้โทรฝั่งเซิร์ฟเวอร์ (`sanitizeStateForViewer`)
+- `server.mjs` — Next.js Production/Dev Server + Auth API (`/api/auth/*`) + WebSocket (`/ws/sip`) พร้อมบังคับสิทธิ์เฉพาะผู้ดูแล (`ADMIN_EMAIL`) ทุก endpoint
+- `lib/auth.mjs` — ตรวจสอบ Google ID Token, ตรวจสิทธิ์ `ADMIN_EMAIL`, และออก/ตรวจ `HttpOnly` HMAC-SHA256 Session Cookie (พร้อม helper ปกปิดข้อมูล)
 - `lib/sip-engine.mjs` — SIP UDP Trunk (5 คู่สาย), RTP Audio Bridge, Auto-Answer, Multi-Language Routing, CRM Sync และ Post-Call QA trigger
 - `lib/jarvis-bridge.mjs` — WebRTC Bridge (`werift`, PCMU/8000), DataChannel/Energy Fast Barge-in และซิงก์ภาษา (`POST /language`)
 - `lib/crm-store.mjs` — ฐานข้อมูล CRM โลคอล (โปรไฟล์ลูกค้า 360°, ภาษาประจำเบอร์, เคสติดตามงาน และ Auto-Ticket จาก AI QA)
