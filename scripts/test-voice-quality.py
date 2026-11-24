@@ -11,9 +11,11 @@ Usage: python scripts/test-voice-quality.py   -> exit 0 when every case passes
 """
 import ast
 import concurrent.futures
+import json
 import logging
 import re
 import sys
+import tempfile
 import threading
 import time
 import types
@@ -30,7 +32,7 @@ SR = 16000
 
 
 def defined_names(node):
-    if isinstance(node, ast.FunctionDef):
+    if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
         return {node.name}
     if isinstance(node, ast.Assign):
         return {target.id for target in node.targets if isinstance(target, ast.Name)}
@@ -51,6 +53,7 @@ def load_symbols(module_names, class_names=None, extra_scope=None):
     quiet.addHandler(logging.NullHandler())
     quiet.propagate = False
     scope = {
+        "json": json,
         "re": re,
         "np": np,
         "time": time,
@@ -68,15 +71,19 @@ def test_caller_name_rejects_connectors_and_accepts_real_names():
     scope = load_symbols({
         "_NAME_PREFIX_RE", "_NAME_SUFFIX_RE", "_NAME_SPLIT_RE", "_HONORIFIC_RE",
         "_EXPLICIT_NAME_TH_RE", "_EXPLICIT_NAME_EN_RE", "_ASKED_NAME_BOT_RE",
-        "_BAD_CALLER_NAMES", "_clean_caller_name", "_extract_caller_name_py",
+        "_BAD_CALLER_NAMES", "_GARBLED_NAME_RE", "_BARE_TONE_CUT_RE",
+        "_is_plausible_name", "_clean_caller_name", "_extract_caller_name_py",
         "BARE_ACK", "BARE_ADDRESS",
     })
     extract = scope["_extract_caller_name_py"]
     asked = "ไม่ทราบว่าขอเรียกชื่อเล่นว่าอะไรดีครับ"
 
-    for bad in ("และ", "แล้ว", "อันนี้", "เจ๊", "ครับผม", "โอเค", "คือ", "เอ่อ", "ค่ะ", "หรือ", "ถ้า", "ไหม"):
+    for bad in ("และ", "แล้ว", "อันนี้", "เจ๊", "ครับผม", "โอเค", "คือ", "เอ่อ", "ค่ะ", "หรือ", "ถ้า", "ไหม", "การผลัดหรือการร้", "คุณการผลัดหรือการร้"):
         got, _ = extract(bad, asked)
         assert got == "", f"expected bad token {bad!r} to be rejected, got {got!r}"
+
+    got_exp_bad, _ = extract("ผมชื่อการผลัดหรือการร้ครับ", "")
+    assert got_exp_bad == "", f"expected garbled explicit name rejected, got {got_exp_bad!r}"
 
     # "ขายเชื่อไหม" contains "เชื่อ" (เ + ชื่อ): must NOT extract "ไหม" as caller name
     got_credit, _ = extract("สินค้า ที่ ขายเชื่อไหม", "")
@@ -87,6 +94,9 @@ def test_caller_name_rejects_connectors_and_accepts_real_names():
         ("ผมชื่อก้องครับ", "ก้อง"),
         ("เรียกว่าลุงจืดครับ", "ลุงจืด"),
         ("สมชาย", "สมชาย"),
+        ("ตี๋ครับ", "ตี๋"),
+        ("โอ๋ค่ะ", "โอ๋"),
+        ("สมคิดครับ", "สมคิด"),
     ):
         got, _ = extract(good_in, asked)
         assert got == want, f"expected {good_in!r} -> {want!r}, got {got!r}"
@@ -259,6 +269,7 @@ def test_legacy_mcp_tools_hidden_from_llm_when_fast_tools_present():
             extra_scope={
                 "C": types.SimpleNamespace(MCP_SERVERS={"bcbrain": "http://mcp.test/mcp"}),
                 "connect_mcp": lambda s, u: (object(), [{"name": n, "description": n, "inputSchema": {"type": "object"}} for n in tool_list]),
+                "MCP_CLIENTS": {},
                 "TOOL_SPECS": specs,
                 "TOOLS": tools,
                 "WORKER": worker,
@@ -358,7 +369,8 @@ def test_first_call_ai_intro_name_capture_and_callback_confirm():
         {
             "_NAME_PREFIX_RE", "_NAME_SUFFIX_RE", "_NAME_SPLIT_RE", "_HONORIFIC_RE",
             "_EXPLICIT_NAME_TH_RE", "_EXPLICIT_NAME_EN_RE", "_ASKED_NAME_BOT_RE",
-            "_BAD_CALLER_NAMES", "_clean_caller_name", "_extract_caller_name_py",
+            "_BAD_CALLER_NAMES", "_GARBLED_NAME_RE", "_BARE_TONE_CUT_RE",
+            "_is_plausible_name", "_clean_caller_name", "_extract_caller_name_py",
             "FILLER_TEXT",
         },
         extra_scope={
@@ -388,9 +400,79 @@ def test_first_call_ai_intro_name_capture_and_callback_confirm():
     assert ("เบอร์นี้" in C.PHONE_PROMPT or "เบอร์ที่โทรเข้ามานี้" in C.PHONE_PROMPT) and "เบอร์อื่น" in C.PHONE_PROMPT
     assert "ขอชื่อลูกค้าให้สำเร็จ" in C.PHONE_PROMPT
     assert "ต้องการให้โทรกลับเรื่องอะไร" in C.PHONE_PROMPT
+    assert "ห้ามถามเรื่องโทรกลับ" in C.PHONE_PROMPT
+    assert "บีซีแอคเคาท์เวอร์ชันเก่า" in C.PHONE_PROMPT and "บีซีเอไอแอคเคาท์" in C.PHONE_PROMPT
+    assert "บีซีเอไอแอคเคาท์" in intro and "บีซีแอคเคาท์เวอร์ชันเก่า" in intro
     src = SOURCE.read_text(encoding="utf-8")
     assert "เบอร์นี้หรือเบอร์อื่น" in src
     assert "ครบสามอย่าง" in src and "has_prior_topic" in src
+    assert "cb_offered_recently" in src and "cb_already_saved" in src
+
+
+def test_callback_restraint_qa_cache_fast_chat_and_batch():
+    import qa_cache
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        qc = qa_cache.QACache(str(Path(tmpdir) / "qa.json"), ttl_s=3600, max_entries=50)
+        assert not qc.store("ขั้นตอนหลังรับโปรแกรมต้องทำยังไง", ["เรื่องนี้ผมยังไม่มีข้อมูลยืนยันในระบบครับ"])
+        assert not qc.store("มีระบบขนส่งไหม", ["ขอให้ฝ่ายขายโทรกลับไปตรวจสอบให้นะครับ"])
+        assert not qc.store("แนะนำโปรแกรมวัสดุก่อสร้างหน่อย", ["เข้าใจแล้วครับคุณเพ็ญ ร้านนี้เหมาะกับค้าส่งครับ"])
+        assert not qc.store("ดูดวงดูโด่งได้ไหม", ["เรื่องดูดวงนี่ผมไม่มีข้อมูลยืนยันครับ"])
+        assert qc.store(
+            "โปรแกรม BC Ai Account มีกี่รุ่นครับ",
+            ["มี 4 รุ่น ได้แก่ Starter ฟรีศูนย์บาท และรุ่น Mini Standard Pro ครับ"],
+        )
+        assert len(qc._entries) == 1
+
+    scope = load_symbols(
+        {"FAST_CHAT", "MCP_CACHEABLE_TOOLS", "MCP_CACHE_TTL_S", "MCP_CACHE_MAX", "MCPClient"},
+        extra_scope={"httpx": types.SimpleNamespace(HTTPStatusError=RuntimeError)},
+    )
+    fc = scope["FAST_CHAT"]
+    for ack in ("โอเคขอบคุณ", "โอเคขอบคุณครับ", "รับทราบครับ", "เข้าใจแล้วค่ะ"):
+        assert fc.match(ack), f"FAST_CHAT must match {ack!r}"
+    assert not fc.match("โอเคขอบคุณแล้วราคาเท่าไหร่")
+
+    post_calls = []
+
+    class FakeResp:
+        def __init__(self, payload, status_code=200):
+            self._payload = payload
+            self.status_code = status_code
+            self.headers = {"content-type": "application/json"}
+            self.text = json.dumps(payload)
+
+        def raise_for_status(self):
+            pass
+
+    class FakeHttp:
+        def post(self, url, json=None, headers=None):
+            post_calls.append(json)
+            if isinstance(json, list):
+                return FakeResp([
+                    {"jsonrpc": "2.0", "id": req["id"], "result": {"content": [{"type": "text", "text": f"batch:{req['params']['name']}"}]}}
+                    for req in json
+                ])
+            method = json.get("method")
+            if method == "initialize":
+                return FakeResp({"jsonrpc": "2.0", "id": json["id"], "result": {"serverInfo": {"name": "bcbrain"}}})
+            return FakeResp({"jsonrpc": "2.0", "id": json["id"], "result": {}})
+
+    MCPClient = scope["MCPClient"]
+    client = object.__new__(MCPClient)
+    client.url = "https://brain.bcsmethai.com/mcp"
+    client.http = FakeHttp()
+    client.n = 0
+    client.headers = {}
+    client._cache = {}
+    client._cache_lock = threading.Lock()
+    client._rpc_lock = threading.RLock()
+
+    res1 = client.call_batch([("quick_answer", {"question": "q1"}), ("lookup_menu", {"query": "4013"})])
+    assert res1 == ["batch:quick_answer", "batch:lookup_menu"]
+    assert len(post_calls) == 1 and isinstance(post_calls[0], list) and len(post_calls[0]) == 2
+    res2 = client.call_batch([("quick_answer", {"question": "q1"}), ("lookup_menu", {"query": "4013"})])
+    assert res2 == res1 and len(post_calls) == 1, "second call_batch must hit RAM cache with 0 HTTP calls"
 
 
 def test_leave_message_requires_topic_when_no_continuity():
@@ -487,6 +569,7 @@ TESTS = [
     test_first_call_ai_intro_name_capture_and_callback_confirm,
     test_leave_message_requires_topic_when_no_continuity,
     test_bcbrain_v230_zone_abstain_and_ultra_mode,
+    test_callback_restraint_qa_cache_fast_chat_and_batch,
 ]
 
 

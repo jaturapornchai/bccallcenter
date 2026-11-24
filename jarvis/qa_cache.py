@@ -22,12 +22,15 @@ _CONTEXT_DEP_RE = re.compile(
     r"(?:อันนี้|อันนั้น|ตัวนี้|ตัวนั้น|เรื่องนี้|เรื่องนั้น|แบบนั้น|แบบนี้|เมื่อกี้|ต่อเลย|แล้วมัน|แล้วถ้า|มันทำ|"
     r"ของผม|ของฉัน|ของหนู|บริษัทผม|ร้านผม|เบอร์|ชื่อผม|ชื่อฉัน|ผมชื่อ|ฉันชื่อ|หนูชื่อ|ชื่อว่า|ชื่ออะไร|จำผม|จำชื่อ|จำได้ไหม|"
     r"โทรกลับ|ติดต่อกลับ|ฝากเรื่อง|สาขาอื่น|ไปใช้สาขา|ใช่เลย|ใช่แค่|"
+    r"ฉันนี้|ช่วยคนหาน็อต|หลังจากที่ตกลง|ดูดวง|"
     r"\b(?:this one|that one|it|previous|continue|my company|my phone|my name|who am i|call me back|callback|"
     r"thank you|thanks|what's that|who can speak|you can speak|mm-hmm|hello|hi there|how are you|how you there)\b)",
     re.I,
 )
 _PERSONAL_REPLY_RE = re.compile(
     r"(?:ยังไม่รู้ชื่อ|ขอเรียกชื่อ|ยินดีที่ได้รู้จัก|มองไม่เห็นเบอร์|ไม่ค่อยเข้าใจคำถาม|ฝากเรื่องไว้ให้|ขอเบอร์ที่สะดวก|ติดต่อกลับไป|"
+    r"ยังไม่มีข้อมูลยืนยัน|ไม่มีข้อมูลยืนยัน|ไม่พบข้อมูล|abstain|โทรกลับ|ฝ่ายขายโทร|พนักงานโทร|เจ้าหน้าที่ติดต่อกลับ|"
+    r"ดูดวง|สำหรับร้านอาหารใหม่|เข้าใจแล้วครับคุณ|ยินดีครับคุณ|ลุงจืด|คุณ[ก-๙]{2,}|"
     r"uncle\s+\w+|not quite sure|not sure what|don't have any info|you're (?:very )?welcome|speak up a bit louder|sorry,)",
     re.I,
 )
@@ -50,7 +53,7 @@ def normalize_question(text: str) -> str:
 def is_cacheable_question(text: str) -> bool:
     """Only cache standalone, general FAQ questions (never short acks, personal info, or context follow-ups)."""
     raw = (text or "").strip()
-    if not raw or len(raw) > 160:
+    if not raw or len(raw) > 90:
         return False
     if _CONTEXT_DEP_RE.search(raw) or _PERSONAL_NUM_RE.search(raw):
         return False

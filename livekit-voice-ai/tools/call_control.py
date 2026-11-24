@@ -7,10 +7,12 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 from livekit import api
@@ -19,6 +21,37 @@ from livekit.protocol import room as proto_room
 from livekit.protocol import sip as proto_sip
 
 logger = logging.getLogger("bc-callcenter.tools")
+
+_MCP_HTTP_CLIENT: httpx.AsyncClient | None = None
+_MCP_CACHE: dict[str, tuple[float, str]] = {}
+_MCP_CACHE_TTL_S = 300.0
+_MCP_CACHE_MAX = 256
+_FAST_REST_ETAG: dict[str, tuple[str, str]] = {}
+
+
+def _get_mcp_http_client() -> httpx.AsyncClient:
+    global _MCP_HTTP_CLIENT
+    if _MCP_HTTP_CLIENT is None or _MCP_HTTP_CLIENT.is_closed:
+        _MCP_HTTP_CLIENT = httpx.AsyncClient(
+            timeout=8.0,
+            limits=httpx.Limits(max_keepalive_connections=8, keepalive_expiry=120.0),
+        )
+    return _MCP_HTTP_CLIENT
+
+
+def _cache_get(key: str) -> str | None:
+    hit = _MCP_CACHE.get(key)
+    if hit and (time.monotonic() - hit[0]) < _MCP_CACHE_TTL_S:
+        return hit[1]
+    return None
+
+
+def _cache_put(key: str, value: str) -> None:
+    if not value:
+        return
+    if len(_MCP_CACHE) >= _MCP_CACHE_MAX:
+        _MCP_CACHE.pop(next(iter(_MCP_CACHE)), None)
+    _MCP_CACHE[key] = (time.monotonic(), value)
 
 
 def normalize_phone(raw: str) -> str:
@@ -208,6 +241,7 @@ class CallCenterContext:
 
 def build_call_tools(ctx: CallCenterContext) -> list[Any]:
     """สร้างชุดเครื่องมือ Call Center สำหรับ LiveKit AgentSession."""
+    mcp_url = os.getenv("BC_BRAIN_MCP_URL", "https://brain.bcsmethai.com/mcp")
 
     @function_tool()
     async def lookup_caller_history() -> str:
@@ -215,39 +249,86 @@ def build_call_tools(ctx: CallCenterContext) -> list[Any]:
         summary = load_caller_summary(ctx.caller_phone)
         return summary or "ลูกค้าโทรมาเป็นครั้งแรก ยังไม่มีประวัติเดิมในระบบ"
 
-    async def _call_bc_brain_mcp(tool_name: str, arguments: dict[str, Any], timeout: float = 8.0) -> str:
-        mcp_url = os.getenv("BC_BRAIN_MCP_URL", "https://brain.bcsmethai.com/mcp")
+    async def _fast_rest_fallback(tool_name: str, arguments: dict[str, Any]) -> str | None:
+        base_url = mcp_url.removesuffix("/mcp").rstrip("/")
+        if tool_name == "quick_answer":
+            qs = urlencode({
+                "q": str(arguments.get("question") or ""),
+                "audience": str(arguments.get("audience") or "user"),
+                "mode": str(arguments.get("mode") or "ultra"),
+            })
+        elif tool_name == "lookup_menu":
+            qs = urlencode({
+                "menu": str(arguments.get("query") or ""),
+                "audience": str(arguments.get("audience") or "user"),
+            })
+        else:
+            return None
+        rest_url = f"{base_url}/api/fast?{qs}"
+        headers = {"Accept": "text/plain, application/json"}
+        cached_etag, cached_body = _FAST_REST_ETAG.get(rest_url, ("", ""))
+        if cached_etag:
+            headers["If-None-Match"] = cached_etag
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                res = await client.post(
-                    mcp_url,
-                    headers={
-                        "Accept": "application/json, text/event-stream",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "tools/call",
-                        "params": {"name": tool_name, "arguments": arguments},
-                    },
-                )
-                if res.status_code == 200:
-                    raw = res.text
-                    if "event-stream" in res.headers.get("content-type", ""):
-                        data_lines = [ln[5:] for ln in raw.splitlines() if ln.startswith("data:")]
-                        raw = data_lines[-1] if data_lines else raw
-                    body = json.loads(raw)
-                    content = body.get("result", {}).get("content", [])
-                    texts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("text")]
-                    if texts:
-                        joined = "\n".join(texts)
-                        if "🛑" in joined or "abstain" in joined.lower():
-                            return "ไม่พบข้อมูลยืนยันในระบบ (Abstain): ห้ามเดาหรือแต่งข้อมูลเอง ให้แจ้งลูกค้าตรงๆ ว่าไม่มีข้อมูลนี้ในระบบ และเสนอให้พนักงานโทรกลับช่วยตรวจสอบ"
-                        return joined[:1200]
+            client = _get_mcp_http_client()
+            res = await client.get(rest_url, headers=headers)
+            if res.status_code == 304 and cached_body:
+                return cached_body
+            if res.status_code == 200 and res.text.strip():
+                body_txt = res.text.strip()[:2200]
+                if etag := res.headers.get("etag"):
+                    if len(_FAST_REST_ETAG) >= 128:
+                        _FAST_REST_ETAG.pop(next(iter(_FAST_REST_ETAG)), None)
+                    _FAST_REST_ETAG[rest_url] = (etag, body_txt)
+                return body_txt
+        except Exception as rest_exc:
+            logger.warning("BC Brain /api/fast fallback %s failed: %s", tool_name, rest_exc)
+        return None
+
+    async def _call_bc_brain_mcp(tool_name: str, arguments: dict[str, Any], timeout: float = 8.0) -> str:
+        cache_key = f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
+        if cached := _cache_get(cache_key):
+            return cached
+        try:
+            client = _get_mcp_http_client()
+            res = await client.post(
+                mcp_url,
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": tool_name, "arguments": arguments},
+                },
+                timeout=timeout,
+            )
+            if res.status_code == 200:
+                raw = res.text
+                if "event-stream" in res.headers.get("content-type", ""):
+                    data_lines = [ln[5:] for ln in raw.splitlines() if ln.startswith("data:")]
+                    raw = data_lines[-1] if data_lines else raw
+                body = json.loads(raw)
+                content = body.get("result", {}).get("content", [])
+                texts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("text")]
+                if texts:
+                    joined = "\n".join(texts)
+                    if "🛑" in joined or "abstain" in joined.lower():
+                        return "ไม่พบข้อมูลยืนยันในระบบ (Abstain): ห้ามเดาหรือแต่งข้อมูลเอง ให้แจ้งลูกค้าตรงๆ ว่ายังไม่มีข้อมูลยืนยันในระบบ แล้วชวนคุยตอบเรื่องอื่นต่ออย่างเป็นธรรมชาติ (ไม่ต้องเสนอโทรกลับทุกครั้ง เสนอเฉพาะเมื่อลูกค้าขอ จำเป็นจริงๆ หรือเป็น BC Account เวอร์ชันเก่า)"
+                    limit_chars = 2400 if tool_name == "batch_read" else 1400
+                    out = joined[:limit_chars]
+                    _cache_put(cache_key, out)
+                    return out
         except Exception as exc:
             logger.warning("BC Brain MCP %s failed: %s", tool_name, exc)
-        return "ไม่สามารถดึงข้อมูลจากคลังความรู้ได้ชั่วคราว กรุณาแจ้งลูกค้าว่าสามารถฝากเรื่องหรือโอนสายให้เจ้าหน้าที่ช่วยดูแลได้ครับ"
+        if rest_txt := await _fast_rest_fallback(tool_name, arguments):
+            if "🛑" in rest_txt or "abstain" in rest_txt.lower():
+                return "ไม่พบข้อมูลยืนยันในระบบ (Abstain): ห้ามเดาหรือแต่งข้อมูลเอง ให้แจ้งลูกค้าตรงๆ ว่ายังไม่มีข้อมูลยืนยันในระบบ แล้วชวนคุยต่ออย่างเป็นธรรมชาติ"
+            _cache_put(cache_key, rest_txt)
+            return rest_txt
+        return "ไม่สามารถดึงข้อมูลจากคลังความรู้ได้ชั่วคราว กรุณาแจ้งลูกค้าตามจริงและชวนคุยต่อ หรือให้ฝากเรื่องเฉพาะหากจำเป็นครับ"
 
     @function_tool()
     async def search_knowledge_base(query: str) -> str:
@@ -275,6 +356,21 @@ def build_call_tools(ctx: CallCenterContext) -> list[Any]:
             "batch_ask",
             {"questions": clean_qs, "audience": "user", "mode": "ultra", "include_media": False},
         )
+
+    @function_tool()
+    async def batch_read_knowledge(slugs: list[str], query: str = "") -> str:
+        """อ่านรายละเอียดโน้ต 2-5 ใบพร้อมกันในรอบเดียวตาม slug ของ BC Brain (โซน user)."""
+        clean_slugs = [str(s).strip() for s in (slugs or []) if str(s).strip()][:5]
+        if not clean_slugs:
+            return "กรุณาระบุ slug อย่างน้อย 1 รายการ"
+        args: dict[str, Any] = {
+            "slugs": clean_slugs,
+            "audience": "user",
+            "max_chars_per_note": 2000,
+        }
+        if query and query.strip():
+            args["query"] = query.strip()
+        return await _call_bc_brain_mcp("batch_read", args)
 
     @function_tool()
     async def create_callback_ticket(
@@ -340,6 +436,7 @@ def build_call_tools(ctx: CallCenterContext) -> list[Any]:
         search_knowledge_base,
         lookup_menu,
         batch_ask_knowledge,
+        batch_read_knowledge,
         create_callback_ticket,
         set_conversation_language,
         transfer_to_human,

@@ -110,8 +110,8 @@ SUM_ASK = re.compile(r"\d\s*(?:บวก|ลบ|คูณ|หาร)|(?:บว�
 # menu workflow, SQL) skip forced round-0 calc (~1.2 s faster) and pick tree/flow/case/SQL examples instead of fake sums
 CALC_ASK = re.compile(r"คำนวณ|ต้นทุน|ถัวเฉลี่ย|เฉลี่ย|ไฟโฟ|fifo|(?<!ใบกำกับ)ภาษี|vat|หัก\s*ณ|ส่วนลด|ดอกเบี้ย|ค่าเสื่อม|กำไร|ขาดทุน|"
                       r"ยอดรวม|หักกลบ|มัดจำ|งวด|ผ่อน|ปันส่วน|ราคาขาย|เดบิต|เครดิต", re.I)
-FAST_CHAT = re.compile(r"^(?:สวัสดี|หวัดดี|ฮัลโหล|ขอบคุณ(?:มาก)?|ขอคิดดูก่อน|คิดดูก่อน|แค่นี้ก่อน|วางสายก่อน)"
-                       r"(?:\s*(?:ครับ|ค่ะ|นะคะ|นะครับ|นะ))*[\s.!?…]*$")
+FAST_CHAT = re.compile(r"^(?:สวัสดี|หวัดดี|ฮัลโหล|ขอบคุณ(?:มาก)?|โอเค(?:ขอบคุณ(?:มาก)?)?|รับทราบ|เข้าใจแล้ว|ขอคิดดูก่อน|คิดดูก่อน|แค่นี้ก่อน|วางสายก่อน)"
+                       r"(?:\s*(?:ครับผม|ครับ|ค่ะ|คะ|นะคะ|นะครับ|นะ))*[\s.!?…]*$")
 LATEST_ASK = re.compile(r"ข่าว|ล่าสุด|ทอง|น้ำมัน|หุ้น|ค่าเงิน|อัตราแลกเปลี่ยน|ดอลลาร์|บิตคอยน์|คริปโต|อากาศ|ฝนตก|พยากรณ์|"
                         r"ผลบอล|ฟุตบอล|หวย|สลากกินแบ่ง|ราคา.{0,8}วันนี้|วันนี้.{0,8}ราคา")
 CONFIRM = re.compile(r"ยืนยัน|กดเลย|ทำเลย|เปิดเลย|ตกลง|ได้เลย|โอเค|ใช่")  # the caller's yes to a held computer action
@@ -312,24 +312,39 @@ def _format_addressed_name(name: str) -> str:
     return clean_n if _HONORIFIC_RE.match(clean_n) else f"คุณ{clean_n}"
 
 
+_GARBLED_NAME_RE = re.compile(r"(?:หรือ|แล้ว|แต่|เพราะ|ถ้า|ว่า|การ[ก-๙]{2,}|ความ[ก-๙]{2,}|เรื่อง|ระบบ|โปรแกรม|สต๊อก|สต็อก|สินค้า|ราคา|บัญชี|ภาษี)")
+_BARE_TONE_CUT_RE = re.compile(r"(?<![าำะัิีึืุูเแโใไ])[ก-ฮ][่-๋]$")
+
+
+def _is_plausible_name(cand: str, explicit: bool = False) -> bool:
+    if not cand or len(cand) < 2 or cand.lower() in _BAD_CALLER_NAMES:
+        return False
+    if _GARBLED_NAME_RE.search(cand):
+        return False
+    if not re.search(r"[เแโใไ][ก-ฮ]{1,2}[่-๋]$", cand) and _BARE_TONE_CUT_RE.search(cand):
+        return False
+    if not explicit and re.fullmatch(r"[ก-๙]+", cand) and len(cand) > 10:
+        return False
+    return True
+
+
 def _extract_caller_name_py(text: str, prev_bot: str = "") -> tuple[str, bool]:
     s = (text or "").strip()
     if not s:
         return "", False
     if m := _EXPLICIT_NAME_TH_RE.search(s):
         cand = _clean_caller_name(m.group(1))
-        if len(cand) >= 2 and cand.lower() not in _BAD_CALLER_NAMES:
+        if _is_plausible_name(cand, explicit=True):
             return cand, True
     if m := _EXPLICIT_NAME_EN_RE.search(s):
         cand = m.group(1).strip()
-        if len(cand) >= 2 and cand.lower() not in _BAD_CALLER_NAMES:
+        if _is_plausible_name(cand, explicit=True):
             return cand, True
     if prev_bot and _ASKED_NAME_BOT_RE.search(prev_bot):
         if m := re.match(r"^(?:ผม|ดิฉัน|หนู|ฉัน|พี่|คุณ)?\s*([ก-๙a-zA-Z]{2,18})(?:\s*(?:ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|คับ|ก็ได้))?$", s):
             cand = _clean_caller_name(m.group(1))
             if (
-                len(cand) >= 2
-                and cand.lower() not in _BAD_CALLER_NAMES
+                _is_plausible_name(cand, explicit=False)
                 and not re.match(r"^(?:ไม่|ขอ|อยาก|มี|ทำ|ราคา|เบอร์|และ|แล้ว|แต่|หรือ|ถ้า|คือ|เอ่อ|อัน|มัน|นี่|นั่น|คุณ|เจ๊)", cand)
             ):
                 return cand, False
@@ -1256,7 +1271,7 @@ def general_knowledge(question):
 
 MCP_CACHE_TTL_S = 300.0
 MCP_CACHE_MAX = 256
-MCP_CACHEABLE_TOOLS = frozenset({"quick_answer", "batch_ask", "lookup_menu", "batch_read", "read_note", "search_brain"})
+MCP_CACHEABLE_TOOLS = frozenset({"quick_answer", "batch_ask", "lookup_menu", "batch_read", "read_note", "search_brain", "ask_brain"})
 _BOOTSTRAP_LOCK = threading.Lock()
 _BOOTSTRAP_CACHE: dict[str, dict] = {}
 BRAIN_AUDIENCE_TOOLS = frozenset({
@@ -1293,7 +1308,7 @@ def load_bootstrap_pack(audience: str = "user", force: bool = False) -> str:
                 _BOOTSTRAP_CACHE[audience] = {"ts": now_m, "etag": prev_etag, "text": prev_text}
             return prev_text
         if r.status_code == 200 and r.text:
-            text = r.text.strip()[:14000]
+            text = r.text.strip()[:20000]
             etag = r.headers.get("etag") or prev_etag
             with _BOOTSTRAP_LOCK:
                 _BOOTSTRAP_CACHE[audience] = {"ts": now_m, "etag": etag, "text": text}
@@ -1304,22 +1319,49 @@ def load_bootstrap_pack(audience: str = "user", force: bool = False) -> str:
 
 
 class MCPClient:
-    """ponytail: minimal MCP streamable-HTTP client (initialize, tools/list, tools/call); one session, no server push."""
+    """MCP v2.3.0 POST-only streamable-HTTP client with JSON-RPC batch array and 300s RAM cache."""
 
     def __init__(self, url):
         self.url, self.http, self.n = url, httpx.Client(timeout=20, limits=httpx.Limits(keepalive_expiry=120)), 0  # kept alive between turns
         self.headers = {"Accept": "application/json, text/event-stream"}
-        self._cache: dict[str, tuple[float, str]] = {}
-        self._cache_lock = threading.Lock()
-        self.rpc("initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "thai-voice-agent", "version": "1"}})
-        self.http.post(url, json={"jsonrpc": "2.0", "method": "notifications/initialized"}, headers=self.headers)
+        if not hasattr(self, "_cache"):
+            self._cache: dict[str, tuple[float, str]] = {}
+            self._cache_lock = threading.Lock()
+            self._rpc_lock = threading.RLock()
+        with self._rpc_lock:
+            self.rpc("initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "thai-voice-agent", "version": "2.3.0"}})
+            self.http.post(url, json={"jsonrpc": "2.0", "method": "notifications/initialized"}, headers=self.headers)
+
+    def _cache_key(self, name, args) -> str | None:
+        if name not in MCP_CACHEABLE_TOOLS:
+            return None
+        return f"{name}:{json.dumps(args, ensure_ascii=False, sort_keys=True)}"
+
+    def _cache_get(self, cache_key: str | None) -> str | None:
+        if not cache_key:
+            return None
+        now_m = time.monotonic()
+        with self._cache_lock:
+            hit = self._cache.get(cache_key)
+            if hit and now_m - hit[0] < MCP_CACHE_TTL_S:
+                return hit[1]
+        return None
+
+    def _cache_put(self, cache_key: str | None, text: str) -> None:
+        if not cache_key or not text:
+            return
+        with self._cache_lock:
+            if len(self._cache) >= MCP_CACHE_MAX:
+                self._cache.pop(next(iter(self._cache)), None)
+            self._cache[cache_key] = (time.monotonic(), text)
 
     def rpc(self, method, params):
-        self.n += 1
-        r = self.http.post(self.url, json={"jsonrpc": "2.0", "id": self.n, "method": method, "params": params}, headers=self.headers)
-        r.raise_for_status()
-        if sid := r.headers.get("mcp-session-id"):
-            self.headers["Mcp-Session-Id"] = sid
+        with self._rpc_lock:
+            self.n += 1
+            r = self.http.post(self.url, json={"jsonrpc": "2.0", "id": self.n, "method": method, "params": params}, headers=self.headers)
+            r.raise_for_status()
+            if sid := r.headers.get("mcp-session-id"):
+                self.headers["Mcp-Session-Id"] = sid
         body = r.text
         if "event-stream" in r.headers.get("content-type", ""):
             body = [line[5:] for line in body.splitlines() if line.startswith("data:")][-1]
@@ -1332,26 +1374,68 @@ class MCPClient:
         return [t for t in self.rpc("tools/list", {})["tools"] if (t.get("annotations") or {}).get("readOnlyHint")]
 
     def call(self, name, args):
-        cache_key = None
-        if name in MCP_CACHEABLE_TOOLS:
-            cache_key = f"{name}:{json.dumps(args, ensure_ascii=False, sort_keys=True)}"
-            now_m = time.monotonic()
-            with self._cache_lock:
-                hit = self._cache.get(cache_key)
-                if hit and now_m - hit[0] < MCP_CACHE_TTL_S:
-                    return hit[1]
+        cache_key = self._cache_key(name, args)
+        if (cached := self._cache_get(cache_key)) is not None:
+            return cached
         try:
             result = self.rpc("tools/call", {"name": name, "arguments": args})
         except httpx.HTTPStatusError:  # session expired (server restarted) -> new session, retry once
             self.__init__(self.url)
             result = self.rpc("tools/call", {"name": name, "arguments": args})
         text = "".join(c.get("text", "") for c in result.get("content", []))
-        if cache_key and text:
-            with self._cache_lock:
-                if len(self._cache) >= MCP_CACHE_MAX:
-                    self._cache.pop(next(iter(self._cache)), None)
-                self._cache[cache_key] = (time.monotonic(), text)
+        self._cache_put(cache_key, text)
         return text
+
+    def call_batch(self, items: list[tuple[str, dict]]) -> list[str]:
+        """Execute multiple MCP tools/call over a single POST /mcp JSON-RPC batch array and fill RAM cache."""
+        results = [""] * len(items)
+        pending = []
+        for idx, (name, args) in enumerate(items):
+            ck = self._cache_key(name, args)
+            if (cached := self._cache_get(ck)) is not None:
+                results[idx] = cached
+            else:
+                pending.append((idx, name, args, ck))
+        if not pending:
+            return results
+        if len(pending) == 1:
+            idx, name, args, _ = pending[0]
+            results[idx] = self.call(name, args)
+            return results
+        with self._rpc_lock:
+            payload = []
+            id_map = {}
+            for idx, name, args, ck in pending:
+                self.n += 1
+                req_id = self.n
+                id_map[req_id] = (idx, name, args, ck)
+                payload.append({"jsonrpc": "2.0", "id": req_id, "method": "tools/call", "params": {"name": name, "arguments": args}})
+            r = self.http.post(self.url, json=payload, headers=self.headers)
+            if r.status_code >= 400:
+                self.__init__(self.url)
+                r = self.http.post(self.url, json=payload, headers=self.headers)
+            r.raise_for_status()
+            if sid := r.headers.get("mcp-session-id"):
+                self.headers["Mcp-Session-Id"] = sid
+        parsed = json.loads(r.text)
+        if not isinstance(parsed, list):
+            for idx, name, args, _ in pending:
+                results[idx] = self.call(name, args)
+            return results
+        for msg in parsed:
+            req_id = msg.get("id")
+            if req_id not in id_map:
+                continue
+            idx, name, args, ck = id_map.pop(req_id)
+            if "error" in msg:
+                results[idx] = self.call(name, args)
+                continue
+            txt = "".join(c.get("text", "") for c in (msg.get("result") or {}).get("content", []))
+            self._cache_put(ck, txt)
+            results[idx] = txt
+        for idx, name, args, _ in id_map.values():
+            results[idx] = self.call(name, args)
+        return results
 
 
 def tool_spec(name, description, parameters):
@@ -1379,7 +1463,7 @@ STATUS = {"web_search": "กำลังค้นหาในอินเทอ�
           "calc": "กำลังคำนวณ", "general_knowledge": "กำลังถามความรู้ทั่วไป"}
 FILLER_TEXT = {
     "hello": "สวัสดีครับ",
-    "phone_intro": "ผมเจาร์วิส ผู้ช่วยเอไอของบีซีคอลเซ็นเตอร์ครับ ถ้าต้องการคุยกับพนักงานจริง แจ้งให้โทรกลับได้เลยนะครับ ไม่ทราบว่าผมขอเรียกคุณชื่ออะไรดีครับ",
+    "phone_intro": "ผมเจาร์วิส ผู้ช่วยเอไอของบีซีคอลเซ็นเตอร์ครับ ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามเจาร์วิสได้ทันที ส่วนถ้าใช้บีซีแอคเคาท์เวอร์ชันเก่า หรืออยากคุยกับพนักงานจริง แจ้งฝากเบอร์โทรกลับได้เลยนะครับ ไม่ทราบว่าผมขอเรียกคุณชื่ออะไรดีครับ",
     "wait_th_1": "แป๊บนะครับ",
     "wait_th_2": "ครับผม ขอเช็กนิดนึงนะ",
     "wait_th_3": "เดี๋ยวดูให้นะครับ",
@@ -1656,6 +1740,8 @@ MENU_CODE_ASK = re.compile(r"(?:\b[1-9]\d{3}\b|\b\d+\.\d+(?:\.\d+)?\b|รหั�
 
 def mcp_tool(server, client, name):
     def run(**args):
+        if name == "ask_brain" and "compact" not in args:
+            args = {**args, "compact": True}
         text = client.call(name, args)
         if _is_brain_abstain(text):
             return [], f"{text}\n(ระบบ: สมองคืน Abstain ไม่มีข้อมูลยืนยัน ห้ามเดาหรือแต่งคำตอบเอง ให้แจ้งตรงๆ ว่าไม่มีข้อมูลยืนยันในระบบ)"
@@ -1693,7 +1779,27 @@ def connect_mcp(server, url):
     return None
 
 
+MCP_CLIENTS: dict[str, MCPClient] = {}
 LEGACY_BRAIN_TOOLS = frozenset({"search_brain", "read_note", "ask_brain"})
+
+
+def _prefetch_mcp_batch(calls: list[tuple[str, dict]], tools: dict) -> None:
+    """Warm MCPClient RAM cache in 1 POST /mcp JSON-RPC batch array when multiple bcbrain calls run together."""
+    if len(calls) < 2:
+        return
+    client = MCP_CLIENTS.get("bcbrain")
+    if client is None or not hasattr(client, "call_batch"):
+        return
+    batch_items = [
+        (n, ({**a, "compact": True} if n == "ask_brain" and "compact" not in a else dict(a)))
+        for n, a in calls
+        if WORKER.get(n) == "bcbrain" and n in tools
+    ]
+    if len(batch_items) >= 2:
+        try:
+            client.call_batch(batch_items)
+        except Exception as e:
+            log.debug("MCP batch prefetch skipped (%s)", type(e).__name__)
 
 
 def load_mcp_tools():
@@ -1703,6 +1809,7 @@ def load_mcp_tools():
             log.warning("MCP %s unavailable -> its tools are skipped", server)
             continue
         client, tools = connected
+        MCP_CLIENTS[server] = client
         tool_names = {t["name"] for t in tools}
         # When fast single-round-trip tools (quick_answer + batch_read) are available, hide slower legacy tools
         # from the LLM schema to prevent 3-4 round duplicate searches while keeping them in TOOLS for internal use.
@@ -2203,7 +2310,12 @@ def plain_turn(messages):
 BRAIN_DOWN_BODY = "ตอนนี้ระบบตอบไม่ได้ชั่วคราว รบกวนถามใหม่อีกครั้งนะครับ"
 BRAIN_DOWN = f"ขอโทษครับ {BRAIN_DOWN_BODY}"
 # the secretary's own fixed lines: words from its greeting or status talk are no new claim
-OWN_WORDS = "\n".join([SAY_WORDS, BRAIN_DOWN, *FILLER_TEXT.values()])
+OWN_WORDS = "\n".join([
+    SAY_WORDS,
+    BRAIN_DOWN,
+    "เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามเจาร์วิสได้ในเวอร์ชันใหม่ ถ้าเป็นบีซีแอคเคาท์เวอร์ชันเก่าให้ฝากเบอร์โทรกลับ เดี๋ยวเจ้าหน้าที่ติดต่อกลับ",
+    *FILLER_TEXT.values(),
+])
 # talk about the talk itself (log 2026-11-09..10: 44 sentences cut by the judge, half of them "ช่วยสะกดหรือบอกอีกนิด
 # ได้ไหมครับ", "ขอโทษที่เข้าใจคลาดไป", "ได้ยินชัดครับ"): no product, offer, person, place or time word may go in here.
 # These shrink the new-word list only: in the judge's SOURCES they flipped small talk (A/B 2026-11-10: 3/5 -> 2/5)
@@ -2662,6 +2774,23 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 if has_prior_topic else
                 "(3) สายนี้ยังไม่มีหัวข้อคุยต่อเนื่อง ต้องถามด้วยว่าต้องการให้โทรกลับเรื่องอะไร เช่น ปัญหาของโปรแกรม สนใจโปรแกรม หรือเรื่องอื่น"
             )
+            prior_assistant_msgs = [
+                (m.get("content") or "")
+                for idx_m, m in enumerate(history)
+                if m.get("role") == "assistant" and not (idx_m == 0 and FILLER_TEXT["phone_intro"][:25] in (m.get("content") or ""))
+            ]
+            cb_already_saved = LEAD_COUNT.get(cid, 0) > 0 or any(
+                re.search(r"บันทึกเรื่องฝาก|ส่งเรื่องให้พนักงานโทรกลับ|ติดต่อกลับที่เบอร์นี้", msg) for msg in prior_assistant_msgs
+            )
+            cb_offered_recently = any(
+                re.search(r"โทรกลับ|ฝ่ายขายโทร|พนักงานโทร|ติดต่อกลับ", msg) for msg in prior_assistant_msgs[-4:]
+            )
+            if cb_already_saved:
+                cb_restraint = " (บันทึกเรื่องโทรกลับในสายนี้ไปแล้ว ห้ามถามเรื่องโทรกลับซ้ำอีก ให้คุยช่วยเรื่องอื่นต่อไปเรื่อยๆ)"
+            elif cb_offered_recently:
+                cb_restraint = " (เพิ่งพูดเรื่องโทรกลับไปแล้วในรอบก่อนหน้า ห้ามถามเรื่องโทรกลับซ้ำในรอบนี้ ให้คุยตอบคำถามไปเรื่อยๆ อย่างเป็นธรรมชาติ)"
+            else:
+                cb_restraint = " (ห้ามถามหรือเสนอโทรกลับบ่อยเกินไป ให้คุยตอบคำถามไปเรื่อยๆ ถามเรื่องโทรกลับบ้างเฉพาะเมื่อจำเป็นจริงๆ ลูกค้าขอเอง หรือเป็นบีซีแอคเคาท์เวอร์ชันเก่าเท่านั้น)"
             phone_note = (
                 f" เบอร์โทรที่ลูกค้าโทรเข้ามาคือ {c_phone} ({dashed_p} อ่านว่า {spoken_p}) "
                 f"— ถ้าลูกค้าถามเบอร์ที่โทรเข้ามาให้บอกเบอร์นี้ได้เลยเป็นคำอ่านไทย "
@@ -2669,7 +2798,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 f"(1) ชื่อลูกค้า (ถ้ายังไม่มีในระบบต้องถามให้สำเร็จ) "
                 f"(2) ถามยืนยันเสมอว่าจะให้โทรกลับเบอร์ที่โทรเข้ามานี้ ({spoken_p}) หรือให้โทรกลับเบอร์อื่น และ "
                 f"{topic_cb_rule} "
-                f"เมื่อครบทั้งสามอย่างแล้วจึงเรียก leave_message ทันที"
+                f"เมื่อครบทั้งสามอย่างแล้วจึงเรียก leave_message ทันที{cb_restraint}"
             )
         topic_note = f" เรื่องที่คุยไว้ครั้งก่อน: {c_topic}" if c_topic else ""
         if c_name:
@@ -2823,6 +2952,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                     calls.append(("lookup_menu", {"query": clean_q0, **zone, "limit": 5}))
                 if "search_docs" in tools and not phone_mode:
                     calls.append(("search_docs", {"query": qs[0]}))
+                _prefetch_mcp_batch(calls, tools)
                 texts = yield from dispatch(calls, said, turn, tools)
                 qa_text = texts[0] if texts else ""
                 abstained = any(_is_brain_abstain(t) for t in texts)
@@ -2878,7 +3008,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                  "ห้ามครอบผังย่อหน้าด้วย ``` และห้ามใส่ตัวเลขสองหลักขึ้นไปหรือวันที่สมมติเองโดยไม่ผ่าน calc ถ้าไม่ได้เรียก calc ให้ใช้รหัสติดตัวอักษรเช่น WH01, A01, SKU01)")
             )
             reuse_hint = (
-                "สมองคืนค่า Abstain (ไม่มีข้อมูลยืนยันในระบบ) ห้ามเดาหรือแต่งคำตอบเองเด็ดขาด ให้แจ้งลูกค้าตรงๆ ว่าไม่มีข้อมูลยืนยันในระบบ และเสนอให้พนักงานโทรกลับช่วยตรวจสอบแทน "
+                "สมองคืนค่า Abstain (ไม่มีข้อมูลยืนยันในระบบ) ห้ามเดาหรือแต่งคำตอบเองเด็ดขาด ให้แจ้งลูกค้าตรงๆ ว่ายังไม่มีข้อมูลยืนยันในระบบ แล้วชวนคุยต่ออย่างเป็นธรรมชาติ ไม่ต้องรีบถามเรื่องโทรกลับทุกครั้ง (เสนอให้ฝากเบอร์โทรกลับเฉพาะเมื่อจำเป็นจริงๆ ลูกค้าขอเอง หรือเป็นบีซีแอคเคาท์เวอร์ชันเก่าเท่านั้น) "
                 if abstained else
                 ("ผลค้นจาก quick_answer/batch_ask ด้านบนมีข้อมูลพร้อมแล้ว ให้ใช้ตอบทันทีได้เลย ห้ามเรียก quick_answer ซ้ำด้วยคำถามเดิม "
                  "เรียก lookup_menu หรือ batch_read เพิ่มเฉพาะเมื่อข้อมูลด้านบนยังขาดรหัสเมนูหรือรายละเอียดสำคัญจริงๆ เท่านั้น "
@@ -3078,6 +3208,8 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 and not turn.get("silent")
                 and not turn.get("cut")
                 and not used_lead
+                and not locals().get("abstained")
+                and not _FOLLOWUP_START_RE.match((heard or "").strip())
                 and said
                 and said[0] not in (CUT_ALL, SCREEN_ONLY, BRAIN_DOWN, BRAIN_DOWN_BODY)
                 and BRAIN_DOWN_BODY not in " ".join(said)
@@ -3129,7 +3261,7 @@ def greet(*_, public=False):
             if c_calls > 1 and last_topic:
                 greeting = (
                     f"สวัสดีครับ ยินดีต้อนรับกลับมาครับ ผมเจาร์วิส ผู้ช่วยเอไอของบีซีคอลเซ็นเตอร์ครับ "
-                    f"ถ้าต้องการคุยกับพนักงานจริงแจ้งให้โทรกลับได้นะครับ คราวก่อนเราคุยเรื่อง{last_topic}กันไว้ "
+                    f"ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามผมได้ทันที ส่วนถ้าใช้บีซีแอคเคาท์เวอร์ชันเก่าแจ้งฝากเบอร์โทรกลับได้นะครับ คราวก่อนเราคุยเรื่อง{last_topic}กันไว้ "
                     f"ไม่ทราบว่าขอเรียกคุณชื่ออะไรดีครับ"
                 )
                 hist_g.append({"role": "assistant", "content": greeting})
@@ -3149,7 +3281,7 @@ def greet(*_, public=False):
     yield bot_out(FILLER_TEXT["hello"], FILLERS["hello"], lead=0.25)
     back = "ผู้โทรคนนี้เคยคุยกันแล้ว ทักต่อแบบคนคุ้นเคยตามเรื่องก่อนหน้าได้เลย " if session(public)[1] else ""
     note = (f"{CALL_START} พูดว่า{FILLER_TEXT['hello']}ไปแล้ว ห้ามทักซ้ำ "
-            f"แนะนำตัวสั้นๆ ว่าผมคือเจาร์วิส ผู้ช่วยเอไอของบีซีคอลเซ็นเตอร์ คุยได้ทุกภาษา และถ้าต้องการคุยกับพนักงานจริงแจ้งให้โทรกลับได้เลย "
+            f"แนะนำตัวสั้นๆ ว่าผมคือเจาร์วิส ผู้ช่วยเอไอของบีซีคอลเซ็นเตอร์ คุยได้ทุกภาษา ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามเจาร์วิสได้ทันที ส่วนถ้าใช้บีซีแอคเคาท์เวอร์ชันเก่าหรืออยากคุยกับพนักงานจริงแจ้งฝากเบอร์โทรกลับได้ "
             f"แล้วถามขอชื่อลูกค้าอย่างสุภาพและถามว่าจะให้ช่วยดูแลเรื่องไหน {back}"
             "ห้ามพูดเรื่องอากาศ ข่าว หรือข้อเท็จจริงใดที่ไม่ได้มาจากผลค้น")  # it once invented sunny weather in a hello
     # ponytail: on the owner line the brief goes to whoever calls first that day (127.0.0.1 only)
