@@ -174,6 +174,13 @@ CHECKS = [
                        [("เรื่องระบบบัญชี", 0.8, LOUD)], False, want_sent=0),
     lambda: check_live("browser: the caller's words are shown", False, TELLING,
                        [("ขอถามราคาหน่อย", 0.8, LOUD)], False, want_sent=1),
+    # 2026-11-24: 1-syllable glitches ("แห่"), bare digits ("660"), and -35 dBFS side chatter must not cut off
+    lambda: check_live("phone: 1-syllable misheard glitch does not cut in", True, TELLING,
+                       [("แห่", 0.8, -28.0)], False, want_log="too quiet to cut in"),
+    lambda: check_live("phone: bare digits alone do not cut in", True, TELLING,
+                       [("660", 0.8, -25.0)], False, want_log="too quiet to cut in"),
+    lambda: check_live("phone: -35 dBFS side chatter rejected by -31 dBFS threshold", True, TELLING,
+                       [("ราคาโปรแกรม", 0.8, -35.0)], False, want_log="too quiet to cut in"),
     # 2026-11-23 17:00:00: the caller's "ใช่" to "...ใช่ไหมครับ" was dropped as the secretary's own voice
     lambda: check_turn("phone: a yes made of the question's word is a turn", True, ASKING, "ใช่", False),
     lambda: check_turn("browser: its own words back are still echo", False, ASKING, "ใช่ไหมครับ", True),

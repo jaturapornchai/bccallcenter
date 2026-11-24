@@ -577,6 +577,27 @@ def _has_stt_stutter(text: str) -> bool:
     return bool(s and (_STT_STUTTER_3_RE.search(s) or _STT_STUTTER_2X3_RE.search(s)))
 
 
+def _stt_stutter_guard_helper_anchor():  # kept adjacent to _choose_triple_ear
+    pass
+
+
+_STT_DOMAIN_FIX_RE = re.compile(
+    r"(?:เวอร์ชัน|เวอร์ชั่น|เบอร์|แพ็กเกจ|สต็อก|สต๊อก|บัญชี|ภาษี|รายงาน|ใบกำกับ|ใบเสนอราคา|ใบเสร็จ|ลูกหนี้|เจ้าหนี้|ต้นทุน|คลาวด์|ออฟฟิศ|ไลน์|เว็บไซต์)"
+)
+
+
+def _prefer_openthai_domain(ear1: str, ear2: str, ear3: str) -> bool:
+    """True when both OpenThai ears (e2 & e3) agree on a canonical BC domain word missing from Whisper e1."""
+    e1, e2, e3 = (ear1 or "").strip(), (ear2 or "").strip(), (ear3 or "").strip()
+    if not e2 or not e3 or _has_stt_stutter(e2):
+        return False
+    shared = set(_STT_DOMAIN_FIX_RE.findall(e2)) & set(_STT_DOMAIN_FIX_RE.findall(e3))
+    if not shared:
+        return False
+    m1 = set(_STT_DOMAIN_FIX_RE.findall(e1))
+    return bool(shared - m1)
+
+
 def _choose_triple_ear(ear1: str, ear2: str, ear3: str, lang: str | None) -> tuple[str, list[str]]:
     """Select the primary transcript from Triple-Ear ASR (ear1=Whisper GPU, ear2=OpenThai th-TH, ear3=OpenThai th-mix)
     and collect distinct alternate hearings to pass to DeepSeek at 0ms extra latency."""
@@ -765,7 +786,7 @@ def transcribe_final(audio):
             _has_stt_stutter(ear1)
             or (len(e2_clean) >= 8 and len(ear1.strip()) >= len(e2_clean) * 2 and not _has_stt_stutter(e2_clean))
         )
-        if e1_garbled and len(e2_clean) >= 4 and not _has_stt_stutter(e2_clean):
+        if (e1_garbled and len(e2_clean) >= 4 and not _has_stt_stutter(e2_clean)) or _prefer_openthai_domain(ear1, ear2, ear3):
             picked = ear2
             alt_sources = (ear1, ear3)
         else:
@@ -963,12 +984,30 @@ _LETTER_TH = dict(zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", (
 )))
 
 
+_URL_LINE_TTS_RULES = (
+    (re.compile(r"https?://", re.I), ""),
+    (re.compile(r"(?:www\.)?bcaccount\.com/pricing\b", re.I), " ดับเบิลยู ดับเบิลยู ดับเบิลยู ดอท บีซี แอคเคานต์ ดอท คอม สแลช ไพรซ์ซิ่ง "),
+    (
+        re.compile(r"(?:www\.)?bcaccount\.com\b", re.I),
+        lambda m: (" ดับเบิลยู ดับเบิลยู ดับเบิลยู ดอท " if m.group(0).lower().startswith("www.") else " ") + "บีซี แอคเคานต์ ดอท คอม ",
+    ),
+    (re.compile(r"(?:@bcaccount|แอดบีซีแอคเคาท์|แอดบีซีแอคเคานต์)", re.I), " แอด บี ซี แอค เคานต์ "),
+    (re.compile(r"\bwww\.", re.I), " ดับเบิลยู ดับเบิลยู ดับเบิลยู ดอท "),
+    (re.compile(r"\.co\.th\b", re.I), " ดอท ซี โอ ดอท ที เอช "),
+    (re.compile(r"\.com\b", re.I), " ดอท คอม "),
+)
+
+
 def _thai_pronounce(text):
     """Write English terms in Thai spelling and spell short acronyms out by letter. Measured on F5-TTS-THAI, the voice
     before 2026-11-17: the words in _THAI_TERMS came back wrong as written and right in Thai spelling (Whisper read-back).
     ponytail: not measured again on OmniVoice; Thai spelling is what its Thai training data looks like."""
     # the prompts and the boss spell Account "แอคเคาท์": the greeting came back "BCAX เข้าครับ"; with "แอคเคานต์" it came back right
-    out = _TERM_RE.sub(lambda m: _TERM_MAP[m.group(1).lower()], str(text).replace("แอคเคาท์", "แอคเคานต์"))
+    out = str(text)
+    for pat, rep in _URL_LINE_TTS_RULES:
+        out = pat.sub(rep, out)
+    out = re.sub(r"@([A-Za-z0-9_]{2,})", r" แอด \1 ", out)
+    out = _TERM_RE.sub(lambda m: _TERM_MAP[m.group(1).lower()], out.replace("แอคเคาท์", "แอคเคานต์"))
     out = re.sub(r"(?<![A-Za-z0-9])[A-Z]{2,5}(?![A-Za-z0-9])",
                  lambda m: " " + "".join(_LETTER_TH[c] for c in m.group(0)) + " ", out)
     return re.sub(r"\s+", " ", out).strip()
@@ -1471,6 +1510,8 @@ STATUS = {"web_search": "กำลังค้นหาในอินเทอ�
 FILLER_TEXT = {
     "hello": "สวัสดีครับ",
     "phone_intro": "ผมเจาร์วิส ผู้ช่วยเอไอของบีซีคอลเซ็นเตอร์ครับ สำหรับลูกค้าถ้าเป็นบีซีแอคเคาท์เวอร์ชันเก่า หรืออยากคุยกับพนักงานจริง ให้ฝากเบอร์โทรกลับ เดี๋ยวเจ้าหน้าที่ติดต่อกลับครับ ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามเจาร์วิสได้ในเวอร์ชันใหม่เลย ไม่ทราบว่าขอเรียกคุณชื่ออะไรดีครับ",
+    "version_notice": "ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามเจาร์วิสได้ในเวอร์ชันใหม่ ส่วนถ้าเป็นบีซีแอคเคาท์เวอร์ชันเก่าฝากเบอร์โทรกลับให้เจ้าหน้าที่ติดต่อกลับได้นะครับ",
+    "returning_ask": "วันนี้มีเรื่องไหนให้ผมช่วยดูครับ",
     "wait_th_1": "แป๊บนะครับ",
     "wait_th_2": "ครับผม ขอเช็กนิดนึงนะ",
     "wait_th_3": "เดี๋ยวดูให้นะครับ",
@@ -2326,7 +2367,7 @@ SCREEN_ONLY = "รายละเอียดผมแสดงไว้บน�
 # slips past until it is added here
 STALL = re.compile(r"(ขอ|เดี๋ยว)(ผม)?(ให้(ลูก)?ทีม)?(อ่าน|เปิด|ค้น|ดู|เช็ก|ตรวจ)")
 STALL_NUDGE = "(ระบบ: คุณบอกว่าจะอ่านหรือค้นเพิ่ม แต่ยังไม่ได้สั่งลูกทีม ให้เรียกเครื่องมือตอนนี้เลย หรือตอบจากผลที่ลูกทีมค้นให้แล้ว ห้ามบอกว่าจะอ่านอีก)"
-LEAD_PROMISE = re.compile(r"ติดต่อกลับ|ประสาน|ส่งเรื่อง|ฝากเรื่อง")  # the boss telling a customer the message will be passed on
+LEAD_PROMISE = re.compile(r"ติดต่อกลับ|ประสาน|ส่งเรื่อง|ฝากเรื่อง|บันทึกเรื่องฝาก|บันทึกไว้ให้แล้ว")  # the boss telling a customer the message will be passed on
 LEAD_NUDGE = ("(ระบบ: ลูกค้าขอให้พนักงานจริงติดต่อกลับและยืนยันเบอร์แล้ว แต่ยังไม่ได้เรียก leave_message ข้อความฝากยังไม่ถูกบันทึก "
               "ถ้ามีชื่อลูกค้าและลูกค้ายืนยันเบอร์โทรกลับแล้วให้เรียก leave_message ตอนนี้เลย ถ้ายังไม่มีชื่อให้ถามชื่อให้สำเร็จ หรือถ้ายังไม่ได้ถามว่าจะให้โทรกลับเบอร์นี้หรือเบอร์อื่นให้ถามยืนยันก่อน "
               "ถ้ายังไม่มีเรื่องที่คุยต่อเนื่องและลูกค้ายังไม่บอกว่าให้โทรกลับเรื่องอะไร ให้ถามก่อนว่าต้องการให้โทรกลับเรื่องอะไร (ปัญหาของโปรแกรม หรือเรื่องอื่น))")
@@ -2546,14 +2587,74 @@ def _is_incomplete_thai_tail(text: str) -> bool:
     return bool(_INCOMPLETE_TAIL_RE.search(s))
 
 
+_STANDALONE_TOPIC_RE = re.compile(
+    r"(?:เบอร์โทร|ติดต่อ|เว็บไซต์|ไลน์|ราคา|แพ็กเกจ|ติดตั้ง|คลาวด์|ออฟฟิศ|เวอร์ชัน|เวอร์ชั่น|รุ่น)"
+)
+
+
+def _phone_grounding_numbers(phone: str) -> set[str]:
+    """Return full, local-0, and standard Thai hyphenated chunk digit strings for a caller phone so grounding never cuts it."""
+    digits = re.sub(r"\D", "", str(phone or ""))
+    if not digits:
+        return set()
+    forms = {digits}
+    if digits.startswith("66") and len(digits) >= 10:
+        forms.add("0" + digits[2:])
+    out = set()
+    for f in forms:
+        if len(f) >= 2:
+            out.add(f)
+        if len(f) == 10 and f.startswith("0"):
+            out.update((f[:3], f[3:6], f[6:], f[3:], f[:6], f[:4], f[4:7], f[7:]))
+        elif len(f) == 9 and f.startswith("02"):
+            out.update((f[:2], f[2:5], f[5:], f[:5], f[2:]))
+        elif len(f) == 9:
+            out.update((f[:3], f[3:6], f[6:], f[2:5], f[5:]))
+    return {x for x in out if len(x) >= 2}
+
+
+_NON_SEARCH_STRIP_RE = re.compile(
+    r"(?:สวัสดี|หวัดดี|ฮัลโหล|ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|คับ|ผมชื่อว่า|ดิฉันชื่อว่า|หนูชื่อว่า|ฉันชื่อว่า|พี่ชื่อว่า|"
+    r"ผมชื่อ|ดิฉันชื่อ|หนูชื่อ|ฉันชื่อ|พี่ชื่อ|เรียกผมว่า|เรียกพี่ว่า|เรียกว่า|ชื่อเล่นว่า|ชื่อเล่น|ชื่อว่า|ชื่อ|คุณ|พี่|ท่าน)"
+)
+_CB_INTENT_ONLY_RE = re.compile(r"(?:ฝากเบอร์|โทรกลับ|ติดต่อกลับ|คุยกับพนักงาน|ขอพบพนักงาน|เบอร์นี้|เบอร์เดิม|ใช่เบอร์นี้)")
+_REAL_Q_OR_PRODUCT_RE = re.compile(
+    r"(?:ราคาเท่าไหร่|ราคา|กี่บาท|แพ็กเกจ|รุ่น|เวอร์ชัน|เวอร์ชั่น|ทำได้ไหม|ทำได้มั้ย|ยังไง|อย่างไร|เมนูไหน|คืออะไร|ต่างกัน|"
+    r"เว็บไซต์|เว็บไหน|เบอร์อะไร|ติดต่อที่ไหน|สินค้า|สต็อก|สต๊อก|บัญชี|ภาษี|รายงาน|ติดตั้ง|คลาวด์|ออฟฟิศ|ลองใช้|เดโม)"
+)
+
+
+def _is_non_search_phone_turn(heard: str, detected_name: str, history: list[dict]) -> bool:
+    """True when phone turn is pure name introduction or callback confirmation/request needing no BC Brain search."""
+    s = (heard or "").strip()
+    if not s:
+        return False
+    if detected_name:
+        rem = s.replace(detected_name, " ")
+        rem = _NON_SEARCH_STRIP_RE.sub(" ", rem)
+        rem = re.sub(r"[\s.,!?…]+", "", rem)
+        if len(rem) < 4:
+            return True
+    prev_bot = history[-1].get("content", "") if history and history[-1].get("role") == "assistant" else ""
+    prev_asked_cb = bool(re.search(r"เบอร์นี้|เบอร์อื่น|ติดต่อกลับเรื่องอะไร", prev_bot))
+    if prev_asked_cb and re.search(r"(?:ใช่|เบอร์นี้|เบอร์เดิม|ฝากเบอร์|โทรกลับ|ติดต่อกลับ)", s):
+        if not re.search(r"(?:ราคาเท่าไหร่|กี่บาท|ทำได้ไหม|ยังไง|อย่างไร|เมนูไหน|คืออะไร|ต่างกัน|เว็บไหน|เบอร์อะไร)", s):
+            return True
+    if _CB_INTENT_ONLY_RE.search(s) and not _REAL_Q_OR_PRODUCT_RE.search(s):
+        return True
+    return False
+
+
 def _build_phone_fallback_queries(heard: str, alt_heard: list[str], history: list[dict]) -> list[str]:
     """Zero-latency (0ms) multi-ear + context query builder when early search_words is absent or skipped."""
     base = (heard or "").strip()
     if not base:
         return []
     # Attach recent topic context whenever the turn is short OR opens with a continuation word (e.g. "แล้วมีรายงานให้ดูไหม")
+    # unless the caller clearly asked a standalone topic question (e.g. "แล้วก็เบอร์โทรติดต่อเบอร์อะไร").
     ctx_anchor = ""
-    if history and (len(base) <= 20 or bool(_FOLLOWUP_START_RE.match(base)) or bool(_VAGUE_FOLLOWUP_RE.search(base))):
+    standalone_topic = len(base) >= 14 and bool(_STANDALONE_TOPIC_RE.search(base))
+    if history and not standalone_topic and (len(base) <= 20 or bool(_FOLLOWUP_START_RE.match(base)) or bool(_VAGUE_FOLLOWUP_RE.search(base))):
         for m in reversed(history[-4:]):
             c = (m.get("content") or "").partition(C.SCREEN_MARK)[0].strip()
             if c and not c.startswith(("(", C.SILENT_MARK)):
@@ -2587,7 +2688,7 @@ def search_words(history, heard, alt_heard=None, allow_sync=True):
         phone_now = "on_phone" in globals() and on_phone()
         job = early or (WORDS_POOL.submit(worker_chat, ask, None) if phone_now else None)
         if early:
-            text, _ = early.result(timeout=0.40 if phone_now else None)
+            text, _ = early.result(timeout=0.05 if phone_now else None)
         elif job is not None:
             text, _ = job.result(timeout=1.15)
         else:
@@ -2812,6 +2913,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
         elif action == "declined":
             now += f"\n(ระบบภาษา: ลูกค้าปฏิเสธการเปลี่ยนภาษา ให้คุยภาษาเดิม {LANG_NAMES.get(cur_lang or 'th', 'ภาษาไทย')} ต่อตามปกติ)"
 
+    detected_name = ""
     if cid and heard and not hello:
         prev_bot_msg = history[-1]["content"] if history and history[-1].get("role") == "assistant" else ""
         detected_name, explicit_name = _extract_caller_name_py(heard, prev_bot_msg)
@@ -2827,7 +2929,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
         now += f"\n{CALL_CONTEXT.pop(cid)}"
     if cid and on_phone() and not hello and cid in CALL_GREET_SENT_AT:
         greet_sent_at = CALL_GREET_SENT_AT.pop(cid, 0.0)
-        if greet_sent_at and (time.monotonic() - greet_sent_at) < 7.5:
+        if greet_sent_at and (time.monotonic() - greet_sent_at) < 5.0:
             now += (
                 "\n(ระบบ: คำทักทายต้นสายถูกพูดแทรกยังไม่จบ ให้บอกลูกค้าสั้นๆ 1 ประโยคด้วยว่า "
                 "สำหรับลูกค้าถ้าเป็นบีซีแอคเคาท์เวอร์ชันเก่าให้ฝากเบอร์โทรกลับ เดี๋ยวเจ้าหน้าที่ติดต่อกลับ "
@@ -2855,9 +2957,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 for idx_m, m in enumerate(history)
                 if m.get("role") == "assistant" and not (idx_m == 0 and FILLER_TEXT["phone_intro"][:25] in (m.get("content") or ""))
             ]
-            cb_already_saved = LEAD_COUNT.get(cid, 0) > 0 or any(
-                re.search(r"บันทึกเรื่องฝาก|ส่งเรื่องให้พนักงานโทรกลับ|ติดต่อกลับที่เบอร์นี้", msg) for msg in prior_assistant_msgs
-            )
+            cb_already_saved = LEAD_COUNT.get(cid, 0) > 0
             cb_offered_recently = any(
                 re.search(r"โทรกลับ|ฝ่ายขายโทร|พนักงานโทร|ติดต่อกลับ", msg) for msg in prior_assistant_msgs[-4:]
             )
@@ -2966,6 +3066,8 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             now += f"\n(ผลจาก web_search ตอนนี้: {(yield from dispatch([('web_search', {'query': heard})], said, turn, tools))[0]})"
         elif heard and (FAST_CHAT.match(heard.strip()) or MULTILANG_FAST_CHAT.match(heard.strip())):  # bare hello/thanks/hold: answer right away (~0.9 s faster, no wasted search)
             pass
+        elif heard and on_phone() and _is_non_search_phone_turn(heard, detected_name, history):
+            pass  # name intro or pure callback confirm/request: answer directly with 0ms wait filler / 0 MCP call
         elif heard and not on_phone() and not stay_topic and (wording := search_words(history, heard))[1] and not was:  # off the topic, maybe misheard: ask, search nothing
             topic, new = wording[1]
             log.info("topic jump? %s -> %s", topic, new)  # the log watcher learns from these
@@ -3105,6 +3207,8 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
         messages = [{"role": "system", "content": sys_msg}, *history,
                     {"role": "user", "content": now.strip()}]
         known = grounding.numbers(" ".join(m["content"] for m in messages[1:]))  # every number a source gave this turn
+        if cid and (meta_p := (CALL_CALLER_META.get(cid) or {}).get("phone")):
+            known |= _phone_grounding_numbers(meta_p)
         if bootstrap_pack:
             known |= grounding.numbers(bootstrap_pack)
         answered = True
@@ -3210,14 +3314,17 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             # ponytail: words, not meaning; a promise in other words ends the turn unsaved as before
             prev_asked_cb = bool(history and re.search(r"เบอร์นี้|เบอร์อื่น|โทรกลับเบอร์", history[-1].get("content", "")))
             confirmed_same_phone = prev_asked_cb and bool(re.search(r"เบอร์นี้|เบอร์เดิม|เบอร์ที่โทร|ใช้เบอร์นี้|เอาเบอร์นี้|ใช่|ครับ|ค่ะ|ได้|โอเค", heard))
+            caller_phone_digits = spoken_digits((CALL_CALLER_META.get(cid) or {}).get("phone") or "")
+            caller_phone_ok = 9 <= len(caller_phone_digits) <= 15
+            bot_claimed_saved = bool(re.search(r"บันทึก(?:เรื่อง)?(?:ฝาก|ไว้ให้แล้ว)|ฝากเรื่อง(?:ไว้)?ให้แล้ว|ส่งเรื่องให้พนักงาน", " ".join(said)))
+            caller_asked_cb = bool(re.search(r"ฝากเบอร์|โทรกลับ|ติดต่อกลับ|คุยกับพนักงาน", heard))
             has_callback_phone = (
                 9 <= len(spoken_digits(heard)) <= 15
-                or (
-                    confirmed_same_phone
-                    and 9 <= len(spoken_digits((CALL_CALLER_META.get(cid) or {}).get("phone") or "")) <= 15
-                )
+                or (confirmed_same_phone and caller_phone_ok)
+                or ((bot_claimed_saved or (caller_asked_cb and bool(re.search(r"เบอร์เดิม|เบอร์นี้|เบอร์ที่โทร", " ".join(said) + " " + heard)))) and caller_phone_ok)
             )
             if (not calls and rnd < max_rounds and not turn.get("lead_nudged") and "leave_message" in tools
+                    and LEAD_COUNT.get(cid, 0) == 0
                     and has_callback_phone and c_name
                     and (has_prior_topic or _has_continuous_topic("", [{"role": "user", "content": heard}]))
                     and LEAD_PROMISE.search(" ".join(said))
@@ -3241,6 +3348,9 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             texts = yield from dispatch([(c["name"], c["args"]) for c in calls], said, turn, tools)
             messages += [{"role": "tool", "tool_call_id": c["id"], "content": text} for c, text in zip(calls, texts)]
             known |= grounding.numbers(" ".join(texts))
+            for c in calls:
+                if c.get("name") == "leave_message":
+                    known |= _phone_grounding_numbers(c.get("args", {}).get("phone") or "")
         # a greeting or reminder just drops the phrase: "not found" fits no hello. Nothing said at all went silent
         # (eval 2026-11-08, 2 of 12 runs, no cut, no error): that too gets the ask-for-more line
         if heard and not said and not turn.get("silent"):
@@ -3323,28 +3433,32 @@ def greet(*_, public=False):
                 yield AdditionalOutputs({"kind": "done"})
                 return
             if cur_lang == "th":
+                sid_g, hist_g = session(public)
                 addressed = _format_addressed_name(c_name)
-                if last_topic:
-                    greeting = f"สวัสดีครับ{addressed} เจาร์วิสครับ ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามผมได้ในเวอร์ชันใหม่ ส่วนถ้าเป็นบีซีแอคเคาท์เวอร์ชันเก่าฝากเบอร์โทรกลับได้นะครับ คราวก่อนเราคุยเรื่อง{last_topic}กันไว้ วันนี้คุยต่อเรื่องเดิมหรือมีเรื่องไหนให้ช่วยดูครับ"
-                else:
-                    greeting = f"สวัสดีครับ{addressed} เจาร์วิสครับ ดีใจที่ได้คุยกันอีกนะครับ ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามเจาร์วิสได้ในเวอร์ชันใหม่ ส่วนถ้าเป็นบีซีแอคเคาท์เวอร์ชันเก่าฝากเบอร์โทรกลับให้เจ้าหน้าที่ติดต่อกลับได้ครับ"
+                name_greet = f"{addressed} เจาร์วิสครับ"
+                full_greet = f"{FILLER_TEXT['hello']} {name_greet} {FILLER_TEXT['version_notice']} {FILLER_TEXT['returning_ask']}"
+                hist_g.append({"role": "assistant", "content": full_greet})
+                del hist_g[: -2 * C.HISTORY_TURNS]
+                save_session(sid_g, hist_g)
                 CALL_GREET_SENT_AT[cid] = time.monotonic()
-                yield bot_out(greeting, speak(greeting, lang_override="th", emotion="upbeat"), lead=0.14)
+                yield bot_out(FILLER_TEXT["hello"], FILLERS["hello"], lead=0.12)
+                yield bot_out(name_greet, speak(name_greet, lang_override="th", emotion="upbeat"), lead=0.06)
+                yield bot_out(FILLER_TEXT["version_notice"], _filler_or_speak("version_notice", FILLER_TEXT["version_notice"], "th"), lead=0.08)
+                yield bot_out(FILLER_TEXT["returning_ask"], _filler_or_speak("returning_ask", FILLER_TEXT["returning_ask"], "th"), lead=0.08)
                 yield AdditionalOutputs({"kind": "done"})
                 return
         if cur_lang == "th":
             sid_g, hist_g = session(public)
-            if c_calls > 1 and last_topic:
-                greeting = (
-                    f"สวัสดีครับ ยินดีต้อนรับกลับมาครับ ผมเจาร์วิส ผู้ช่วยเอไอของบีซีคอลเซ็นเตอร์ครับ "
-                    f"ตอนนี้เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์ ถามผมได้ในเวอร์ชันใหม่ ส่วนถ้าใช้บีซีแอคเคาท์เวอร์ชันเก่าให้ฝากเบอร์โทรกลับ เดี๋ยวเจ้าหน้าที่ติดต่อกลับครับ คราวก่อนเราคุยเรื่อง{last_topic}กันไว้ "
-                    f"ไม่ทราบว่าขอเรียกคุณชื่ออะไรดีครับ"
-                )
-                hist_g.append({"role": "assistant", "content": greeting})
+            if c_calls > 1:
+                ask_name = "ไม่ทราบว่าขอเรียกคุณชื่ออะไรดีครับ"
+                full_greet = f"{FILLER_TEXT['hello']} {FILLER_TEXT['version_notice']} {ask_name}"
+                hist_g.append({"role": "assistant", "content": full_greet})
                 del hist_g[: -2 * C.HISTORY_TURNS]
                 save_session(sid_g, hist_g)
                 CALL_GREET_SENT_AT[cid] = time.monotonic()
-                yield bot_out(greeting, speak(greeting, lang_override="th"), lead=0.14)
+                yield bot_out(FILLER_TEXT["hello"], FILLERS["hello"], lead=0.12)
+                yield bot_out(FILLER_TEXT["version_notice"], _filler_or_speak("version_notice", FILLER_TEXT["version_notice"], "th"), lead=0.08)
+                yield bot_out(ask_name, speak(ask_name, lang_override="th"), lead=0.08)
                 yield AdditionalOutputs({"kind": "done"})
                 return
             hist_g.append({"role": "assistant", "content": f"{FILLER_TEXT['hello']} {FILLER_TEXT['phone_intro']}"})
@@ -3481,10 +3595,15 @@ class BargeInReplyOnPause(ReplyOnPause):
                     speech = voiced((sr, stream[-int(sr * C.SIP_BARGE_LEVEL_SPAN_S):]))
                     dbfs = max(dbfs, _audio_dbfs(speech))
                 low_bare = bare.lower()
-                is_real_barge = dbfs >= C.SIP_BARGE_MIN_DBFS and (
-                    bare in self.SIP_CUT_INS
-                    or any(k in low_bare for k in self._BARGE_KEYWORDS)
-                    or len(bare) >= C.SIP_BARGE_MIN_CHARS
+                base_chars = len(re.sub(r"[\u0e31\u0e34-\u0e3a\u0e47-\u0e4e]", "", bare))
+                is_real_barge = (
+                    dbfs >= C.SIP_BARGE_MIN_DBFS
+                    and not bare.isdigit()
+                    and (
+                        bare in self.SIP_CUT_INS
+                        or any(k in low_bare for k in self._BARGE_KEYWORDS)
+                        or (len(bare) >= C.SIP_BARGE_MIN_CHARS and base_chars >= 3)
+                    )
                 )
                 if is_real_barge:
                     self.cut_off(f"word-verified barge-in: {masked(bare)} ({dbfs:.0f} dBFS, {turn_s:.1f}s in)")
@@ -3568,13 +3687,18 @@ class BargeInReplyOnPause(ReplyOnPause):
         # end did not move, `silence` is just capped at the window. Without `chunks` every 0.9 s of quiet counted as
         # new words and re-ran the STT on the whole, growing turn (2026-11-04 19:46: 36 s of audio once a second
         # while the reply was busy, 20 s before the caller's words came out)
+        early_silence = getattr(C, "SIP_EARLY_STT_SILENCE_S", C.EARLY_STT_SILENCE_S) if is_phone else C.EARLY_STT_SILENCE_S
         if early and chunks and state.stream.size - silence * sampling_rate > early[0].size:
             EARLY.pop(id(self), None)[1].cancel()  # still queued: it never runs
             early = None
-        fresh = not early and silence >= C.EARLY_STT_SILENCE_S
+        prev_job = live.get("early_job")
+        prev_busy = prev_job is not None and callable(getattr(prev_job, "done", None)) and not prev_job.done()
+        fresh = not early and not prev_busy and silence >= early_silence
         if fresh:
             ctx_stt = contextvars.copy_context()
-            early = EARLY[id(self)] = (state.stream, EARLY_STT.submit(ctx_stt.run, transcribe_final, (sampling_rate, state.stream)))
+            job = EARLY_STT.submit(ctx_stt.run, transcribe_final, (sampling_rate, state.stream))
+            live["early_job"] = job
+            early = EARLY[id(self)] = (state.stream, job)
         # the secretary neither thinks nor had a phrase on the caller's speaker during this speech (as just_filler counts it)
         if fresh and not state.responding and not any(e + 0.5 > now_m - state.stream.size / sampling_rate for _, e, _, _ in self.playing):
             history = session(self.fn is reply_public)[1]

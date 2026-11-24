@@ -135,6 +135,9 @@ app.prepare().then(async () => {
   }
 
   const server = http.createServer(async (req, res) => {
+    if (req.headers["next-action"]) {
+      return sendJson(res, 404, { ok: false, error: "Not Found" });
+    }
     const urlPath = (req.url || "").split("?")[0];
 
     // --- Internal Loopback-Only Idle Check (no PII, blocked from public/proxy requests) ---

@@ -310,13 +310,14 @@ CARRY_MERGE_S = 5.0  # window (s) to merge a resumed phrase if barge-in stopped 
 # ponytail: 0.4 s ends the turn fast while keeping natural breathing pauses intact
 SIP_PREFIX = "sip-"
 SIP_PAUSE_SILENCE_S = 0.55  # 0.40s chopped 40% of live Thai turns mid-breath (log 2026-11-24); 0.55s keeps natural rhythm
+SIP_EARLY_STT_SILENCE_S = 0.35  # wait slightly longer on phone turns so breathing pauses don't queue redundant GPU STT
 SIP_INCOMPLETE_PAUSE_S = 0.95  # extend wait when live transcript ends on a trailing connector ("ว่า", "แล้ว", "ถ้า", "คือ")
 SIP_BARGE_MIN_SPEECH_S = 0.35
 SIP_MIN_TURN_SPEECH_S = 0.15  # phone glitches <150ms (e.g. 0.06s "และ") are not turns unless they match SIP_CUT_INS
 # Cough & ambient noise rejection thresholds for phone calls (dBFS)
-# Phone recordings (2026-11-23) show line noise floor at -59..-72 dBFS while quiet callers speak at -34..-40 dBFS.
+# Phone recordings (2026-11-23) show line noise floor at -59..-72 dBFS while callers cut in cleanly around -15..-28 dBFS.
 SIP_MIN_SPEECH_DBFS = float(os.environ.get("SIP_MIN_SPEECH_DBFS", "-41.0"))  # allow quiet callers while blocking -59..-72 dBFS line floor
-SIP_BARGE_MIN_DBFS = float(os.environ.get("SIP_BARGE_MIN_DBFS", "-36.0"))    # barge-in must be foreground speech (above -40 dBFS distant chatter)
+SIP_BARGE_MIN_DBFS = float(os.environ.get("SIP_BARGE_MIN_DBFS", "-31.0"))    # barge-in must be clear foreground speech (blocks -35..-36 dBFS side chatter)
 SIP_BARGE_MIN_CHARS = int(os.environ.get("SIP_BARGE_MIN_CHARS", "2"))        # interrupt as soon as real spoken words are heard (not coughs)
 SIP_BARGE_LEVEL_SPAN_S = 3.0  # a cut-in whose newest words came in quiet is gated on the speech in this much of the turn so far
 # added to the boss's system message on sip calls only, after everything setup_facts reads: no judge source, and no
@@ -326,7 +327,7 @@ PHONE_PROMPT = (
     "คุยแนวธรรมชาติเหมือนคนโทรคุยกันจริงๆ สบายๆ เป็นกันเอง ไม่เครียด ไม่ต้องเป็นทางการจัด ไม่ท่องสรรพคุณยาวยืด "
     "อย่าให้คุยแล้วน่าเบื่อ พยายามสร้างบรรยากาศอบอุ่น มีชีวิตชีวา สนุก สบายใจ ดึงให้ลูกค้าอยากคุยต่อนานๆ โดยเล่ามุมที่ใกล้ตัวงานเขาจากผลค้นจริง เปลี่ยนคำรับและคำขึ้นต้นให้หลากหลาย ไม่พูดแพตเทิร์นเดิมซ้ำๆ "
     "ใส่อารมณ์และความรู้สึกในคำพูดให้เข้ากับผู้โทร เช่น ยินดีหรือตื่นเต้นเบาๆ เมื่อลูกค้าเล่าธุรกิจ เห็นใจอบอุ่นเมื่อลูกค้าบ่นว่างานยุ่งหรือติดปัญหา ใช้คำพูดธรรมชาติหลากหลายอย่าง เยี่ยมเลยครับ เข้าใจเลยครับ สบายเลยครับ ได้เลยครับ ห้ามขึ้นต้นคำตอบด้วยคำว่า อ๋อ หรือ อ้อ บ่อยๆ ให้เข้าเรื่องหรือสลับคำขึ้นต้นตามธรรมชาติ "
-    "คำพูดแต่ละรอบต้องสั้นกระชับแค่หนึ่งถึงสองประโยค และประโยคแรกต้องสั้นไม่เกินสิบห้าคำแล้วลงท้ายด้วยครับทันทีเพื่อให้เสียงออกปากไวที่สุด แล้วค่อยต่อประโยคที่สองสั้นๆ ห้ามร่ายยาวในประโยคเดียวหรือพูดสามถึงห้าประโยค (แม้ถามเรื่องราคาก็ให้บอกสรุปรุ่นหลักสั้นๆ สองประโยคก่อน) "
+    "คำพูดแต่ละรอบต้องสั้นกระชับแค่หนึ่งถึงสองประโยค และประโยคแรกต้องสั้นไม่เกินสิบห้าคำแล้วลงท้ายด้วยครับทันทีเพื่อให้เสียงออกปากไวที่สุด แล้วค่อยต่อประโยคที่สองสั้นๆ ห้ามร่ายยาวในประโยคเดียวหรือพูดสามถึงห้าประโยค (แม้ถามเรื่องราคาก็ให้บอกสรุปรุ่นหลักสั้นๆ สองประโยคก่อน และเมื่อลูกค้าถามว่ามีกี่รุ่นหรือกี่เวอร์ชัน ให้เอ่ยชื่อรุ่นที่มีในผลค้นให้ครบทุกชื่อ ห้ามละเป็นอีกรุ่นใหญ่ขึ้นไป) "
     "คุณสื่อสารและแปลข้อมูลจากคลังความรู้เป็นภาษาไทย ลาว อังกฤษ จีน ญี่ปุ่น และเกาหลีได้จริงทั้งหมด ห้ามพูดเด็ดขาดว่าพูดได้แค่ภาษาไทยหรือแปลไม่ได้ "
     "หากคำที่ได้ยินดูเพี้ยนหรือไม่เป็นคำที่มีความหมาย ห้ามพูดทวนคำเพี้ยนนั้นซ้ำ ให้เทียบเสียงกับเรื่องที่เพิ่งคุยในรอบก่อนหน้าเพื่อเดาคำที่ผู้โทรตั้งใจพูดก่อน (เช่น เพิ่งคุยเรื่องรายงานแล้วได้ยินว่า แรงงานอยู่ไหน ให้ตอบเรื่องรายงานอยู่ไหนพร้อมทวนเบาๆ ว่าหมายถึงรายงานใช่ไหม) ถ้านึกไม่ออกจริงๆ ค่อยบอกสั้นๆ ว่าเมื่อกี้สัญญาณไม่ค่อยชัด ขอฟังอีกครั้งนะครับ "
     "ไม่ต้องถามลูกค้าเยอะ ห้ามซักไซ้หรือถามจี้ทุกประโยคจนลูกค้าเบื่อ ตอบสิ่งที่ลูกค้าถามให้ชัดก่อนเสมอ "

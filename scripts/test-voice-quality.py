@@ -335,7 +335,7 @@ def test_incomplete_tail_and_phone_fallback_queries():
     scope = load_symbols({
         "_INCOMPLETE_TAIL_RE", "_is_incomplete_thai_tail", "_FOLLOWUP_START_RE",
         "_VAGUE_FOLLOWUP_RE", "_stt_ears_diverge", "_PHONE_INTENT_HINTS",
-        "_expand_phone_intent_queries", "_build_phone_fallback_queries", "BC_STT_PROMPT",
+        "_expand_phone_intent_queries", "_STANDALONE_TOPIC_RE", "_build_phone_fallback_queries", "BC_STT_PROMPT",
     })
     incomplete = scope["_is_incomplete_thai_tail"]
     fallback = scope["_build_phone_fallback_queries"]
@@ -629,6 +629,64 @@ def test_vault_mirror_intent_expander_planner_and_ice_filter():
     assert ice_filter(["169.254.10.5"]) == ["169.254.10.5"], "must keep fallback list if all addresses filtered"
 
 
+def test_log_and_audio_6_improvements():
+    scope = load_symbols({
+        "_STT_STUTTER_3_RE", "_STT_STUTTER_2X3_RE", "_has_stt_stutter",
+        "_STT_DOMAIN_FIX_RE", "_prefer_openthai_domain",
+        "_URL_LINE_TTS_RULES", "_THAI_TERMS", "_TERM_RE", "_TERM_MAP", "_LETTER_TH", "_thai_pronounce",
+        "_phone_grounding_numbers", "_NON_SEARCH_STRIP_RE", "_CB_INTENT_ONLY_RE", "_REAL_Q_OR_PRODUCT_RE",
+        "_is_non_search_phone_turn", "_FOLLOWUP_START_RE", "_VAGUE_FOLLOWUP_RE", "_stt_ears_diverge",
+        "_PHONE_INTENT_HINTS", "_expand_phone_intent_queries", "_STANDALONE_TOPIC_RE", "_build_phone_fallback_queries",
+        "FILLER_TEXT", "LEAD_PROMISE",
+    }, extra_scope={
+        "LANG_SWITCHED_ACK": {"th": "th", "en": "en"},
+        "LANG_CONFIRM_PROMPTS": {"th": "th", "en": "en"},
+    })
+
+    # 1 & 2. Phantom callback guard + phone grounding numbers
+    assert scope["LEAD_PROMISE"].search("บันทึกไว้ให้แล้ว เดี๋ยวเจ้าหน้าที่ติดต่อกลับครับ")
+    nums = scope["_phone_grounding_numbers"]("+66812345678")
+    assert {"0812345678", "66812345678", "081", "234", "5678"} <= nums
+
+    # 3. Cached returning-caller greeting notices & fast timeout
+    assert "version_notice" in scope["FILLER_TEXT"] and "returning_ask" in scope["FILLER_TEXT"]
+    src = SOURCE.read_text(encoding="utf-8")
+    assert "cb_already_saved = LEAD_COUNT.get(cid, 0) > 0" in src
+    assert "bot_claimed_saved" in src and "LEAD_COUNT.get(cid, 0) == 0" in src
+    assert "early.result(timeout=0.05 if phone_now else None)" in src
+    assert "prev_busy = prev_job is not None" in src
+
+    # 4. Non-search phone turns & standalone fallback query
+    non_search = scope["_is_non_search_phone_turn"]
+    assert non_search("คุณภูมิครับ", "ภูมิ", []) is True
+    assert non_search("ผมชื่อสมชายครับ อยากทราบราคาแพ็กเกจ", "สมชาย", []) is False
+    assert non_search("พอดีอยากติดต่อเจ้าหน้าที่ขออนุญาตฝากเบอร์โทรกลับครับ", "", []) is True
+    assert non_search(
+        "ใช่เบอร์นี้แหละแล้วก็อยากให้ติดต่อกับเรื่องสินค้าที่ BC ขายทั้งหมด",
+        "",
+        [{"role": "assistant", "content": "จะให้โทรกลับที่เบอร์ที่โทรเข้ามานี้... ใช่ไหมครับ แล้วอยากให้ติดต่อกลับเรื่องอะไรครับ"}],
+    ) is True
+    assert non_search("ถามเรื่องต้นทุนหน่อย", "", []) is False
+
+    qs = scope["_build_phone_fallback_queries"](
+        "แล้วก็เบอร์โทรติดต่อเบอร์อะไร", [], [{"role": "assistant", "content": "เว็บไซต์ดูได้ที่ www.bcaccount.com"}]
+    )
+    assert len(qs) == 1 and "www.bcaccount.com" not in qs[0]
+
+    # 5. OpenThai domain keyword preference
+    prefer_e2 = scope["_prefer_openthai_domain"]
+    assert prefer_e2("ของคุณมีกี่วันซะ", "ของคุณมีกี่เวอร์ชั่น", "ของคุณมีกี่เวอร์ชั่น") is True
+    assert prefer_e2("ติดต่อเบอร์โทรอะไร", "ติดต่อเบอร์อะไร", "ติดต่อเบอร์อะไร") is False
+
+    # 6. URL/LINE TTS pronunciation, barge-in thresholds, 4 tiers prompt & Next-Action 404
+    pron = scope["_thai_pronounce"]("ดูที่ www.bcaccount.com หรือไลน์ @bcaccount")
+    assert "ดอท คอม" in pron and "แอด บี ซี แอค เคานต์" in pron
+    assert C.SIP_BARGE_MIN_DBFS == -31.0
+    assert C.SIP_EARLY_STT_SILENCE_S == 0.35
+    assert "ให้เอ่ยชื่อรุ่นที่มีในผลค้นให้ครบทุกชื่อ" in C.PHONE_PROMPT
+    assert 'req.headers["next-action"]' in (ROOT / "server.mjs").read_text(encoding="utf-8")
+
+
 TESTS = [
     test_caller_name_rejects_connectors_and_accepts_real_names,
     test_stt_stutter_detector_and_ear2_fallback,
@@ -643,6 +701,7 @@ TESTS = [
     test_bcbrain_v230_zone_abstain_and_ultra_mode,
     test_callback_restraint_qa_cache_fast_chat_and_batch,
     test_vault_mirror_intent_expander_planner_and_ice_filter,
+    test_log_and_audio_6_improvements,
 ]
 
 
