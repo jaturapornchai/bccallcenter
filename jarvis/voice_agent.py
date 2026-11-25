@@ -334,10 +334,51 @@ def _is_plausible_name(cand: str, explicit: bool = False) -> bool:
     return True
 
 
-def _extract_caller_name_py(text: str, prev_bot: str = "") -> tuple[str, bool]:
+_NAME_CORRECTION_TRIGGER_RE = re.compile(r"(?:ไม่ใช่|ไม่ได้ชื่อ|จำผิด|เรียกผิด|ผิดชื่อ|เปลี่ยนชื่อ)")
+_NAME_CORRECTION_BEFORE_RE = re.compile(
+    r"^(?:ผม|ดิฉัน|หนู|ฉัน|พี่|คือ|ชื่อ)?\s*([ก-๙a-zA-Z]{2,15})\s*(?:ไม่ใช่|ไม่ได้ชื่อ)"
+)
+_NAME_CORRECTION_AFTER_RE = re.compile(
+    r"(?:ไม่ใช่|ไม่ได้ชื่อ)\s*[ก-๙a-zA-Z]{2,12}?(?:แล้วมี|แล้วนิ|แล้วนี่|แต่ชื่อ|ผมชื่อว่า|ผมชื่อ|ดิฉันชื่อ|หนูชื่อ|ฉันชื่อ|ชื่อว่า|ชื่อ|เรียกผมว่า|แต่ผม|\s+ผม|\s+คือ|\s+)\s*([ก-๙a-zA-Z]{2,15})"
+)
+_NAME_CORRECTION_MISREM_RE = re.compile(
+    r"(?:จำผิด|เรียกผิด)[^ก-๙a-zA-Z]{0,12}(?:แล้ว|เปล่า|หรือเปล่า)?\s*(?:ผมชื่อว่า|ผมชื่อ|ดิฉันชื่อ|หนูชื่อ|ฉันชื่อ|ชื่อว่า|ชื่อ|เรียกผมว่า|ผม)\s*([ก-๙a-zA-Z]{2,15})"
+)
+_NAME_CORRECTION_TAIL_STRIP_RE = re.compile(r"(?:จำผิด|เรียกผิด|ผิดแล้ว|นะครับ|นะคะ|ครับ|ค่ะ|คะ|คับ|เปล่า|แล้ว)$")
+
+
+def _extract_name_correction_py(text: str, current_name: str = "") -> str:
+    """Extract corrected caller name when caller disputes the stored name (e.g. 'สมหมายไม่ใช่สำรวยจำผิดเปล่า', 'ผมบอกไม่ใช่สำรวยแล้วมีสมหมาย')."""
+    s = (text or "").strip()
+    if not s or not _NAME_CORRECTION_TRIGGER_RE.search(s):
+        return ""
+    cur_clean = _clean_caller_name(current_name)
+    pats: list[re.Pattern[str]] = [_NAME_CORRECTION_MISREM_RE, _NAME_CORRECTION_BEFORE_RE]
+    if cur_clean:
+        pats.append(
+            re.compile(
+                rf"(?:ไม่ใช่|ไม่ได้ชื่อ)\s*{re.escape(cur_clean)}\s*"
+                r"(?:แล้วมี|แล้วนิ|แล้วนี่|แต่ชื่อ|ผมชื่อว่า|ผมชื่อ|ดิฉันชื่อ|หนูชื่อ|ฉันชื่อ|ชื่อว่า|ชื่อ|เรียกผมว่า|ผม|คือ|\s)+\s*([ก-๙a-zA-Z]{2,15})"
+            )
+        )
+    pats.append(_NAME_CORRECTION_AFTER_RE)
+    for pat in pats:
+        if m := pat.search(s):
+            raw_c = _NAME_CORRECTION_TAIL_STRIP_RE.sub("", m.group(1).strip())
+            cand = _clean_caller_name(raw_c)
+            if cand and cand != cur_clean and _is_plausible_name(cand, explicit=True):
+                if not re.match(r"^(?:บอก|จำ|เรียก|ผิด|สลับ|คนละ|ไม่|ใช่|แล้ว|มี|คุณ)", cand):
+                    return cand
+    return ""
+
+
+def _extract_caller_name_py(text: str, prev_bot: str = "", current_name: str = "") -> tuple[str, bool]:
     s = (text or "").strip()
     if not s:
         return "", False
+    corr_fn = globals().get("_extract_name_correction_py")
+    if callable(corr_fn) and (corrected := corr_fn(s, current_name)):
+        return corrected, True
     if m := _EXPLICIT_NAME_TH_RE.search(s):
         cand = _clean_caller_name(m.group(1))
         if _is_plausible_name(cand, explicit=True):
@@ -2825,11 +2866,15 @@ def _extract_recent_topic(history: list[dict]) -> str:
     return ""
 
 
-def _is_non_search_phone_turn(heard: str, detected_name: str, history: list[dict]) -> bool:
-    """True when phone turn is pure name intro, callback confirm/request, caller-meta question, or closing."""
+def _is_non_search_phone_turn(heard: str, detected_name: str, history: list[dict], name_corrected: bool = False) -> bool:
+    """True when phone turn is pure name intro/correction, callback confirm/request, caller-meta question, or closing."""
     s = (heard or "").strip()
     if not s:
         return False
+    if name_corrected and not _REAL_Q_OR_PRODUCT_RE.search(s):
+        return True
+    if re.search(r"(?:จำผิด(?:เปล่า|แล้ว)?|เรียกผิด|ไม่ใช่.*ชื่อ|จำสลับชื่อ)", s) and not _REAL_Q_OR_PRODUCT_RE.search(s):
+        return True
     if detected_name:
         rem = s.replace(detected_name, " ")
         rem = _NON_SEARCH_STRIP_RE.sub(" ", rem)
@@ -2876,6 +2921,10 @@ def _record_brain_miss(
     if len(q_clean) < 5:
         return
     if re.fullmatch(r"(?:สวัสดี|ครับ|ค่ะ|คะ|อืม|ใช่|โอเค|ขอบคุณ|ไม่เป็นอย่างงั้น|คุยต่อ|\s)+", q_clean):
+        return
+    if re.search(r"(?:จำผิด(?:เปล่า|แล้ว)?|เรียกผิด|ไม่ใช่.*(?:จำผิด|แล้วมี))", q_clean) and not _REAL_Q_OR_PRODUCT_RE.search(q_clean):
+        return
+    if float(top_cosine or 0.0) <= 0.0 and not _REAL_Q_OR_PRODUCT_RE.search(q_clean):
         return
     ctx_clean = re.sub(r"\b0[689]\d[- ]?\d{3}[- ]?\d{4}\b", "[phone]", str(ctx_topic or "")).strip()[:80]
     rec = {
@@ -3230,17 +3279,37 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
         elif action == "declined":
             now += f"\n(ระบบภาษา: ลูกค้าปฏิเสธการเปลี่ยนภาษา ให้คุยภาษาเดิม {LANG_NAMES.get(cur_lang or 'th', 'ภาษาไทย')} ต่อตามปกติ)"
 
+    alt_heard = LAST_ALT_HEARD.pop(cid, []) if cid else []
     detected_name = ""
+    name_corrected = False
     if cid and heard and not hello:
         prev_bot_msg = history[-1]["content"] if history and history[-1].get("role") == "assistant" else ""
-        detected_name, explicit_name = _extract_caller_name_py(heard, prev_bot_msg)
+        cur_meta = dict(CALL_CALLER_META.get(cid) or {})
+        old_name = _clean_caller_name(cur_meta.get("name"))
+        detected_name, explicit_name = _extract_caller_name_py(heard, prev_bot_msg, current_name=old_name)
+        # Also check clean OpenThai alternate ears (e.g. e1="ผมสมมาย" vs e2/e3="ผมสมหมาย") when correcting name
+        for alt_t in (alt_heard or ()):
+            alt_n, alt_exp = _extract_caller_name_py(alt_t, prev_bot_msg, current_name=old_name)
+            if alt_n and alt_exp and (not detected_name or (len(alt_n) >= len(detected_name) and alt_n != detected_name and _NAME_CORRECTION_TRIGGER_RE.search(alt_t))):
+                detected_name, explicit_name = alt_n, True
+                break
         if detected_name:
-            cur_meta = dict(CALL_CALLER_META.get(cid) or {})
-            if not cur_meta.get("name") or explicit_name:
+            if not old_name or (explicit_name and detected_name != old_name):
+                name_corrected = bool(old_name and detected_name != old_name)
                 cur_meta["name"] = detected_name
                 CALL_CALLER_META[cid] = _sync_caller_profile(cur_meta.get("phone") or "", cur_meta)
-                log.info("CALLER-NAME-CAPTURED (%s): name=%s phone=%s", cid, detected_name, masked(cur_meta.get("phone") or ""))
+                log.info(
+                    "CALLER-NAME-CAPTURED (%s): name=%s old=%s corrected=%s phone=%s",
+                    cid, detected_name, old_name or "-", name_corrected, masked(cur_meta.get("phone") or ""),
+                )
                 yield AdditionalOutputs({"kind": "caller_name", "name": detected_name})
+                if name_corrected:
+                    now += (
+                        f"\n(ระบบแก้ชื่อลูกค้า: ลูกค้าเพิ่งทักท้วงและแก้ไขชื่อตัวเองจาก \"{_format_addressed_name(old_name)}\" "
+                        f"เป็น \"{_format_addressed_name(detected_name)}\" และระบบอัปเดตชื่อใหม่แล้ว "
+                        f"ให้ขออภัยสั้นๆ ที่จำสลับชื่อ แล้วเรียกชื่อใหม่ว่า \"{_format_addressed_name(detected_name)}\" ทันที "
+                        f"ห้ามยืนยันหรือเรียกชื่อเก่า \"{_format_addressed_name(old_name)}\" อีกเด็ดขาด)"
+                    )
 
     if cid and CALL_CONTEXT.get(cid):
         now += f"\n{CALL_CONTEXT.pop(cid)}"
@@ -3311,7 +3380,6 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 f"\n(ข้อมูลลูกค้าจากระบบสายเข้า: ลูกค้าใหม่ยังไม่มีชื่อในระบบ.{phone_note} "
                 f"— ยังไม่มีชื่อในระบบ ต้องถามขอชื่อลูกค้าให้สำเร็จอย่างสุภาพ (ตอบเรื่องที่ลูกค้าถามก่อน แล้วขอทราบชื่อต่อท้ายจนกว่าจะได้ชื่อ ห้ามปล่อยผ่านโดยยังไม่ได้ชื่อ))"
             )
-    alt_heard = LAST_ALT_HEARD.pop(cid, []) if cid else []
     if alt_heard:
         now += f"\n(ระบบฟัง 3 หู — คำจากหูสำรองเผื่อหูหลักเพี้ยน: {' | '.join(alt_heard[:2])})"
 
@@ -3384,7 +3452,7 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             now += f"\n(ผลจาก web_search ตอนนี้: {(yield from dispatch([('web_search', {'query': heard})], said, turn, tools))[0]})"
         elif heard and (FAST_CHAT.match(heard.strip()) or MULTILANG_FAST_CHAT.match(heard.strip())):  # bare hello/thanks/hold: answer right away (~0.9 s faster, no wasted search)
             pass
-        elif heard and on_phone() and _is_non_search_phone_turn(heard, detected_name, history):
+        elif heard and on_phone() and _is_non_search_phone_turn(heard, detected_name, history, name_corrected=name_corrected):
             pass  # name intro, caller-meta question, closing, or pure callback confirm/request: 0ms wait filler / 0 MCP call
         elif heard and not on_phone() and not stay_topic and (wording := search_words(history, heard))[1] and not was:  # off the topic, maybe misheard: ask, search nothing
             topic, new = wording[1]
@@ -4153,7 +4221,9 @@ class BargeInReplyOnPause(ReplyOnPause):
             speech = voiced((state.sampling_rate, state.stream))
             speech_s = speech.size / 16000
             dbfs = _audio_dbfs(speech) if speech.size else -100.0
-            too_quiet = phone and speech.size > 0 and dbfs < C.SIP_MIN_SPEECH_DBFS
+            bot_speaking_now = bool(phone and not self.cut and any(e > time.monotonic() and not is_f for _, e, _, is_f in self.playing))
+            min_speech_db = C.SIP_BARGE_MIN_DBFS if bot_speaking_now else C.SIP_MIN_SPEECH_DBFS
+            too_quiet = phone and speech.size > 0 and dbfs < min_speech_db
             too_short_turn = False
             min_turn_s = C.SIP_MIN_TURN_SPEECH_S if phone else 0.08
             if 0 < speech_s < min_turn_s:
@@ -4462,6 +4532,8 @@ def make_app(stream, public=False):
             phone_val = _normalize_phone(caller_phone or raw_meta.get("phone") or (CALL_CALLER_META.get(call) or {}).get("phone"))
             merged_meta = _sync_caller_profile(phone_val, raw_meta)
             CALL_CALLER_META[call] = merged_meta
+            if BRAIN_MIRROR.ready:
+                BRAIN_MIRROR.warmup_pgvector_async()
             log.info(
                 "CALLER-SYNC (%s): phone=%s name=%s company=%s calls=%d",
                 call,

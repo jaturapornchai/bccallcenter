@@ -214,6 +214,7 @@ class BrainPgVectorStore:
         self._pg_fail_until = 0.0
         self._embed_fail_until = 0.0
         self._embed_timeout_streak = 0
+        self._warming = False
         self._last_sync_count = 0
         self._last_chunk_total = 0
 
@@ -319,7 +320,7 @@ class BrainPgVectorStore:
             client = self._get_http()
             resp = client.post(
                 self.embed_url,
-                json={"model": self.embed_model, "input": texts, "keep_alive": "60m"},
+                json={"model": self.embed_model, "input": texts, "keep_alive": -1},
                 timeout=timeout_s,
             )
             if resp.status_code != 200:
@@ -340,6 +341,7 @@ class BrainPgVectorStore:
                 self._embed_fail_until = now + 10.0
                 self._embed_timeout_streak = 0
             log.warning("BC Brain embed timeout (%s)", type(e).__name__)
+            self.warmup_async()
             return None
         except Exception as e:
             self._embed_fail_until = now + 15.0
@@ -368,6 +370,31 @@ class BrainPgVectorStore:
             while len(self._embed_cache) > self._embed_cache_max:
                 self._embed_cache.popitem(last=False)
         return vec, ms
+
+    def warmup_async(self) -> None:
+        """Non-blocking background reload of bge-m3 into Ollama VRAM (keep_alive=-1) so calls never suffer repeated ReadTimeouts."""
+        if not self.enabled or self._warming:
+            return
+        self._warming = True
+
+        def _bg() -> None:
+            try:
+                client = self._get_http()
+                resp = client.post(
+                    self.embed_url,
+                    json={"model": self.embed_model, "input": ["โปรแกรมบัญชี บีซีเอไอแอคเคาท์"], "keep_alive": -1},
+                    timeout=18.0,
+                )
+                if resp.status_code == 200:
+                    self._embed_fail_until = 0.0
+                    self._embed_timeout_streak = 0
+                    log.info("BC Brain embed model warmed in VRAM (keep_alive=-1)")
+            except Exception as e:
+                log.debug("BC Brain background warmup skipped (%s)", type(e).__name__)
+            finally:
+                self._warming = False
+
+        threading.Thread(target=_bg, daemon=True, name="brain-embed-warmup").start()
 
     def warmup(self) -> dict[str, Any]:
         """Pre-warm PostgreSQL connection, schema, and Ollama bge-m3 VRAM on startup."""

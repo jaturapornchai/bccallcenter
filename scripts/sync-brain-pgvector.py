@@ -130,6 +130,9 @@ _BENCHMARK_CASES: list[tuple[str, str, tuple[str, ...]]] = [
     ("แล้วเบอร์โทรศัพท์ลูกค้าได้กี่เบิร์", "hit_all", ("หลายรายไม่จำกัด", "3 ช่อง")),
     ("แล้วที่อยู่จากส่งมีพิกัดดาวเทียมไหม", "hit_all", ("ละติจูด", "ลองจิจูด")),
     ("แล้วระบบนี้เก็บรูปได้กี่ลูก", "hit_all", ("5 ช่องต่อสินค้า", "25 MB")),
+    # --- 2 Competitor Comparison Cases (2026-11-25 0gr19 — stay on POS/BC highlights, never jump to Excel) ---
+    ("เทียบกับซอฟต์แวร์ของวงในของคุณดีกว่ายังไง POS", "hit_all", ("POS", "ออฟไลน์")),
+    ("ดีกับของคนอื่นยังไงบ้างวงในระบบ POS", "hit_all", ("POS", "โปรโมชัน")),
     # --- 8 OOV / Abstain Traps — MUST abstain cleanly without fabricating facts ---
     ("เมนู 9999 ใช้ทำอะไรครับ", "abstain", ()),
     ("เมนู 8888 อยู่ตรงไหนครับ", "abstain", ()),

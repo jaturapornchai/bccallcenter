@@ -792,6 +792,14 @@ _ADAPTIVE_INTENT_REWRITES: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(r"(?:แต้ม.*(?:ครอบครัว|รวมแต้ม|หลายคน)|กลุ่มสมาชิกรวมแต้ม|(?:ตัดแต้ม|ใช้แต้ม).*(?:ส่วนลด|pos|หน้าร้าน))", re.I),
         "ระบบสมาชิก กลุ่มสมาชิกรวมแต้ม ครอบครัว แต้มสะสม บันทึกตัดแต้ม 1022 POS",
     ),
+    (
+        re.compile(r"(?:(?:เทียบกับ|ดี(?:กว่า|กับ)).*(?:วงใน|wongnai|คนอื่น|เจ้าอื่น|คู่แข่ง).*pos|pos.*(?:เทียบกับ|ดี(?:กว่า|กับ)).*(?:วงใน|wongnai|คนอื่น|เจ้าอื่น|คู่แข่ง))", re.I),
+        "ระบบขายหน้าร้าน POS ออฟไลน์ เชื่อมบัญชี สต็อก ภาษี ภ.พ.30 โปรโมชัน 10 รูปแบบ",
+    ),
+    (
+        re.compile(r"(?:เทียบกับ|ดี(?:กว่า|กับ)).*(?:วงใน|wongnai|คนอื่น|เจ้าอื่น|คู่แข่ง)", re.I),
+        "จุดเด่น BC Ai Account ระบบขายหน้าร้าน POS บัญชี สต็อก ภาษี ภ.พ.30",
+    ),
 )
 
 
@@ -860,6 +868,11 @@ class BrainVaultMirror:
             except Exception:
                 self._pg_store = False
         return self._pg_store if self._pg_store is not False else None
+
+    def warmup_pgvector_async(self) -> None:
+        pg = self._get_pg()
+        if pg is not None and hasattr(pg, "warmup_async"):
+            pg.warmup_async()
 
     def trigger_pgvector_sync_async(self, force: bool = False) -> None:
         pg = self._get_pg()

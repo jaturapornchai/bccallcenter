@@ -1264,6 +1264,57 @@ def test_target_precision_and_t8o1y_fixes():
             assert kw.lower() in ans.lower(), f"missing target fact {kw!r} for {q!r}: {ans[:400]}"
 
 
+def test_0gr19_name_correction_barge_floor_and_keepalive():
+    """Regression from 2026-11-25 live call 0gr19: caller name correction, -31 dBFS confirmed-turn barge gate, keep_alive=-1, competitor POS focus."""
+    from brain_mirror import BrainVaultMirror
+
+    # 1. Name correction extractor handles every dispute phrasing from 0gr19 without keeping old name
+    scope = load_symbols({
+        "_NAME_PREFIX_RE", "_NAME_SUFFIX_RE", "_NAME_SPLIT_RE", "_HONORIFIC_RE",
+        "_EXPLICIT_NAME_TH_RE", "_EXPLICIT_NAME_EN_RE", "_ASKED_NAME_BOT_RE",
+        "_BAD_CALLER_NAMES", "_GARBLED_NAME_RE", "_BARE_TONE_CUT_RE",
+        "_is_plausible_name", "_clean_caller_name",
+        "_NAME_CORRECTION_TRIGGER_RE", "_NAME_CORRECTION_BEFORE_RE",
+        "_NAME_CORRECTION_AFTER_RE", "_NAME_CORRECTION_MISREM_RE", "_NAME_CORRECTION_TAIL_STRIP_RE",
+        "_extract_name_correction_py", "_extract_caller_name_py",
+        "_NON_SEARCH_STRIP_RE", "_CB_INTENT_ONLY_RE", "_REAL_Q_OR_PRODUCT_RE",
+        "_CALL_META_ASK_RE", "_CLOSING_ONLY_RE", "_is_non_search_phone_turn",
+    })
+    ext = scope["_extract_caller_name_py"]
+    non_search = scope["_is_non_search_phone_turn"]
+
+    for utt in (
+        "สมหมายไม่ใช่สำรวยจำผิดเปล่า",
+        "ผมบอกไม่ใช่สำรวยแล้วมีสมหมาย",
+        "ไม่ใช่สำรวย ผมสมหมายครับ",
+        "ไม่ใช่สมหมายคุณจำผิดแล้วผมสมหมาย",
+    ):
+        name, explicit = ext(utt, "", current_name="สำรวย")
+        assert (name, explicit) == ("สมหมาย", True), f"expected ('สมหมาย', True) for {utt!r}, got {(name, explicit)!r}"
+        assert non_search(utt, name, [], name_corrected=True) is True, f"name correction must skip brain search: {utt!r}"
+
+    # 2. Confirmed-turn barge-in must block quiet room chatter (-40 dBFS < -31 dBFS) while bot is speaking
+    assert C.SIP_MIN_SPEECH_DBFS == -38.0
+    assert C.SIP_BARGE_MIN_DBFS == -31.0
+    src = SOURCE.read_text(encoding="utf-8")
+    assert "min_speech_db = C.SIP_BARGE_MIN_DBFS if bot_speaking_now else C.SIP_MIN_SPEECH_DBFS" in src
+    assert "BRAIN_MIRROR.warmup_pgvector_async()" in src
+    assert "ห้ามเถียงหรือยืนยันว่าชื่อเดิมในระบบถูกต้อง" in C.PHONE_PROMPT
+    assert "ห้ามเปลี่ยนเรื่องไปเทียบกับเอ็กเซลแทน" in C.PHONE_PROMPT
+
+    # 3. Ollama pgvector keep_alive=-1 (both Python & Node) prevents 60m VRAM unload ReadTimeout cascade
+    pg_py = (ROOT / "jarvis" / "brain_pgvector.py").read_text(encoding="utf-8")
+    pg_js = (ROOT / "lib" / "brain-pgvector.mjs").read_text(encoding="utf-8")
+    assert '"keep_alive": -1' in pg_py and "warmup_async" in pg_py
+    assert "keep_alive: -1" in pg_js
+
+    # 4. Competitor comparison in POS context returns BC POS highlights, NOT Excel comparison
+    brain = BrainVaultMirror(vault_dir=C.LOCAL_BRAIN_DIR, enable_pgvector=True)
+    brain.load_from_dir(C.LOCAL_BRAIN_DIR, force=True, sync_pgvector=False)
+    ans_cmp = brain.quick_answer("เทียบกับซอฟต์แวร์ของวงในของคุณดีกว่ายังไง มีระบบ POS ไหม", audience="user", mode="ultra")
+    assert "🛑" not in ans_cmp and "POS" in ans_cmp and "ออฟไลน์" in ans_cmp, f"POS competitor comparison miss: {ans_cmp[:300]}"
+
+
 TESTS = [
     test_caller_name_rejects_connectors_and_accepts_real_names,
     test_stt_stutter_detector_and_ear2_fallback,
@@ -1287,6 +1338,7 @@ TESTS = [
     test_topic_continuity_pinning_and_voice_exclude,
     test_context_understanding_and_adaptive_search,
     test_target_precision_and_t8o1y_fixes,
+    test_0gr19_name_correction_barge_floor_and_keepalive,
 ]
 
 
