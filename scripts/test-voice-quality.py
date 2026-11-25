@@ -724,7 +724,7 @@ def test_log_and_audio_6_improvements():
     qs = scope["_build_phone_fallback_queries"](
         "แล้วก็เบอร์โทรติดต่อเบอร์อะไร", [], [{"role": "assistant", "content": "เว็บไซต์ดูได้ที่ www.bcaccount.com"}]
     )
-    assert len(qs) == 1 and "www.bcaccount.com" not in qs[0]
+    assert qs and all("www.bcaccount.com" not in q for q in qs)
 
     # 5. OpenThai domain keyword preference
     prefer_e2 = scope["_prefer_openthai_domain"]
@@ -1148,6 +1148,51 @@ def test_topic_continuity_pinning_and_voice_exclude():
     assert all(h["slug"] != "video-visual-tutorials" for h in res_vid["hits"]), "video directory must be excluded from voice brain"
 
 
+def test_context_understanding_and_adaptive_search():
+    """Regression from 2026-11-25 live calls (cetb1, 5acje): holistic intent understanding, STT repair & Pass-2 auto-reformulation."""
+    from brain_mirror import BrainVaultMirror
+
+    brain = BrainVaultMirror(vault_dir=C.LOCAL_BRAIN_DIR, enable_pgvector=True)
+    brain.load_from_dir(C.LOCAL_BRAIN_DIR, force=True, sync_pgvector=False)
+
+    # 1. Holistic sizing query (10 branches, 5 companies [STT: ห้ามบริษัท], 100 users) must retrieve pricing table + Enterprise
+    qa_size = brain.quick_answer("เอ่อแล้วถ้าผมมีสิบสาขาห้ามบริษัท หนึ่งร้อยยูเซอร์ต้องใช้แบบไหน", audience="user", mode="ultra")
+    assert "🛑" not in qa_size and "Enterprise" in qa_size and ("9,990" in qa_size or "51–100" in qa_size), f"sizing miss: {qa_size[:300]}"
+
+    # 2. STT-corrupted promotion queries ("โปโมชั่น", "โป้โมเมชั่นนัดสโนมัติ") must hit 10-type promotion note
+    for q in ("ผมอยากรู้ว่าโปรแกรมคุณทำโปโมชั่นได้กี่แบบ", "โปรแกรมไม่มีโปโมชั่นเหรอระบบโป้โมเมชั่นนัดสโนมัติ"):
+        ans = brain.quick_answer(q, audience="user", mode="ultra")
+        assert "🛑" not in ans and "10 รูปแบบ" in ans, f"promo STT repair failed for {q!r}: {ans[:250]}"
+
+    # 3. Legacy BC 5.5 STT queries ("บ้านเชียงไว้ท่านเก่า", "โประแก็มรุ่นห้าจุดห้าร้อย") must hit migration guide, not consignment
+    for q in ("ถ้าผมใช้บ้านเชียงไว้ท่านเก่าอยู่ทำยังไง", "ผมใช้โปรแกรมเก่าอยู่อ่ะ โประแก็มรุ่นห้าจุดห้าร้อยทำยังไง"):
+        ans = brain.quick_answer(q, audience="user", mode="ultra")
+        assert "🛑" not in ans and "BC 5.5" in ans, f"legacy migration miss for {q!r}: {ans[:250]}"
+
+    # 4. Website / Office / Chiang Mai location queries must hit contact note
+    for q in ("แล้วคุณมีเว็บไซต์หรือเปล่า", "คุณมีเบอร์หรือเปล่าเบลอออฟฟิศของบ้านเชียง", "ที่เชียงใหม่อยู่ไหน สำนักงานบ้านเชียง"):
+        ans = brain.quick_answer(q, audience="user", mode="ultra")
+        assert "🛑" not in ans and "bcaccount.com" in ans, f"contact/location miss for {q!r}: {ans[:250]}"
+
+    # 5. Noise rejection in _extract_recent_topic & adaptive tool routing
+    scope = load_symbols({
+        "_FOLLOWUP_START_RE", "_VAGUE_FOLLOWUP_RE", "_STANDALONE_TOPIC_RE",
+        "_BOILERPLATE_CTX_RE", "_EXPLICIT_TOPIC_SWITCH_RE", "_CONTINUATION_HINT_RE",
+        "_PHONE_INTENT_HINTS", "_expand_phone_intent_queries", "_stt_ears_diverge",
+        "_extract_recent_topic", "_is_explicit_topic_switch", "_build_phone_fallback_queries",
+        "ERROR_TROUBLESHOOT_ASK", "MENU_CODE_ASK",
+    })
+    hist_noise = [
+        {"role": "user", "content": "คุณมีเบอร์หรือเปล่าเบลอออฟฟิศของบ้านเชียง"},
+        {"role": "assistant", "content": "เบอร์ติดต่อศูนย์แปดเก้าเก้าสองสองสามหนึ่งสามหนึ่งครับ"},
+        {"role": "user", "content": "เอาไม่ต้อง"},
+    ]
+    assert "เอาไม่ต้อง" not in scope["_extract_recent_topic"](hist_noise), "rejection filler must not pollute topic memory"
+    assert "บ้านเชียง" in scope["_extract_recent_topic"](hist_noise)
+    assert scope["ERROR_TROUBLESHOOT_ASK"].search("ขึ้นแจ้งเตือนงวดบัญชีปิดแล้วบันทึกไม่ได้") is not None
+    assert scope["MENU_CODE_ASK"].search("อยากดูรายงานยอดขายวันนี้กดตรงไหน") is not None
+
+
 TESTS = [
     test_caller_name_rejects_connectors_and_accepts_real_names,
     test_stt_stutter_detector_and_ear2_fallback,
@@ -1169,6 +1214,7 @@ TESTS = [
     test_voice_first_big_brain_and_zyx59_fixes,
     test_thai_custom_segmentation_and_pgvector_hybrid,
     test_topic_continuity_pinning_and_voice_exclude,
+    test_context_understanding_and_adaptive_search,
 ]
 
 

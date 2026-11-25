@@ -78,11 +78,24 @@ _STT_SEARCH_NORMALIZE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"ยอดคนเหลือ|ยอดโครงเรือ"), " ยอดคงเหลือ "),
     (re.compile(r"เซลฟเวอร์|เซฟเวอร์"), " เซิร์ฟเวอร์ "),
     (re.compile(r"(?:ขาย)?อย่างรถยนต์"), " ยางรถยนต์ "),
-    (re.compile(r"โลเคชั[น่]น?"), " โลเคชั่น จุดเก็บ location bin "),
-    (re.compile(r"โปรโมชั[น่]น?|promotions?", re.I), " โปรโมชัน "),
-    (re.compile(r"ซื้อ\s*\d+\s*แถม\s*\d+|ซื้อ(?:หนึ่ง|สอง|สาม|ครบ)แถม(?:หนึ่ง|สอง|ฟรี)?|ซื้อแถม|แถมฟรี"), " โปรโมชัน ของแถม ซื้อครบแถม สูตรโปรโมชัน "),
+    (re.compile(r"โลเคชั[่้]?น"), " โลเคชั่น จุดเก็บ location bin "),
+    (re.compile(r"โป(?:ร|้)?โม(?:เม)?ชั[่้]?น|promotions?", re.I), " โปรโมชัน "),
+    (re.compile(r"นัดสโนมัติ|อัตโ?นมัติ"), " อัตโนมัติ "),
+    (re.compile(r"ซื้?อ(?:(?:\s*\d+\s*แถ[บม]\s*\d+)|(?:(?:หนึ่ง|สอง|สาม|สี่|ห้า|ครบ)แถ[บม](?:หนึ่ง|สอง|สิบ|ฟรี)?)|แถ[บม])|แถมฟรี"), " โปรโมชัน ของแถม ซื้อครบแถม สูตรโปรโมชัน "),
     (re.compile(r"พักบิน|พรรคบิน|พับบิล"), " พักบิล "),
     (re.compile(r"กี่สูจน|กี่สูตร"), " กี่สูตร สูตรโปรโมชัน "),
+    (re.compile(r"กี่แอบ"), " กี่แบบ "),
+    (re.compile(r"ขอพิธีการ"), " ขอวิธีการ ขั้นตอน "),
+    (re.compile(r"ขนทรง"), " ขนส่ง tms "),
+    (re.compile(r"ห้ามบริษัท|ห้าบริษัท"), " 5 บริษัท หลายนิติบุคคล "),
+    (re.compile(r"สิบสาขา"), " 10 สาขา หลายสาขา "),
+    (re.compile(r"(?:หนึ่ง)?ร้อย(?:ยูเซอร์|ผู้ใช้งาน|คน)"), " 51–100 คน 100 คน ตารางราคา แพ็กเกจ 4 รุ่น Enterprise "),
+    (re.compile(r"ยูเซอร์|users?", re.I), " ผู้ใช้งานพร้อมกัน concurrent แพ็กเกจ ราคา "),
+    (re.compile(r"(?:ต้อง)?ใช้แบบไหน|รุ่นไหนดี|แนะนำรุ่น|เหมาะกับรุ่นไหน"), " ตารางราคา แพ็กเกจ 4 รุ่น เลือกรุ่น "),
+    (re.compile(r"(?:บ้านเชียง|บานเชียง)\s*(?:ไว้ท่านเก่า|เวอร์ชั[่้]?นเก่า|รุ่นเก่า|เก่า)|รุ่นห้าจุดห้า(?:ร้อย)?|ห้าจุดห้า|ไว้ท่านเก่า|เวอร์ชั[่้]?นเก่า|(?:โปรแกรม|โประแก็ม)(?:รุ่น)?เก่า|โประแก็มรุ่นห้า"), " bc 5.5 เวอร์ชันเก่า ย้ายข้อมูล อัปเกรด bc ai account "),
+    (re.compile(r"เบลอ(?:ออฟฟิศ)?"), " เบอร์ ออฟฟิศ ติดต่อ "),
+    (re.compile(r"บ้านเชียง|บานเชียง"), " บริษัท บ้านเชียงซอฟท์ สำนักงาน ติดต่อ "),
+    (re.compile(r"เว[็็]?[บป]ไซ[ต์ต]{1,2}"), " เว็บไซต์ www.bcaccount.com ช่องทางติดต่อ "),
     (re.compile(r"เข้า(?:ที|ที่)หลัง(?:ออก|ของ)ก่อน|ไลโฟ", re.I), " lifo เข้าทีหลังออกก่อน ประเภทต้นทุน "),
     (re.compile(r"แยกสาคะ|สาหา(?:เอ|บี)?"), " แยกสาขา สาขา "),
     (re.compile(r"(?<![ก-๙])เชล(?:ล์)?(?=\s*ด้วย|\s|$)"), " ชั้นวาง ที่เก็บ "),
@@ -112,7 +125,9 @@ _BRAIN_SYNONYM_GROUPS: tuple[tuple[str, ...], ...] = (
     ("สต็อกไม่ตรง", "สต็อกเพี้ยน", "คำนวณยอดสต็อกใหม่"),
     ("พิมพ์ไม่ออก", "ปริ้นไม่ออก", "แบบฟอร์ม", "ตั้งค่าหน้ากระดาษ"),
     ("วิดีโอ", "คลิป", "คลิปสอน", "ยูทูป", "ยูทูบ", "youtube", "สอนใช้งาน"),
-    ("ราคา", "แพ็กเกจ", "ค่าบริการ", "ใบเสนอราคา", "ทดลองใช้", "pricing"),
+    ("ราคา", "แพ็กเกจ", "ค่าบริการ", "ใบเสนอราคา", "ทดลองใช้", "pricing", "concurrent", "ผู้ใช้งานพร้อมกัน"),
+    ("ติดต่อ", "เบอร์โทร", "เว็บไซต์", "ไลน์", "สำนักงาน", "ออฟฟิศ", "ที่ตั้ง", "เชียงใหม่", "กรุงเทพ", "บ้านเชียงซอฟท์"),
+    ("ย้ายข้อมูล", "อัปเกรด", "bc 5.5", "champ", "เวอร์ชันเก่า", "ยอดยกมา", "นำเข้า"),
     ("สำนักงานบัญชี", "พาร์ตเนอร์", "partner"),
     ("ข้อเลือกพิเศษ", "ตั้งค่าพิเศษ", "1004"),
     ("ปรับราคา", "ศูนย์ราคา", "ตารางสูตรราคา", "สูตรราคา"),
@@ -603,6 +618,41 @@ def _compose_hybrid_excerpt(
     if tail and tail[:80] not in lead:
         return f"{lead}\n\n{tail}"[:cap].strip()
     return lead[:cap].strip()
+
+
+_ADAPTIVE_INTENT_REWRITES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"(?:สาขา|บริษัท|นิติบุคคล).*(?:ยูเซอร์|ผู้ใช้งาน|คน|รุ่น|แบบไหน|แพ็กเกจ)|(?:ยูเซอร์|ผู้ใช้งานพร้อมกัน|concurrent).*(?:รุ่น|แบบไหน|ราคา|แพ็กเกจ|คน)", re.I),
+        "ตารางราคา แพ็กเกจ 4 รุ่น Concurrent Users Enterprise",
+    ),
+    (
+        re.compile(r"(?:bc\s*5\.?5|5\.5|champ|เวอร์ชันเก่า|ย้ายข้อมูล|อัปเกรด.*(?:เก่า|5\.5))", re.I),
+        "ย้ายข้อมูล BC 5.5 CHAMP Excel",
+    ),
+    (
+        re.compile(r"(?:เว็บไซต์|bcaccount|เบอร์.*(?:ติดต่อ|ออฟฟิศ|สำนักงาน)|บ้านเชียงซอฟท์|สำนักงาน.*(?:เชียงใหม่|กรุงเทพ)|เชียงใหม่.*อยู่(?:ที่)?ไหน|อยู่ที่ไหน.*(?:สำนักงาน|ออฟฟิศ|บริษัท))", re.I),
+        "ช่องทางติดต่อ เบอร์โทร เว็บไซต์ สำนักงาน เชียงใหม่",
+    ),
+    (
+        re.compile(r"(?:โปรโมชัน|สูตรโปรโมชัน|ซื้อครบแถม|ของแถม)"),
+        "โปรโมชัน อัตโนมัติ 10 รูปแบบ POS",
+    ),
+)
+
+
+def _adaptive_reformulate_query(query: str) -> str:
+    """Understand overall intent and reformulate noisy/spoken Thai queries into clean canonical BC search terms."""
+    norm = _normalize_search_text(query)
+    if not norm:
+        return ""
+    for pat, canonical in _ADAPTIVE_INTENT_REWRITES:
+        if pat.search(norm):
+            return canonical
+    # Fallback reformulation: keep only high-signal domain tokens (drop filler/STT noise)
+    core = [t for t in _tokenize_query(norm, expand_synonyms=False, keep_codes=True) if t not in _GENERIC_NOISE_TOKENS]
+    if not core:
+        return ""
+    return " ".join(core[:8])
 
 
 class BrainVaultMirror:
@@ -1496,6 +1546,26 @@ class BrainVaultMirror:
         top_score = res["top_score"]
         top_cosine = float(res.get("top_cosine") or 0.0)
 
+        # Adaptive Pass-2 Auto-Reformulation: if Pass 1 abstained or had low confidence on a noisy/conversational
+        # in-domain query (never on unknown 4-digit OOV menu traps), automatically rewrite the query by intent and retry!
+        pass1_weak = (not hits) or (confidence == "low")
+        if pass1_weak and not (codes and not hits):
+            reformed = _adaptive_reformulate_query(q)
+            if reformed and reformed.lower() != q.lower():
+                res2 = self.search_with_meta(reformed, limit=4, audience=aud)
+                c2 = res2["confidence"]
+                cos2 = float(res2.get("top_cosine") or 0.0)
+                # Accept Pass 2 only when it genuinely improves confidence AND stays semantically in-domain
+                if res2["hits"] and c2 != "low" and (not res2.get("hybrid") or cos2 >= 0.50):
+                    res = res2
+                    hits = res2["hits"]
+                    confidence = c2
+                    total_terms = res2["total_terms"]
+                    best_matched = res2["best_matched_terms"]
+                    top_score = res2["top_score"]
+                    top_cosine = cos2
+                    q = reformed
+
         if not hits:
             return f"🛑 Abstain — No matching notes (audience={aud}). Do not guess—try lookup_menu, lookup_error, or search_brain."
 
@@ -1521,14 +1591,39 @@ class BrainVaultMirror:
             return f"🛑 Abstain — No matching notes (audience={aud})."
 
         if m == "ultra":
-            primary_cap = int(budget * 0.72) if (second is not None and len(hits) > 1 and hits[1]["score"] >= top_score * 0.68) else budget
-            body = _compose_hybrid_excerpt(top, hits[0], toks, max(700, primary_cap))
+            # Holistic Multi-Aspect Fusion: if the query triggers a canonical overall intent (e.g. sizing/edition
+            # with branches + companies + 100 users) whose top canonical note differs from hits[0], ensure BOTH
+            # perspectives are included in the voice brain payload so the LLM answers the full question!
+            reformed_intent = _adaptive_reformulate_query(q)
+            intent_fused = False
+            if reformed_intent and reformed_intent.lower() != q.lower():
+                for pat, canonical in _ADAPTIVE_INTENT_REWRITES:
+                    if canonical == reformed_intent:
+                        res_intent = self.search_with_meta(canonical, limit=2, audience=aud)
+                        if res_intent["hits"] and res_intent["confidence"] != "low":
+                            intent_slug = res_intent["hits"][0]["slug"]
+                            if intent_slug != top["slug"]:
+                                with self._lock:
+                                    intent_note = self._notes_by_slug.get(intent_slug)
+                                if intent_note is not None:
+                                    # Prioritize the canonical pricing/migration/contact/promo note alongside top hit
+                                    second = top
+                                    top = intent_note
+                                    hits = [res_intent["hits"][0], hits[0], *hits[1:]]
+                                    top_score = max(top_score, hits[0]["score"])
+                                    intent_fused = True
+                        break
+
+            second_min_ratio = 0.50 if intent_fused else 0.68
+            include_second = bool(second is not None and len(hits) > 1 and (intent_fused or hits[1]["score"] >= top_score * second_min_ratio))
+            primary_cap = int(budget * 0.72) if include_second else budget
+            body = _compose_hybrid_excerpt(top, hits[0], toks, max(750, primary_cap))
             out_blocks = [
                 f"[quick_answer:ultra | audience={aud} | confidence={confidence} | slug: {top['slug']}]\n"
                 f"# {top['title']}\n{body}"
             ]
             # Big Voice Brain: include 2nd (and 3rd if close) note when budget allows for comprehensive spoken accuracy
-            for extra_idx, extra_note, ratio_min in ((1, second, 0.68), (2, third, 0.78)):
+            for extra_idx, extra_note, ratio_min in ((1, second, second_min_ratio), (2, third, 0.78)):
                 if (
                     extra_note is not None
                     and extra_note["slug"] != top["slug"]
@@ -1781,27 +1876,32 @@ class BrainVaultMirror:
                 scored_notes.append((score, sub_hits, note))
 
         scored_notes.sort(key=lambda x: (-x[0], -x[1], x[2]["slug"]))
-        picked_notes = [n for _, _, n in scored_notes[: max(0, int(limit_notes))]]
-        top_score = scored_notes[0][0] if scored_notes else 0.0
+        lex_map: dict[str, tuple[float, int, dict[str, Any]]] = {
+            n["slug"]: (sc, sh, n) for sc, sh, n in scored_notes
+        }
 
-        # Supplement nearby notes via pgvector when lexical nearby has fewer than limit_notes (high-cosine only)
+        # Hybrid pgvector boost in search_nearby so semantically accurate notes beat weak accidental lexical matches
         pg = self._get_pg()
-        if pg is not None and len(picked_notes) < max(0, int(limit_notes)):
-            picked_slugs = {n["slug"] for n in picked_notes}
-            pg_res = pg.hybrid_search(q, tokens=tokens, audience=aud, limit=6, timeout_s=0.35)
+        if pg is not None:
+            pg_res = pg.hybrid_search(q, tokens=tokens, audience=aud, limit=8, timeout_s=0.35)
             if pg_res.get("ok"):
-                for ch in pg_res.get("hits") or []:
+                for rank_i, ch in enumerate(pg_res.get("hits") or []):
                     slug = ch["slug"]
-                    if slug in picked_slugs or slug not in notes_map:
+                    if slug not in notes_map:
                         continue
                     cos = float(ch.get("cosine") or 0.0)
-                    if cos < 0.56:
+                    if cos < 0.47:
                         continue
-                    picked_notes.append(notes_map[slug])
-                    picked_slugs.add(slug)
-                    top_score = max(top_score, round(cos * 20.0, 2))
-                    if len(picked_notes) >= int(limit_notes):
-                        break
+                    sem_sc = (cos * 36.0) + (8.0 / (1.0 + rank_i))
+                    if slug in lex_map:
+                        old_sc, sh, n_obj = lex_map[slug]
+                        lex_map[slug] = (old_sc + sem_sc, sh, n_obj)
+                    elif cos >= 0.50:
+                        lex_map[slug] = (sem_sc, 1, notes_map[slug])
+
+        merged_notes = sorted(lex_map.values(), key=lambda x: (-x[0], -x[1], x[2]["slug"]))
+        picked_notes = [n for _, _, n in merged_notes[: max(0, int(limit_notes))]]
+        top_score = merged_notes[0][0] if merged_notes else 0.0
 
         scored_menus: list[tuple[float, int, dict[str, str]]] = []
         for rec in all_menus:
