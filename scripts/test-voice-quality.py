@@ -605,10 +605,11 @@ def test_bcbrain_v230_zone_abstain_and_ultra_mode():
     assert scope["_is_brain_abstain"]("เมนู 4013 ขายสินค้า/บริการ") is False
     assert "batch_ask" in scope["MCP_CACHEABLE_TOOLS"]
     assert scope["MCP_CACHE_TTL_S"] >= 300
-    assert C.BRAIN_BOOTSTRAP_URL.endswith("/api/bootstrap-pack")
+    assert Path(C.LOCAL_BRAIN_DIR).is_dir(), f"embedded local brain vault must exist: {C.LOCAL_BRAIN_DIR}"
+    assert C.MCP_SERVERS == {}, f"external MCP servers must be off by default: {C.MCP_SERVERS}"
     assert C.BRAIN_BOOTSTRAP_TTL_S >= 1800
     src = SOURCE.read_text(encoding="utf-8")
-    assert '"ultra"' in src and "_pin_user_audience" in src and "load_bootstrap_pack" in src
+    assert '"ultra"' in src and "_pin_user_audience" in src and "load_bootstrap_pack" in src and "LocalBrainClient" in src
 
 
 def test_vault_mirror_intent_expander_planner_and_ice_filter():
@@ -842,7 +843,8 @@ def test_abstain_nearby_fallback_zero_hallucination():
     assert "ใกล้เคียง" in C.SYSTEM_PROMPT and "ใกล้เคียง" in C.PHONE_PROMPT
     assert "BRAIN-NEARBY-FALLBACK" in SOURCE.read_text(encoding="utf-8")
     assert "used_nearby_only" in SOURCE.read_text(encoding="utf-8")
-    assert "_search_nearby_mcp" in (ROOT / "livekit-voice-ai" / "tools" / "call_control.py").read_text(encoding="utf-8")
+    lk_tools_src = (ROOT / "livekit-voice-ai" / "tools" / "call_control.py").read_text(encoding="utf-8")
+    assert "brain.search_nearby" in lk_tools_src and "get_local_brain" in lk_tools_src
     assert "ข้อมูลใกล้เคียง" in (ROOT / "livekit-voice-ai" / "llm" / "thai_llm.py").read_text(encoding="utf-8")
 
 
@@ -986,6 +988,55 @@ def test_wok98_log_5_improvements():
     assert st_tiny.pause_detected is False and st_tiny.stream is None, "0.03s 'ครับ' glitch must be rejected"
 
 
+def test_embedded_local_bcbrain_no_mcp_api():
+    """Verify bcbrain/vault runs 100% in-process with zero MCP HTTP API, OOV abstain, isolation & hot-reload."""
+    import tempfile
+    from brain_mirror import BrainVaultMirror, LocalBrainClient
+
+    brain = BrainVaultMirror(vault_dir=C.LOCAL_BRAIN_DIR)
+    st = brain.load_from_dir(C.LOCAL_BRAIN_DIR, force=True)
+    assert st["mode"] == "local", f"expected local mode: {st}"
+    assert st["notes"] >= 350 and st["menus"] >= 700, f"expected full embedded vault loaded: {st}"
+
+    client = LocalBrainClient(brain)
+    tool_names = {t["name"] for t in client.read_only_tools()}
+    assert {"quick_answer", "batch_ask", "lookup_menu", "lookup_error", "batch_read", "read_note", "search_brain", "traverse_brain", "list_notes", "find_media"} <= tool_names
+
+    # Direct local queries (0 HTTP)
+    m4013 = client.call("lookup_menu", {"query": "4013", "audience": "user"})
+    assert "4013" in m4013 and "ขาย" in m4013, f"expected menu 4013: {m4013}"
+    qa_price = client.call("quick_answer", {"question": "ราคาแพ็กเกจ BC Ai Account เท่าไหร่", "audience": "user", "mode": "ultra"})
+    assert "🛑" not in qa_price and "quick_answer:ultra" in qa_price, f"expected grounded price answer: {qa_price[:200]}"
+    ba = client.call("batch_ask", {"questions": ["เมนู 4013 คืออะไร", "สต็อกติดลบตั้งค่าตรงไหน"], "audience": "user"})
+    assert "[batch_ask | count=2" in ba and "4013" in ba
+
+    # OOV trap & strict user/dev isolation
+    oov_menu = client.call("quick_answer", {"question": "เมนู 9999 ทำอะไร", "audience": "user"})
+    assert "🛑" in oov_menu, f"unknown 4-digit menu must abstain: {oov_menu}"
+    oov_nonsense = client.call("quick_answer", {"question": "ซุปเปอร์โนวาดาวพฤหัสสีม่วง", "audience": "user"})
+    assert "🛑" in oov_nonsense, f"out-of-domain query must abstain: {oov_nonsense}"
+    dev_note_as_user = client.call("read_note", {"slug": "api-overview", "audience": "user"})
+    assert "🛑" in dev_note_as_user, f"dev note must be blocked for user audience: {dev_note_as_user}"
+    dev_note_as_dev = client.call("read_note", {"slug": "api-overview", "audience": "dev"})
+    assert "🛑" not in dev_note_as_dev and len(dev_note_as_dev) > 50
+
+    # Local bootstrap pack (0 HTTP, strict user-zone isolation)
+    bp = brain.get_bootstrap_pack("user")
+    assert len(bp) > 3000 and "4013" in bp and "sales-pricing-packages" in bp and "ic_trans" not in bp
+
+    # Hot-reload test on temp dir
+    with tempfile.TemporaryDirectory() as td:
+        p1 = Path(td) / "faq"
+        p1.mkdir(parents=True, exist_ok=True)
+        (p1 / "faq-hot-test.md").write_text("---\ntitle: ทดสอบฮอตรีโหลด\naudience: user\n---\nเนื้อหาเดิม", encoding="utf-8")
+        hb = BrainVaultMirror(vault_dir=td, watch_interval_s=1.0)
+        assert hb.load_from_dir(td, force=True)["notes"] == 1
+        (p1 / "faq-hot-new.md").write_text("---\ntitle: โน้ตมาใหม่สดๆ\naudience: user\n---\nข้อมูลใหม่ทันที", encoding="utf-8")
+        hb._last_watch_m = 0.0
+        hb.maybe_refresh()
+        assert hb.stats()["notes"] == 2 and "ข้อมูลใหม่ทันที" in (hb.read_note("faq-hot-new", audience="user") or "")
+
+
 TESTS = [
     test_caller_name_rejects_connectors_and_accepts_real_names,
     test_stt_stutter_detector_and_ear2_fallback,
@@ -1003,6 +1054,7 @@ TESTS = [
     test_log_and_audio_6_improvements,
     test_abstain_nearby_fallback_zero_hallucination,
     test_wok98_log_5_improvements,
+    test_embedded_local_bcbrain_no_mcp_api,
 ]
 
 

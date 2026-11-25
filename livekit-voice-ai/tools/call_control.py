@@ -12,9 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
 
-import httpx
 from livekit import api
 from livekit.agents import function_tool
 from livekit.protocol import room as proto_room
@@ -22,21 +20,9 @@ from livekit.protocol import sip as proto_sip
 
 logger = logging.getLogger("bc-callcenter.tools")
 
-_MCP_HTTP_CLIENT: httpx.AsyncClient | None = None
 _MCP_CACHE: dict[str, tuple[float, str]] = {}
 _MCP_CACHE_TTL_S = 300.0
 _MCP_CACHE_MAX = 256
-_FAST_REST_ETAG: dict[str, tuple[str, str]] = {}
-
-
-def _get_mcp_http_client() -> httpx.AsyncClient:
-    global _MCP_HTTP_CLIENT
-    if _MCP_HTTP_CLIENT is None or _MCP_HTTP_CLIENT.is_closed:
-        _MCP_HTTP_CLIENT = httpx.AsyncClient(
-            timeout=8.0,
-            limits=httpx.Limits(max_keepalive_connections=8, keepalive_expiry=120.0),
-        )
-    return _MCP_HTTP_CLIENT
 
 
 def _cache_get(key: str) -> str | None:
@@ -240,8 +226,13 @@ class CallCenterContext:
 
 
 def build_call_tools(ctx: CallCenterContext) -> list[Any]:
-    """สร้างชุดเครื่องมือ Call Center สำหรับ LiveKit AgentSession."""
-    mcp_url = os.getenv("BC_BRAIN_MCP_URL", "https://brain.bcsmethai.com/mcp")
+    """สร้างชุดเครื่องมือ Call Center สำหรับ LiveKit AgentSession (ใช้ Embedded Local BC Brain ในเครื่อง 0 HTTP/MCP)."""
+    import sys as _sys
+
+    jarvis_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "jarvis"))
+    if jarvis_dir not in _sys.path:
+        _sys.path.insert(0, jarvis_dir)
+    from brain_mirror import get_local_brain
 
     @function_tool()
     async def lookup_caller_history() -> str:
@@ -249,162 +240,65 @@ def build_call_tools(ctx: CallCenterContext) -> list[Any]:
         summary = load_caller_summary(ctx.caller_phone)
         return summary or "ลูกค้าโทรมาเป็นครั้งแรก ยังไม่มีประวัติเดิมในระบบ"
 
-    async def _fast_rest_fallback(tool_name: str, arguments: dict[str, Any]) -> str | None:
-        base_url = mcp_url.removesuffix("/mcp").rstrip("/")
-        if tool_name == "quick_answer":
-            qs = urlencode({
-                "q": str(arguments.get("question") or ""),
-                "audience": str(arguments.get("audience") or "user"),
-                "mode": str(arguments.get("mode") or "ultra"),
-            })
-        elif tool_name == "lookup_menu":
-            qs = urlencode({
-                "menu": str(arguments.get("query") or ""),
-                "audience": str(arguments.get("audience") or "user"),
-            })
-        else:
-            return None
-        rest_url = f"{base_url}/api/fast?{qs}"
-        headers = {"Accept": "text/plain, application/json"}
-        cached_etag, cached_body = _FAST_REST_ETAG.get(rest_url, ("", ""))
-        if cached_etag:
-            headers["If-None-Match"] = cached_etag
-        try:
-            client = _get_mcp_http_client()
-            res = await client.get(rest_url, headers=headers)
-            if res.status_code == 304 and cached_body:
-                return cached_body
-            if res.status_code == 200 and res.text.strip():
-                body_txt = res.text.strip()[:2200]
-                if etag := res.headers.get("etag"):
-                    if len(_FAST_REST_ETAG) >= 128:
-                        _FAST_REST_ETAG.pop(next(iter(_FAST_REST_ETAG)), None)
-                    _FAST_REST_ETAG[rest_url] = (etag, body_txt)
-                return body_txt
-        except Exception as rest_exc:
-            logger.warning("BC Brain /api/fast fallback %s failed: %s", tool_name, rest_exc)
-        return None
-
-    async def _post_mcp(tool_name: str, arguments: dict[str, Any], timeout: float = 8.0) -> list[str]:
-        client = _get_mcp_http_client()
-        res = await client.post(
-            mcp_url,
-            headers={
-                "Accept": "application/json, text/event-stream",
-                "Content-Type": "application/json",
-            },
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {"name": tool_name, "arguments": arguments},
-            },
-            timeout=timeout,
-        )
-        if res.status_code != 200:
-            return []
-        raw = res.text
-        if "event-stream" in res.headers.get("content-type", ""):
-            data_lines = [ln[5:] for ln in raw.splitlines() if ln.startswith("data:")]
-            raw = data_lines[-1] if data_lines else raw
-        body = json.loads(raw)
-        content = body.get("result", {}).get("content", [])
-        return [c.get("text", "") for c in content if isinstance(c, dict) and c.get("text")]
-
-    async def _search_nearby_mcp(query: str, audience: str = "user") -> str | None:
-        clean_q = " ".join(str(query or "").split())[:200]
-        if not clean_q:
-            return None
-        try:
-            hits_texts = await _post_mcp("search_brain", {"query": clean_q, "audience": audience, "limit": 3}, timeout=5.0)
-            if not hits_texts:
-                return None
-            hits = [
-                h for h in json.loads("\n".join(hits_texts))
-                if isinstance(h, dict) and h.get("slug") and h.get("score", 0) >= 35
-            ]
-            slugs = [str(h["slug"]) for h in hits[:2]]
-            if not slugs:
-                return None
-            batch_texts = await _post_mcp(
-                "batch_read",
-                {"slugs": slugs, "audience": audience, "query": clean_q, "max_chars_per_note": 700},
-                timeout=5.0,
-            )
-            if not batch_texts:
-                return None
-            joined_nearby = "\n".join(batch_texts).strip()
-            if not joined_nearby or "🛑" in joined_nearby or "abstain" in joined_nearby.lower():
-                return None
-            return (
-                "ไม่พบคำตอบตรงเป๊ะในระบบ (Abstain) — ห้ามเดาและห้ามแต่งเติมเอง ให้บอกลูกค้าสั้นๆ ตรงๆ ว่าส่วนที่ถามตรงๆ ยังไม่มีข้อมูลยืนยัน "
-                "แต่มีข้อมูลใกล้เคียงที่มีอยู่จริงด้านล่างให้เล่าเฉพาะข้อเท็จจริงนี้เท่านั้น:\n\n"
-                + joined_nearby[:1400]
-            )
-        except Exception as exc:
-            logger.warning("BC Brain nearby fallback failed: %s", exc)
-            return None
-
-    async def _call_bc_brain_mcp(tool_name: str, arguments: dict[str, Any], timeout: float = 8.0) -> str:
+    async def _call_bc_brain_local(tool_name: str, arguments: dict[str, Any]) -> str:
         cache_key = f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
         if cached := _cache_get(cache_key):
             return cached
         q_text = str(arguments.get("question") or " ".join(arguments.get("questions") or [])).strip()
+        aud = str(arguments.get("audience") or "user").strip() or "user"
         try:
-            texts = await _post_mcp(tool_name, arguments, timeout=timeout)
-            if texts:
-                joined = "\n".join(texts)
-                if ("🛑" in joined or "abstain" in joined.lower()) and not (
-                    "[batch_ask" in joined and re.search(r"confidence=(?:high|medium)\b", joined, re.I)
-                ):
-                    if nearby := await _search_nearby_mcp(q_text, audience=str(arguments.get("audience") or "user")):
-                        return nearby
-                    return "ไม่พบข้อมูลยืนยันในระบบ (Abstain): ห้ามเดาหรือแต่งข้อมูลเอง ให้แจ้งลูกค้าตรงๆ ว่ายังไม่มีข้อมูลยืนยันในระบบ แล้วชวนคุยตอบเรื่องอื่นต่ออย่างเป็นธรรมชาติ (ไม่ต้องเสนอโทรกลับทุกครั้ง เสนอเฉพาะเมื่อลูกค้าขอ จำเป็นจริงๆ หรือเป็น BC Account เวอร์ชันเก่า)"
-                limit_chars = 2400 if tool_name == "batch_read" else 1400
-                out = joined[:limit_chars]
-                _cache_put(cache_key, out)
-                return out
+            brain = get_local_brain()
+            joined = brain.dispatch_tool(tool_name, arguments)
+            if ("🛑" in joined or "abstain" in joined.lower()) and not (
+                "[batch_ask" in joined and re.search(r"confidence=(?:high|medium)\b", joined, re.I)
+            ):
+                if q_text:
+                    nearby = brain.search_nearby(q_text, audience=aud, limit_notes=2, limit_menus=4, max_chars_per_note=650)
+                    if nearby and nearby.get("text"):
+                        return (
+                            "ไม่พบคำตอบตรงเป๊ะในระบบ (Abstain) — ห้ามเดาและห้ามแต่งเติมเอง ให้บอกลูกค้าสั้นๆ ตรงๆ ว่าส่วนที่ถามตรงๆ ยังไม่มีข้อมูลยืนยัน "
+                            "แต่มีข้อมูลใกล้เคียงที่มีอยู่จริงด้านล่างให้เล่าเฉพาะข้อเท็จจริงนี้เท่านั้น:\n\n"
+                            + str(nearby["text"])[:1400]
+                        )
+                return "ไม่พบข้อมูลยืนยันในระบบ (Abstain): ห้ามเดาหรือแต่งข้อมูลเอง ให้แจ้งลูกค้าตรงๆ ว่ายังไม่มีข้อมูลยืนยันในระบบ แล้วชวนคุยตอบเรื่องอื่นต่ออย่างเป็นธรรมชาติ (ไม่ต้องเสนอโทรกลับทุกครั้ง เสนอเฉพาะเมื่อลูกค้าขอ จำเป็นจริงๆ หรือเป็น BC Account เวอร์ชันเก่า)"
+            limit_chars = 2400 if tool_name == "batch_read" else 1400
+            out = joined[:limit_chars]
+            _cache_put(cache_key, out)
+            return out
         except Exception as exc:
-            logger.warning("BC Brain MCP %s failed: %s", tool_name, exc)
-        if rest_txt := await _fast_rest_fallback(tool_name, arguments):
-            if "🛑" in rest_txt or "abstain" in rest_txt.lower():
-                if nearby := await _search_nearby_mcp(q_text, audience=str(arguments.get("audience") or "user")):
-                    return nearby
-                return "ไม่พบข้อมูลยืนยันในระบบ (Abstain): ห้ามเดาหรือแต่งข้อมูลเอง ให้แจ้งลูกค้าตรงๆ ว่ายังไม่มีข้อมูลยืนยันในระบบ แล้วชวนคุยต่ออย่างเป็นธรรมชาติ"
-            _cache_put(cache_key, rest_txt)
-            return rest_txt
-        return "ไม่สามารถดึงข้อมูลจากคลังความรู้ได้ชั่วคราว กรุณาแจ้งลูกค้าตามจริงและชวนคุยต่อ หรือให้ฝากเรื่องเฉพาะหากจำเป็นครับ"
+            logger.warning("Local BC Brain %s failed: %s", tool_name, exc)
+            return "ไม่สามารถดึงข้อมูลจากคลังความรู้ได้ชั่วคราว กรุณาแจ้งลูกค้าตามจริงและชวนคุยต่อ หรือให้ฝากเรื่องเฉพาะหากจำเป็นครับ"
 
     @function_tool()
     async def search_knowledge_base(query: str) -> str:
-        """ค้นหาข้อมูลสินค้า ราคา วิธีใช้งานโปรแกรมบัญชี BC Ai Account จากคลังความรู้ (quick_answer ultra / audience user)."""
-        return await _call_bc_brain_mcp(
+        """ค้นหาข้อมูลสินค้า ราคา วิธีใช้งานโปรแกรมบัญชี BC Ai Account จากคลังความรู้ในเครื่อง (quick_answer ultra / audience user)."""
+        return await _call_bc_brain_local(
             "quick_answer",
             {"question": query, "audience": "user", "mode": "ultra", "include_media": False},
         )
 
     @function_tool()
     async def lookup_menu(query: str) -> str:
-        """ค้นหารหัสเมนู 4 หลัก (1001-9070) หรือชื่อเมนูของ BC Ai Account แบบทันที."""
-        return await _call_bc_brain_mcp(
+        """ค้นหารหัสเมนู 4 หลัก (1001-9070) หรือชื่อเมนูของ BC Ai Account แบบทันที (<1ms)."""
+        return await _call_bc_brain_local(
             "lookup_menu",
             {"query": query, "audience": "user", "limit": 5},
         )
 
     @function_tool()
     async def batch_ask_knowledge(questions: list[str]) -> str:
-        """ตอบคำถามหลายประเด็นพร้อมกันในรอบเดียว (สูงสุด 5 ข้อ) จาก BC Brain."""
+        """ตอบคำถามหลายประเด็นพร้อมกันในรอบเดียว (สูงสุด 5 ข้อ) จากสมองในเครื่อง."""
         clean_qs = [str(q).strip() for q in (questions or []) if str(q).strip()][:5]
         if not clean_qs:
             return "กรุณาระบุคำถามอย่างน้อย 1 ข้อ"
-        return await _call_bc_brain_mcp(
+        return await _call_bc_brain_local(
             "batch_ask",
             {"questions": clean_qs, "audience": "user", "mode": "ultra", "include_media": False},
         )
 
     @function_tool()
     async def batch_read_knowledge(slugs: list[str], query: str = "") -> str:
-        """อ่านรายละเอียดโน้ต 2-5 ใบพร้อมกันในรอบเดียวตาม slug ของ BC Brain (โซน user)."""
+        """อ่านรายละเอียดโน้ต 2-5 ใบพร้อมกันในรอบเดียวตาม slug จากสมองในเครื่อง (โซน user)."""
         clean_slugs = [str(s).strip() for s in (slugs or []) if str(s).strip()][:5]
         if not clean_slugs:
             return "กรุณาระบุ slug อย่างน้อย 1 รายการ"
@@ -415,7 +309,7 @@ def build_call_tools(ctx: CallCenterContext) -> list[Any]:
         }
         if query and query.strip():
             args["query"] = query.strip()
-        return await _call_bc_brain_mcp("batch_read", args)
+        return await _call_bc_brain_local("batch_read", args)
 
     @function_tool()
     async def create_callback_ticket(

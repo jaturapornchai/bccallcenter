@@ -3,44 +3,25 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 
-import httpx
 from livekit.plugins import openai as lk_openai
 
-_BOOTSTRAP_LOCK = threading.Lock()
-_BOOTSTRAP_CACHE: dict[str, Any] = {"ts": 0.0, "etag": None, "text": ""} if False else {"ts": 0.0, "etag": None, "text": ""}
+_JARVIS_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "jarvis"))
+if _JARVIS_DIR not in sys.path:
+    sys.path.insert(0, _JARVIS_DIR)
+
+from brain_mirror import get_local_brain  # noqa: E402
 
 
 def _load_bootstrap_pack_cached(audience: str = "user") -> str:
-    """โหลด /api/bootstrap-pack ผ่าน ETag (รีเฟรชทุก 30 นาที, fail-soft) เพื่อตอบเมนูยอดฮิต/ราคาใน 0 MCP call."""
-    url = os.getenv("BC_BRAIN_BOOTSTRAP_URL", "https://brain.bcsmethai.com/api/bootstrap-pack")
-    now_m = time.monotonic()
-    with _BOOTSTRAP_LOCK:
-        if _BOOTSTRAP_CACHE["text"] and now_m - float(_BOOTSTRAP_CACHE["ts"]) < 1800:
-            return str(_BOOTSTRAP_CACHE["text"])
-        prev_etag = _BOOTSTRAP_CACHE["etag"]
-        prev_text = str(_BOOTSTRAP_CACHE["text"])
+    """โหลด bootstrap-pack โดยตรงจากสมองในเครื่อง (bcbrain/vault) ภายใน RAM (<1ms, 0 HTTP/MCP API)."""
     try:
-        headers = {"Accept": "text/markdown, text/plain"}
-        if prev_etag:
-            headers["If-None-Match"] = str(prev_etag)
-        r = httpx.get(f"{url}?audience={audience}", headers=headers, timeout=4.0)
-        if r.status_code == 304 and prev_text:
-            with _BOOTSTRAP_LOCK:
-                _BOOTSTRAP_CACHE["ts"] = now_m
-            return prev_text
-        if r.status_code == 200 and r.text:
-            text = r.text.strip()[:20000]
-            with _BOOTSTRAP_LOCK:
-                _BOOTSTRAP_CACHE["ts"] = now_m
-                _BOOTSTRAP_CACHE["etag"] = r.headers.get("etag") or prev_etag
-                _BOOTSTRAP_CACHE["text"] = text
-            return text
+        return get_local_brain().get_bootstrap_pack(audience)
     except Exception:
-        pass
-    return prev_text
+        return ""
 
 
 def build_callcenter_system_prompt(

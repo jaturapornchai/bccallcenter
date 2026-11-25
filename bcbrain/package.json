@@ -1,0 +1,47 @@
+{
+  "name": "bcbrain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "scan": "node scripts/scan-secrets.mjs",
+    "prebuild": "node scripts/scan-secrets.mjs",
+    "build": "next build",
+    "start": "next start",
+    "mcp:server": "node scripts/mcp-server.ts",
+    "mcp:stdio": "node scripts/mcp-stdio.ts",
+    "test": "node scripts/selftest.ts",
+    "test:deep": "node scripts/deep-test.ts",
+    "check": "node scripts/check-notes.mjs",
+    "check:drift": "node scripts/check-notes.mjs D:/bcaiaccount --strict --drift",
+    "wiki:lint": "node scripts/wiki-lint.mjs",
+    "verify:grounding": "node scripts/verify-grounding.mjs",
+    "grounding:lock": "node scripts/grounding-lock.mjs",
+    "grounding:index": "node scripts/export-grounding-index.mjs",
+    "sync:check": "node scripts/detect-changes.mjs",
+    "sync:plan": "node scripts/hourly-sync.mjs --plan-only",
+    "sync:finalize": "node scripts/hourly-sync.mjs --finalize",
+    "sync:dry": "node scripts/hourly-sync.mjs --dry-run",
+    "sync:now": "node scripts/hourly-sync.mjs",
+    "deploy:win": "node scripts/deploy.mjs",
+    "task:install": "node scripts/install-hourly-task.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "marked": "18.1.2",
+    "next": "16.4.6",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "three": "0.187.0",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/three": "^0.187.0",
+    "typescript": "^7.0.2"
+  }
+}

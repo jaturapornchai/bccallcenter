@@ -59,7 +59,7 @@ from f5_tts_th.normalize import normalize_text  # noqa: E402  (digits and signs 
 from omnivoice import OmniVoice  # noqa: E402
 from omnivoice.models.omnivoice import OmniVoiceGenerationConfig  # noqa: E402
 
-from brain_mirror import BrainVaultMirror  # noqa: E402
+from brain_mirror import BrainVaultMirror, LocalBrainClient  # noqa: E402
 import config as C  # noqa: E402
 import desktop_agent  # noqa: E402
 from elevenlabs_tts import ElevenLabsTTS, SPEAKABLE_RE  # noqa: E402
@@ -1323,11 +1323,11 @@ def general_knowledge(question):
 
 MCP_CACHE_TTL_S = 300.0
 MCP_CACHE_MAX = 256
-MCP_CACHEABLE_TOOLS = frozenset({"quick_answer", "batch_ask", "lookup_menu", "batch_read", "read_note", "search_brain", "ask_brain"})
+MCP_CACHEABLE_TOOLS = frozenset({"quick_answer", "batch_ask", "lookup_menu", "lookup_error", "batch_read", "read_note", "search_brain", "ask_brain"})
 _BOOTSTRAP_LOCK = threading.Lock()
 _BOOTSTRAP_CACHE: dict[str, dict] = {}
 BRAIN_AUDIENCE_TOOLS = frozenset({
-    "quick_answer", "batch_ask", "lookup_menu", "batch_read",
+    "quick_answer", "batch_ask", "lookup_menu", "lookup_error", "batch_read",
     "ask_brain", "search_brain", "traverse_brain", "list_notes", "find_media",
 })
 
@@ -1342,7 +1342,15 @@ def _is_brain_abstain(text: str) -> bool:
 
 
 def load_bootstrap_pack(audience: str = "user", force: bool = False) -> str:
-    """โหลด BC Brain bootstrap-pack ผ่าน ETag ลง RAM เพื่อตอบเมนูยอดฮิตและราคา 4 รุ่นได้ทันทีใน 0 MCP call (fail-soft)."""
+    """โหลด BC Brain bootstrap-pack จากสมองในเครื่องลง RAM (0ms, ไม่ต้องผ่าน HTTP/MCP API)."""
+    mirror = globals().get("BRAIN_MIRROR")
+    if mirror is not None:
+        if not mirror.ready and getattr(mirror, "vault_dir", "") and os.path.isdir(mirror.vault_dir):
+            mirror.load_from_dir(mirror.vault_dir, force=True)
+        if mirror.ready and hasattr(mirror, "get_bootstrap_pack"):
+            local_pack = mirror.get_bootstrap_pack(audience)
+            if local_pack:
+                return local_pack
     url = getattr(C, "BRAIN_BOOTSTRAP_URL", "")
     ttl = float(getattr(C, "BRAIN_BOOTSTRAP_TTL_S", 1800))
     if not url:
@@ -1928,17 +1936,21 @@ def connect_mcp(server, url):
     return None
 
 
-BRAIN_MIRROR = BrainVaultMirror(C.BRAIN_VAULT_PACK_URL, ttl_s=C.BRAIN_VAULT_PACK_TTL_S)
-MCP_CLIENTS: dict[str, MCPClient] = {}
+BRAIN_MIRROR = BrainVaultMirror(
+    C.BRAIN_VAULT_PACK_URL,
+    ttl_s=C.BRAIN_VAULT_PACK_TTL_S,
+    vault_dir=getattr(C, "LOCAL_BRAIN_DIR", ""),
+)
+MCP_CLIENTS: dict[str, object] = {}
 LEGACY_BRAIN_TOOLS = frozenset({"search_brain", "read_note", "ask_brain"})
 
 
 def _prefetch_mcp_batch(calls: list[tuple[str, dict]], tools: dict) -> None:
-    """Warm MCPClient RAM cache in 1 POST /mcp JSON-RPC batch array when multiple bcbrain calls run together."""
+    """Warm remote MCPClient RAM cache in 1 POST /mcp batch array (skipped for in-process LocalBrainClient)."""
     if len(calls) < 2:
         return
     client = MCP_CLIENTS.get("bcbrain")
-    if client is None or not hasattr(client, "call_batch"):
+    if client is None or isinstance(client, LocalBrainClient) or not hasattr(client, "call_batch"):
         return
     mirror = globals().get("BRAIN_MIRROR")
     mirror_ok = bool(mirror is not None and mirror.ready)
@@ -1956,12 +1968,7 @@ def _prefetch_mcp_batch(calls: list[tuple[str, dict]], tools: dict) -> None:
 
 
 def load_mcp_tools():
-    for server, url in C.MCP_SERVERS.items():
-        connected = connect_mcp(server, url)
-        if not connected:
-            log.warning("MCP %s unavailable -> its tools are skipped", server)
-            continue
-        client, tools = connected
+    def _register_brain_tools(server, client, tools):
         MCP_CLIENTS[server] = client
         tool_names = {t["name"] for t in tools}
         # When fast single-round-trip tools (quick_answer + batch_read) are available, hide slower legacy tools
@@ -1974,14 +1981,40 @@ def load_mcp_tools():
             TOOLS[t["name"]] = mcp_tool(server, client, t["name"])
             WORKER[t["name"]] = server
             STATUS[t["name"]] = f"กำลังค้นคลังความรู้ {server}"
+
+    # 1. Embedded Local BC Brain (in-process RAM from d:\yalecom\bcbrain\vault — zero HTTP/MCP API calls)
+    mirror = globals().get("BRAIN_MIRROR")
+    local_dir = getattr(C, "LOCAL_BRAIN_DIR", "")
+    if mirror is not None and local_dir and os.path.isdir(local_dir):
+        st = mirror.load_from_dir(local_dir, force=True)
+        if st.get("notes"):
+            local_client = LocalBrainClient(mirror)
+            local_tools = local_client.read_only_tools()
+            _register_brain_tools("bcbrain", local_client, local_tools)
+            log.info(
+                "Local BC Brain (in-process): %d notes, %d menus, %d errors, tools=%s (dir=%s)",
+                st["notes"], st["menus"], st.get("errors", 0), [t["name"] for t in local_tools], local_dir,
+            )
+
+    # 2. Optional external MCP servers (only if explicitly configured and not already provided locally)
+    for server, url in (getattr(C, "MCP_SERVERS", None) or {}).items():
+        if server in MCP_CLIENTS:
+            continue
+        connected = connect_mcp(server, url)
+        if not connected:
+            log.warning("MCP %s unavailable -> its tools are skipped", server)
+            continue
+        client, tools = connected
+        _register_brain_tools(server, client, tools)
         log.info("MCP %s: %s", server, [t["name"] for t in tools])
+
+    # 3. Bootstrap pack (served directly from embedded local brain in 0ms; optional HTTP fallback)
     loader = globals().get("load_bootstrap_pack")
-    if callable(loader) and getattr(C, "BRAIN_BOOTSTRAP_URL", ""):
+    if callable(loader):
         pack = loader("user", force=True)
         if pack:
             log.info("BC Brain bootstrap-pack (user): %d chars", len(pack))
-    mirror = globals().get("BRAIN_MIRROR")
-    if mirror is not None and getattr(C, "BRAIN_VAULT_PACK_URL", ""):
+    if mirror is not None and not mirror.ready and getattr(C, "BRAIN_VAULT_PACK_URL", ""):
         st = mirror.sync(force=True)
         if st.get("notes"):
             log.info("BC Brain vault-pack mirror: %d notes, %d menus (etag=%s)", st["notes"], st["menus"], st.get("etag"))

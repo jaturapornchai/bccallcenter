@@ -233,11 +233,15 @@ SCREEN_MARK = "[จอ]"  # LLM output after this marker goes to the on-screen p
 
 # --- Tools ---
 DOCS_DIR = os.path.join(BASE_DIR, "docs")  # search_docs reads .txt .md .csv .pdf here
-# Read-only tools of these MCP servers (streamable HTTP) are offered to the LLM.
-MCP_SERVERS = {"bcbrain": "https://brain.bcsmethai.com/mcp"}
-BRAIN_BOOTSTRAP_URL = "https://brain.bcsmethai.com/api/bootstrap-pack"
+# Embedded Local BC Brain vault inside this monorepo (zero MCP HTTP API calls, hot-reloads on .md edits)
+LOCAL_BRAIN_DIR = os.path.abspath(
+    os.environ.get("BC_BRAIN_VAULT_DIR") or os.path.join(BASE_DIR, "..", "bcbrain", "vault")
+)
+# External MCP servers are disabled by default because BC Brain is embedded in-process.
+MCP_SERVERS: dict[str, str] = {}
+BRAIN_BOOTSTRAP_URL = os.environ.get("BRAIN_BOOTSTRAP_URL", "").strip()
 BRAIN_BOOTSTRAP_TTL_S = 1800
-BRAIN_VAULT_PACK_URL = os.environ.get("BRAIN_VAULT_PACK_URL", "https://brain.bcsmethai.com/api/vault-pack")
+BRAIN_VAULT_PACK_URL = os.environ.get("BRAIN_VAULT_PACK_URL", "").strip()
 BRAIN_VAULT_PACK_TTL_S = int(os.environ.get("BRAIN_VAULT_PACK_TTL_S", "1800"))
 # OpenStreetMap Nominatim wants an app that names itself (never a personal email): [แผนที่] lines get coordinates
 GEO_USER_AGENT = "bctest01-voice-secretary/1.0 (+https://callcenter.bcsmethai.com)"
