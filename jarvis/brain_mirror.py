@@ -100,6 +100,18 @@ _STT_SEARCH_NORMALIZE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"แยกสาคะ|สาหา(?:เอ|บี)?"), " แยกสาขา สาขา "),
     (re.compile(r"(?<![ก-๙])เชล(?:ล์)?(?=\s*ด้วย|\s|$)"), " ชั้นวาง ที่เก็บ "),
     (re.compile(r"(?<![a-zA-Z])(?:vc|วีซี)(?![a-zA-Z])|มีซี(?![a-zA-Z\u0E00-\u0E7F])", re.I), " บีซี "),
+    (re.compile(r"อัตราแรกเปลี่ยน|ตารางแลกเปลี่ยน"), " อัตราแลกเปลี่ยน "),
+    (re.compile(r"ลงมัญติ|โรงบัญชี"), " ลงบัญชี "),
+    (re.compile(r"ที่อยู่(?:จาก|จะ)ส่ง"), " ที่อยู่จัดส่ง "),
+    (re.compile(r"กี่เบิร์"), " กี่เบอร์ เบอร์โทรศัพท์ "),
+    (re.compile(r"(?:เก็บ|แนบ)?รูป(?:ภาพ)?ได้กี่ลูก"), " เก็บรูปภาพได้กี่รูป รูปภาพสินค้า ไฟล์แนบ "),
+    (re.compile(r"พิกัดดาวเทียม"), " พิกัด GPS ละติจูด ลองจิจูด ดาวเทียม "),
+    (re.compile(r"ตัดแทบ|จัดแต้ม|ใช้แต้มแท้"), " ตัดแต้ม ใช้แต้ม แต้มสะสม "),
+    (re.compile(r"ส่วนรถ"), " ส่วนลด "),
+    (re.compile(r"(?:ตอน)?ขาย\s*(?:pls|os)(?=\s|หน้าร้าน|$)|คีโอเอส", re.I), " ขาย POS หน้าร้าน "),
+    (re.compile(r"รวมแต้(?!ม)"), " รวมแต้ม กลุ่มสมาชิกรวมแต้ม "),
+    (re.compile(r"ซื้?อขา(?:ย)?สินค้าต่ำประเด็น|สินค้าต่ำประเด็น"), " ซื้อขายสินค้าต่างประเทศ นำเข้า "),
+    (re.compile(r"(?:แบบนี้)?ราคาเท่าไหร่ตัวใหม่(?:เนี่ย)?|ราคาตัวใหม่"), " ตารางราคา แพ็กเกจ 4 รุ่น BC Ai Account ราคาเท่าไหร่ "),
 )
 
 # Synonym groups ported from bcbrain/lib/vault.ts + Call Center voice synonyms
@@ -160,6 +172,12 @@ _BRAIN_SYNONYM_GROUPS: tuple[tuple[str, ...], ...] = (
     ("ยางรถยนต์", "ร้านยาง", "อู่ซ่อมรถ", "autocare", "ออโต้แคร์"),
     ("โปรโมชัน", "โปรโมชั่น", "promotion", "สูตรโปรโมชัน", "ของแถม", "ซื้อครบแถม", "คูปอง", "ส่วนลด", "2015", "2026"),
     ("lifo", "fifo", "fefo", "ประเภทต้นทุน", "ต้นทุนเฉลี่ย", "วิธีคำนวณต้นทุน"),
+    ("นำเข้า", "ต่างประเทศ", "ต้นทุนแฝง", "landed", "ศุลกากร", "อากรขาเข้า", "cif", "fob", "2051"),
+    ("อัตราแลกเปลี่ยน", "สกุลเงิน", "fx", "9021", "กำไรขาดทุนอัตราแลกเปลี่ยน"),
+    ("ที่อยู่จัดส่ง", "พิกัด", "gps", "จีพีเอส", "ดาวเทียม", "ละติจูด", "ลองจิจูด"),
+    ("เก็บรูป", "รูปภาพ", "รูปสินค้า", "แนบรูป", "ไฟล์แนบ", "2005"),
+    ("แต้ม", "แต้มสะสม", "สะสมแต้ม", "ตัดแต้ม", "รวมแต้ม", "กลุ่มสมาชิก", "ครอบครัว", "1022"),
+    ("เบอร์โทรศัพท์", "เบอร์โทร", "มือถือ", "ผู้ติดต่อ", "ข้อมูลคู่ค้า"),
 )
 
 
@@ -282,6 +300,9 @@ _BC_THAI_CUSTOM_DICT: frozenset[str] = frozenset({
     "เลขที่เอกสาร", "เล่มเอกสาร", "ออกแบบฟอร์ม", "ประวัติการพิมพ์", "พิมพ์ซ้ำ", "คิวงาน",
     "เฝ้าระวัง", "ทุจริต", "แพ็กเกจ", "ค่าบริการ", "ทดลองใช้", "คลาวด์", "เซิร์ฟเวอร์",
     "เงินเดือน", "ประกันสังคม", "สองภาษา", "ช้อปปี้", "ลาซาด้า", "ติ๊กต็อก", "ข้อมูลเริ่มต้น",
+    "ต้นทุนแฝง", "นำเข้าต่างประเทศ", "อัตราแลกเปลี่ยน", "กรมศุลกากร", "อากรขาเข้า",
+    "ที่อยู่จัดส่ง", "พิกัดดาวเทียม", "ละติจูด", "ลองจิจูด", "รูปภาพสินค้า", "แนบรูปภาพ",
+    "สะสมแต้ม", "ตัดแต้ม", "รวมแต้ม", "กลุ่มสมาชิก", "แต้มสะสม", "ผู้ติดต่อ", "เบอร์โทรศัพท์", "ใบปะหน้าจัดส่ง",
 })
 
 _THAI_STOPWORDS = frozenset(_pythai_stopwords()) if _pythai_stopwords else frozenset()
@@ -451,10 +472,98 @@ def _extract_tldr(title: str, clean_body: str, max_chars: int = 850) -> str:
     return out[:max_chars].rsplit("\n", 1)[0].strip() if len(out) > max_chars else out.strip()
 
 
-def _extract_relevant_excerpt(title: str, body: str, tokens: list[str], max_chars: int) -> str:
-    """Pick the most query-relevant section(s) of a note within max_chars (deduplicated title, media-free)."""
+_TARGET_COUNT_LIMIT_RE = re.compile(
+    r"(?:กี่แบบ|กี่รุ่น|กี่รูป|กี่ลูก|กี่เบอร์|กี่เบิร์|กี่ช่อง|กี่เมนู|กี่ตัว|กี่หลัก|กี่เกณฑ์|กี่มิติ|กี่ระดับ|กี่\s*mb|สูงสุดกี่|ได้กี่|มีกี่|จำนวนกี่)",
+    re.I,
+)
+_TARGET_PRICING_RE = re.compile(
+    r"(?:ราคา|แพ็กเกจ|กี่บาท|ค่าบริการ|ใช้รุ่นไหน|ใช้แบบไหน|รุ่นไหนดี|แนะนำรุ่น|ฟรี.*บาท|starter|standard|professional|enterprise)",
+    re.I,
+)
+_TARGET_MENU_WHERE_RE = re.compile(
+    r"(?:เมนูไหน|เมนูอะไร|รหัสเมนู|รหัสอะไร|เข้าตรงไหน|ดูตรงไหน|กดตรงไหน|อยู่ตรงไหน|รายงานไหน|หน้าจอไหน)"
+)
+_TARGET_HOWTO_RE = re.compile(
+    r"(?:ทำยังไง|ทำอย่างไร|ตั้งค่ายังไง|ลงบัญชียังไง|คิดยังไง|คำนวณยังไง|วิธี|ขั้นตอน|เริ่มต้นยังไง)"
+)
+_TARGET_COMPARE_RE = re.compile(r"(?:ต่างกันยังไง|ต่างกันอย่างไร|แตกต่าง|เทียบกับ|แบบไหนดี|ดีกว่า)")
+_TARGET_TROUBLESHOOT_RE = re.compile(r"(?:ไม่ได้|ขึ้นเตือน|error|ไม่ตรง|เพี้ยน|ติดล็อก|ล็อก|หาย|พัง|แก้ยังไง)", re.I)
+_TARGET_YESNO_RE = re.compile(
+    r"(?:รองรับไหม|ทำได้ไหม|ได้ไหม|ได้มั้ย|ได้หรือเปล่า|ได้รึเปล่า|มีไหม|มีระบบ.*ไหม|ใช่ไหม|ใช้ได้ไหม|หรือเปล่า|รึเปล่า)"
+)
+_FACT_COUNT_SIGNAL_RE = re.compile(
+    r"(?:\d+\s*(?:ช่อง|รูปแบบ|รุ่น|เบอร์|เกณฑ์|หลัก|mb|บาท|เมนู|ระดับ|มิติ|คน|สาขา)|ไม่จำกัด|สูงสุด)",
+    re.I,
+)
+_FACT_YESNO_SIGNAL_RE = re.compile(r"(?:รองรับ|ได้ครับ|ได้ทั้ง|ไม่รองรับ|ข้อจำกัด|มีฟีเจอร์|มีช่อง)")
+
+
+def classify_answer_target(query: str) -> str:
+    """Classify the exact answer target of a customer question for precision reranking & prompt pinning."""
+    s = _normalize_search_text(query)
+    if not s:
+        return "general"
+    if _TARGET_COUNT_LIMIT_RE.search(s):
+        return "count_limit"
+    if _TARGET_PRICING_RE.search(s):
+        return "pricing_edition"
+    if _TARGET_MENU_WHERE_RE.search(s):
+        return "where_menu_report"
+    if _TARGET_COMPARE_RE.search(s):
+        return "comparison"
+    if _TARGET_TROUBLESHOOT_RE.search(s):
+        return "troubleshoot"
+    if _TARGET_HOWTO_RE.search(s):
+        return "how_to_step"
+    if _TARGET_YESNO_RE.search(s):
+        return "yes_no_capability"
+    return "general"
+
+
+def _prioritize_faq_blocks(sec: str, sub_toks: list[str], target_type: str, remain: int) -> str:
+    """Within a long FAQ/Q&A section, reorder matching Q&A pairs to the top so target answers are never truncated."""
+    if len(sec) <= remain:
+        return sec
+    lines = sec.splitlines()
+    if not lines or not lines[0].lstrip().startswith("## "):
+        return sec[:remain].strip()
+    head_line = lines[0]
+    body = "\n".join(lines[1:]).strip()
+    blocks = [b.strip() for b in re.split(r"\n(?=\*\*ถาม:|\-\s+\*\*)", body) if b.strip()]
+    if len(blocks) <= 1:
+        return sec[:remain].strip()
+    scored_b: list[tuple[float, int, str]] = []
+    for i, blk in enumerate(blocks):
+        low = _normalize_search_text(blk)
+        sc = sum(3.0 for t in sub_toks if t in low)
+        if target_type == "count_limit" and _FACT_COUNT_SIGNAL_RE.search(blk):
+            sc += 5.0
+        elif target_type == "yes_no_capability" and _FACT_YESNO_SIGNAL_RE.search(blk):
+            sc += 3.5
+        elif target_type in ("how_to_step", "where_menu_report") and _MENU_CODE_TOKEN_RE.search(blk):
+            sc += 3.5
+        scored_b.append((sc, i, blk))
+    scored_b.sort(key=lambda x: (-x[0], x[1]))
+    out = head_line
+    for _, _, blk in scored_b:
+        cand = f"{out}\n\n{blk}"
+        if len(cand) <= remain:
+            out = cand
+        elif len(out) == len(head_line):
+            out = cand[:remain].strip()
+            break
+    return out[:remain].strip()
+
+
+def _extract_relevant_excerpt(
+    title: str,
+    body: str,
+    tokens: list[str],
+    max_chars: int,
+    target_type: str = "general",
+) -> str:
+    """Pick the most query-relevant section(s) of a note within max_chars (target-aware, deduplicated, media-free)."""
     clean = _strip_voice_media(body)
-    # Remove duplicate leading H1 heading matching title so budget goes to real content
     clean_lines = clean.splitlines()
     if clean_lines and clean_lines[0].lstrip().startswith("# "):
         clean = "\n".join(clean_lines[1:]).strip()
@@ -473,28 +582,45 @@ def _extract_relevant_excerpt(title: str, body: str, tokens: list[str], max_char
         hits = sum(2.5 if t in sec_low else 0.0 for t in sub_toks)
         head = _normalize_search_text(sec.splitlines()[0]) if sec.splitlines() else ""
         hits += sum(3.0 for t in sub_toks if t in head)
-        # Boost sections with dense matching lines (e.g. numbered item specifying promotion types)
+        dense_bonus = 0.0
         for ln in sec.splitlines():
             ln_low = _normalize_search_text(ln)
             ln_hits = sum(1 for t in sub_toks if t in ln_low)
             if ln_hits >= 2:
-                hits += 2.0
+                dense_bonus = min(6.6, dense_bonus + 2.2)
+        hits += dense_bonus
+        dense_hit = dense_bonus > 0.0
+        if hits > 0:
+            is_faq_sec = ("คำถามที่ลูกค้ามักถาม" in sec[:80]) or ("**ถาม:" in sec[:220])
+            if target_type == "count_limit" and _FACT_COUNT_SIGNAL_RE.search(sec):
+                hits += (9.0 if is_faq_sec else (5.5 if dense_hit else 3.0))
+            elif target_type == "yes_no_capability" and (is_faq_sec or _FACT_YESNO_SIGNAL_RE.search(sec)):
+                hits += (9.5 if is_faq_sec else 3.5)
+            elif target_type in ("how_to_step", "where_menu_report") and _MENU_CODE_TOKEN_RE.search(sec):
+                hits += 3.5
+            elif target_type == "pricing_edition" and ("|" in sec or "199" in sec or "starter" in sec_low):
+                hits += 4.5
         scored_secs.append((hits, idx, sec))
     scored_secs.sort(key=lambda x: (-x[0], x[1]))
     picked: list[str] = []
     used = 0
     if intro and scored_secs and scored_secs[0][1] != 0:
-        intro_short = intro[: min(260, max_chars // 5)].strip()
+        intro_short = intro[: min(240, max_chars // 6)].strip()
         if intro_short:
             picked.append(intro_short)
             used += len(intro_short) + 2
-    for _, _, sec in scored_secs:
+    has_second_relevant = len(scored_secs) > 1 and scored_secs[1][0] > 0
+    for pos, (_, _, sec) in enumerate(scored_secs):
         if used >= max_chars:
             break
         remain = max_chars - used
         if remain < 120:
             break
-        chunk = sec[:remain].strip()
+        sec_cap = min(remain, int(max_chars * 0.68)) if (pos == 0 and has_second_relevant and len(sec) > max_chars * 0.72) else remain
+        if "คำถามที่ลูกค้ามักถาม" in sec[:80] or "**ถาม:" in sec[:200]:
+            chunk = _prioritize_faq_blocks(sec, sub_toks, target_type, sec_cap)
+        else:
+            chunk = sec[:sec_cap].strip()
         if chunk and chunk not in picked:
             picked.append(chunk)
             used += len(chunk) + 2
@@ -597,9 +723,10 @@ def _compose_hybrid_excerpt(
     hit: dict[str, Any] | None,
     tokens: list[str],
     cap: int,
+    target_type: str = "general",
 ) -> str:
-    """Combine pgvector best semantic chunk (when high-signal) with lexical relevant excerpt within cap."""
-    base_excerpt = _extract_relevant_excerpt(note["title"], note["body"], tokens, cap)
+    """Combine pgvector best semantic chunk (when high-signal) with target-aware lexical excerpt within cap."""
+    base_excerpt = _extract_relevant_excerpt(note["title"], note["body"], tokens, cap, target_type=target_type)
     if not hit:
         return base_excerpt
     chunk_txt = _strip_voice_media(str(hit.get("best_chunk_content") or "")).strip()
@@ -614,7 +741,7 @@ def _compose_hybrid_excerpt(
     if len(lead) >= cap - 140:
         return lead[:cap].strip()
     remain = cap - len(lead) - 2
-    tail = _extract_relevant_excerpt(note["title"], note["body"], tokens, remain)
+    tail = _extract_relevant_excerpt(note["title"], note["body"], tokens, remain, target_type=target_type)
     if tail and tail[:80] not in lead:
         return f"{lead}\n\n{tail}"[:cap].strip()
     return lead[:cap].strip()
@@ -624,6 +751,10 @@ _ADAPTIVE_INTENT_REWRITES: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(r"(?:สาขา|บริษัท|นิติบุคคล).*(?:ยูเซอร์|ผู้ใช้งาน|คน|รุ่น|แบบไหน|แพ็กเกจ)|(?:ยูเซอร์|ผู้ใช้งานพร้อมกัน|concurrent).*(?:รุ่น|แบบไหน|ราคา|แพ็กเกจ|คน)", re.I),
         "ตารางราคา แพ็กเกจ 4 รุ่น Concurrent Users Enterprise",
+    ),
+    (
+        re.compile(r"(?:ราคาเท่าไหร่|ราคาตัวใหม่|ตารางราคา|แพ็กเกจ.*ราคา|กี่บาท.*(?:รุ่น|แพ็กเกจ|โปรแกรม))"),
+        "ตารางราคา แพ็กเกจ 4 รุ่น Starter Standard Professional Enterprise",
     ),
     (
         re.compile(r"(?:bc\s*5\.?5|5\.5|champ|เวอร์ชันเก่า|ย้ายข้อมูล|อัปเกรด.*(?:เก่า|5\.5))", re.I),
@@ -636,6 +767,30 @@ _ADAPTIVE_INTENT_REWRITES: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(r"(?:โปรโมชัน|สูตรโปรโมชัน|ซื้อครบแถม|ของแถม)"),
         "โปรโมชัน อัตโนมัติ 10 รูปแบบ POS",
+    ),
+    (
+        re.compile(r"(?:ซื้อ.*ต่างประเทศ|นำเข้า.*ต่างประเทศ|สินค้านำเข้า|ต้นทุนแฝง|landed\s*cost|อากรขาเข้า|ภาษีนำเข้า|ศุลกากร|ค่าขนส่งระหว่างประเทศ)", re.I),
+        "ประมวลผลเฉลี่ยต้นทุนแฝง 2051 ต้นทุนนำเข้าต่างประเทศ CIF FOB ศุลกากร",
+    ),
+    (
+        re.compile(r"(?:ผลต่าง.*อัตราแลกเปลี่ยน|อัตราแลกเปลี่ยน.*(?:สิ้นงวด|ลงบัญชี|กำไร|ขาดทุน)|fx.*revaluation)", re.I),
+        "ประมวลผลปรับปรุงกำไรขาดทุนอัตราแลกเปลี่ยนสิ้นงวด 9021 สกุลเงินต่างประเทศ",
+    ),
+    (
+        re.compile(r"(?:เบอร์โทร(?:ศัพท์)?.*(?:ลูกค้า|ลูกหนี้).*(?:กี่เบอร์|ได้กี่)|ลูกค้า.*(?:กี่เบอร์|เบอร์โทร.*กี่))"),
+        "ทะเบียนลูกหนี้ เบอร์โทรศัพท์ ผู้ติดต่อ หลายราย ที่อยู่จัดส่ง 3 ช่อง",
+    ),
+    (
+        re.compile(r"(?:ที่อยู่จัดส่ง.*(?:พิกัด|gps|จีพีเอส|ดาวเทียม|ละติจูด)|(?:พิกัด|gps|จีพีเอส|ดาวเทียม).*ที่อยู่จัดส่ง)", re.I),
+        "ที่อยู่จัดส่งสินค้า พิกัดแผนที่ GPS ละติจูด ลองจิจูด ทะเบียนลูกหนี้",
+    ),
+    (
+        re.compile(r"(?:เก็บรูป.*กี่รูป|แนบรูป.*กี่รูป|รูปภาพ.*กี่รูป|รูปสินค้า.*กี่รูป|เก็บรูปภาพ)"),
+        "เก็บรูปภาพได้กี่รูป รูปภาพสินค้า 5 ช่อง 2005 ไฟล์แนบเอกสาร 25 MB",
+    ),
+    (
+        re.compile(r"(?:แต้ม.*(?:ครอบครัว|รวมแต้ม|หลายคน)|กลุ่มสมาชิกรวมแต้ม|(?:ตัดแต้ม|ใช้แต้ม).*(?:ส่วนลด|pos|หน้าร้าน))", re.I),
+        "ระบบสมาชิก กลุ่มสมาชิกรวมแต้ม ครอบครัว แต้มสะสม บันทึกตัดแต้ม 1022 POS",
     ),
 )
 
@@ -1387,7 +1542,7 @@ class BrainVaultMirror:
                 tokens=expanded_tokens,
                 audience=aud,
                 limit=max(12, int(limit) + 4),
-                timeout_s=0.45,
+                timeout_s=1.25,
                 embed_text=f"{q} {' '.join(primary_tokens[:6])}".strip(),
             )
             if pg_res.get("ok"):
@@ -1492,7 +1647,8 @@ class BrainVaultMirror:
         # on unrelated topics (gold price, weather, durian) while preserving exact 4-digit menu/title hits and
         # strong in-domain lexical matches whose query itself has strong semantic relevance (max_pg_cosine >= 0.52).
         effective_domain_cos = top_cosine if top_cosine > 0.0 else (max_pg_cosine if (coverage >= 0.85 and top_score >= 120) else 0.0)
-        if pg_used and not menu_codes and not exact_title_hit and effective_domain_cos < 0.49:
+        strong_lex_in_domain = bool(top_score >= 160 and coverage >= 0.65 and effective_domain_cos >= 0.45)
+        if pg_used and not menu_codes and not exact_title_hit and not strong_lex_in_domain and effective_domain_cos < 0.49:
             confidence = "low"
 
         return {
@@ -1518,8 +1674,9 @@ class BrainVaultMirror:
         q = (question or "").strip()
         aud = (audience or "user").strip().lower() or "user"
         m = (mode or "ultra").strip().lower()
-        default_budget = 2200 if m == "ultra" else (2800 if m == "fast" else 3600)
+        default_budget = 2500 if m == "ultra" else (2800 if m == "fast" else 3600)
         budget = max(400, min(int(max_chars or default_budget), 5500))
+        target_type = classify_answer_target(q)
 
         # Direct 4-digit menu question short-circuit when user specifically queries a known code
         codes = _MENU_CODE_TOKEN_RE.findall(q)
@@ -1570,7 +1727,7 @@ class BrainVaultMirror:
             return f"🛑 Abstain — No matching notes (audience={aud}). Do not guess—try lookup_menu, lookup_error, or search_brain."
 
         coverage = best_matched / max(1, total_terms)
-        pg_oov_veto = bool(res.get("hybrid") and confidence == "low" and top_cosine < 0.49)
+        pg_oov_veto = bool(res.get("hybrid") and confidence == "low" and top_cosine < 0.49 and not (top_score >= 160 and coverage >= 0.65 and top_cosine >= 0.45))
         if pg_oov_veto or (confidence == "low" and (coverage < 0.5 or top_score < 24) and top_cosine < 0.56):
             cands = "\n".join(f"- {h['slug']} ({h['folder']}) — {h['title']}" for h in hits[:3])
             return (
@@ -1614,12 +1771,17 @@ class BrainVaultMirror:
                                     intent_fused = True
                         break
 
-            second_min_ratio = 0.50 if intent_fused else 0.68
-            include_second = bool(second is not None and len(hits) > 1 and (intent_fused or hits[1]["score"] >= top_score * second_min_ratio))
-            primary_cap = int(budget * 0.72) if include_second else budget
-            body = _compose_hybrid_excerpt(top, hits[0], toks, max(750, primary_cap))
+            second_min_ratio = 0.25 if intent_fused else 0.68
+            include_second = bool(
+                second is not None
+                and second["slug"] != top["slug"]
+                and len(hits) > 1
+                and (intent_fused or hits[1]["score"] >= top_score * second_min_ratio)
+            )
+            primary_cap = int(budget * 0.68) if include_second else budget
+            body = _compose_hybrid_excerpt(top, hits[0], toks, max(800, primary_cap), target_type=target_type)
             out_blocks = [
-                f"[quick_answer:ultra | audience={aud} | confidence={confidence} | slug: {top['slug']}]\n"
+                f"[quick_answer:ultra | audience={aud} | confidence={confidence} | target={target_type} | slug: {top['slug']}]\n"
                 f"# {top['title']}\n{body}"
             ]
             # Big Voice Brain: include 2nd (and 3rd if close) note when budget allows for comprehensive spoken accuracy
@@ -1628,17 +1790,17 @@ class BrainVaultMirror:
                     extra_note is not None
                     and extra_note["slug"] != top["slug"]
                     and len(hits) > extra_idx
-                    and hits[extra_idx]["score"] >= top_score * ratio_min
+                    and ((intent_fused and extra_idx == 1) or hits[extra_idx]["score"] >= top_score * ratio_min)
                 ):
                     used_len = sum(len(b) + 7 for b in out_blocks)
                     rem = budget - used_len - 80
                     if rem >= 360:
-                        sec_body = _compose_hybrid_excerpt(extra_note, hits[extra_idx], toks, rem)
+                        sec_body = _compose_hybrid_excerpt(extra_note, hits[extra_idx], toks, rem, target_type=target_type)
                         out_blocks.append(f"## เพิ่มเติม: {extra_note['title']} (slug: {extra_note['slug']})\n{sec_body}")
 
             joined = "\n\n---\n\n".join(out_blocks)
             # Auto-attach top 2-3 related 4-digit menus when voice answer has no menu code yet
-            if aud == "user" and not _MENU_CODE_TOKEN_RE.search(joined) and len(joined) < budget - 180:
+            if aud == "user" and not _MENU_CODE_TOKEN_RE.search(joined):
                 rel_menus = self._find_related_menus_for_answer(sub_toks, allowed_notes, limit=3)
                 if rel_menus:
                     m_lines = ["## เมนูที่เกี่ยวข้อง:"]
@@ -1657,7 +1819,7 @@ class BrainVaultMirror:
         caps = [budget] if len(picked) == 1 else [int(budget * 0.65), max(450, int(budget * 0.35))]
         blocks: list[str] = []
         for (note, hit), cap in zip(picked, caps):
-            excerpt = _compose_hybrid_excerpt(note, hit, toks, cap)
+            excerpt = _compose_hybrid_excerpt(note, hit, toks, cap, target_type=target_type)
             blocks.append(f"# {note['title']}\nslug: {note['slug']} | folder: {note['folder']} | audience: {note['audience']}\n\n{excerpt}")
         header_tag = "quick_answer:fast" if m == "fast" else "quick_answer"
         return (
@@ -1883,7 +2045,7 @@ class BrainVaultMirror:
         # Hybrid pgvector boost in search_nearby so semantically accurate notes beat weak accidental lexical matches
         pg = self._get_pg()
         if pg is not None:
-            pg_res = pg.hybrid_search(q, tokens=tokens, audience=aud, limit=8, timeout_s=0.35)
+            pg_res = pg.hybrid_search(q, tokens=tokens, audience=aud, limit=8, timeout_s=0.90)
             if pg_res.get("ok"):
                 for rank_i, ch in enumerate(pg_res.get("hits") or []):
                     slug = ch["slug"]

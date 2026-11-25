@@ -592,20 +592,31 @@ def _stt_stutter_guard_helper_anchor():  # kept adjacent to _choose_triple_ear
 
 
 _STT_DOMAIN_FIX_RE = re.compile(
-    r"(?:เวอร์ชัน|เวอร์ชั่น|เบอร์|แพ็กเกจ|สต็อก|สต๊อก|บัญชี|ภาษี|รายงาน|ใบกำกับ|ใบเสนอราคา|ใบเสร็จ|ลูกหนี้|เจ้าหนี้|ต้นทุน|คลาวด์|ออฟฟิศ|ไลน์|เว็บไซต์)"
+    r"(?:เวอร์ชัน|เวอร์ชั่น|เบอร์|แพ็กเกจ|สต็อก|สต๊อก|บัญชี|ภาษี|รายงาน|ใบกำกับ|ใบเสนอราคา|ใบเสร็จ|ลูกหนี้|เจ้าหนี้|"
+    r"ต้นทุน|คลาวด์|ออฟฟิศ|ไลน์|เว็บไซต์|แต้ม|สะสมแต้ม|รวมแต้ม|ตัดแต้ม|รูปภาพ|กี่รูป|พิกัด|จีพีเอส|ที่อยู่จัดส่ง|"
+    r"อัตราแลกเปลี่ยน|ต่างประเทศ|นำเข้า|ส่วนลด|สมาชิก|ครอบครัว|โปรโมชั[่้]?น|คลังสินค้า)"
+)
+_STT_EAR1_MISHEARD_RE = re.compile(
+    r"(?:กี่เบิร์|กี่ลูก|รวมแต้(?!ม)|ตัดแทบ|ส่วนรถ|คังสินค้า|ที่อยู่จากส่ง|ต่ำประเด็น|ลงมัญติ|อัตราแรกเปลี่ยน|\bPLS\b)"
 )
 
 
 def _prefer_openthai_domain(ear1: str, ear2: str, ear3: str) -> bool:
-    """True when both OpenThai ears (e2 & e3) agree on a canonical BC domain word missing from Whisper e1."""
+    """True when both OpenThai ears (e2 & e3) agree on a canonical BC domain word missing from Whisper e1,
+    OR when e2/e3 form a clean 2-of-3 consensus repairing a misheard Whisper e1 token (e.g. กี่ลูก->กี่รูป, กี่เบิร์->กี่เบอร์)."""
     e1, e2, e3 = (ear1 or "").strip(), (ear2 or "").strip(), (ear3 or "").strip()
     if not e2 or not e3 or _has_stt_stutter(e2):
         return False
     shared = set(_STT_DOMAIN_FIX_RE.findall(e2)) & set(_STT_DOMAIN_FIX_RE.findall(e3))
-    if not shared:
-        return False
     m1 = set(_STT_DOMAIN_FIX_RE.findall(e1))
-    return bool(shared - m1)
+    if shared and bool(shared - m1):
+        return True
+    n2 = re.sub(r"\s+", "", e2).lower()
+    n3 = re.sub(r"\s+", "", e3).lower()
+    mis_re = globals().get("_STT_EAR1_MISHEARD_RE")
+    if n2 and n2 == n3 and mis_re is not None and mis_re.search(e1) and not mis_re.search(e2):
+        return True
+    return False
 
 
 def _choose_triple_ear(ear1: str, ear2: str, ear3: str, lang: str | None) -> tuple[str, list[str]]:
@@ -2665,6 +2676,14 @@ _PHONE_INTENT_HINTS = (
     (re.compile(r"(?:แจ้งเตือน|เตือน).*(?:ถึงกำหนด|ครบกำหนด|ถึกดีล|ถึงดีล|ถึงดิว|เก็บเงิน|จ่ายเงิน|ลูกหนี้|เจ้าหนี้)|(?:ถึกดีล|ถึงดีล|ถึงดิว).*(?:เก็บเงิน|จ่ายเงิน)"), "ศูนย์แจ้งเตือนยามเช้า 1001 ลูกหนี้เกินกำหนดชำระ เจ้าหนี้ครบกำหนด อายุหนี้"),
     (re.compile(r"(?:(?:มี|หลาย|อีก)\s*สาขา|แยกสาขา).*(?:คลาวด์|คราว|คาว|cloud|นิติ|ยอดขาย|บิล|ออกบิน)|(?:คลาวด์|คราวก|บนคราว|เรื่องคราว|on.?cloud).*(?:สาขา|นิติ)", re.I), "ตั้งค่าสาขา 1007 แยกยอดขาย กำไรขาดทุนแยกสาขา 9063 Private Cloud หลายนิติบุคคล"),
     (re.compile(r"(?:สรุป|แยก).*ยอดขาย.*สาขา|(?:ออกบิล|ออกบิน).*สรุป.*ยอดขาย"), "รายงานสรุปยอดขาย 4052 รายงานการขาย ตั้งค่าสาขา 1007 แยกยอดขายตามสาขา"),
+    (re.compile(r"(?:ซื้อ.*ต่างประเทศ|นำเข้า.*ต่างประเทศ|สินค้านำเข้า|ต้นทุนแฝง|อากรขาเข้า|ภาษีนำเข้า|ค่าขนส่งระหว่างประเทศ)"), "ประมวลผลเฉลี่ยต้นทุนแฝง 2051 ต้นทุนนำเข้าต่างประเทศ CIF FOB ศุลกากร ซื้อสินค้า 3011"),
+    (re.compile(r"(?:ผลต่าง.*อัตรา(?:แลก|แรก)เปลี่ยน|อัตรา(?:แลก|แรก)เปลี่ยน.*(?:ลงบัญชี|สิ้นงวด|ทำยังไง)|ลงมัญติ.*อัตรา)"), "ประมวลผลปรับปรุงกำไรขาดทุนอัตราแลกเปลี่ยนสิ้นงวด 9021 สกุลเงินต่างประเทศ"),
+    (re.compile(r"(?:แบบนี้)?ราคาเท่าไหร่ตัวใหม่(?:เนี่ย)?|ราคาตัวใหม่"), "ตารางราคาและแพ็กเกจ BC Ai Account 4 รุ่น Starter Standard Professional Enterprise"),
+    (re.compile(r"(?:เบอร์โทร(?:ศัพท์)?.*ลูกค้า.*(?:กี่เบอร?์?|ได้กี่)|ลูกค้า.*กี่เบอร?์?)"), "ทะเบียนลูกหนี้ เบอร์โทรศัพท์ ผู้ติดต่อ หลายราย ที่อยู่จัดส่ง 3 ช่อง"),
+    (re.compile(r"(?:ที่อยู่(?:จัด|จาก|จะ)ส่ง.*(?:พิกัด|ดาวเทียม|gps|จีพีเอส)|(?:พิกัด|ดาวเทียม|gps|จีพีเอส).*ที่อยู่(?:จัด|จาก|จะ)ส่ง)", re.I), "ที่อยู่จัดส่งสินค้า พิกัดแผนที่ GPS ละติจูด ลองจิจูด ทะเบียนลูกหนี้ 6001"),
+    (re.compile(r"(?:เก็บรูป.*กี่(?:รูป|ลูก)|แนบรูป.*กี่(?:รูป|ลูก)|รูปภาพ.*กี่(?:รูป|ลูก))"), "เก็บรูปภาพได้กี่รูป รูปภาพสินค้า 5 ช่อง 2001 2005 ไฟล์แนบเอกสาร 25 MB"),
+    (re.compile(r"(?:แต้ม.*(?:ครอบครัว|รวมแต้|หลายคน)|กลุ่มสมาชิกรวมแต้ม)"), "ระบบสมาชิก กลุ่มสมาชิกรวมแต้ม ครอบครัว แต้มสะสม บันทึกตัดแต้ม 1022 POS"),
+    (re.compile(r"(?:ตัด(?:แต้ม|แทบ)|จัดแต้ม|ใช้แต้ม|เอาแต้ม).*(?:ส่วน(?:ลด|รถ)|หน้าร้าน|pos|pls|เลยได้ไหม)", re.I), "ระบบสมาชิก แต้มสะสม บันทึกตัดแต้ม ส่วนลด 1022 6001 POS"),
 )
 
 
@@ -2727,8 +2746,10 @@ def _is_incomplete_thai_tail(text: str) -> bool:
 _STANDALONE_TOPIC_RE = re.compile(
     r"(?:เบอร์โทร|ติดต่อ|เว็บไซต์|เว็ปไซต์|เวบไซต์|ไลน์|ราคา|แพ็กเกจ|ติดตั้ง|คลาวด์|ออฟฟิศ|เบลอออฟฟิศ|อยู่ที่ไหน|เชียงใหม่|บ้านเชียง|"
     r"เวอร์ชัน|เวอร์ชั่น|ไว้ท่านเก่า|โปรแกรมเก่า|โประแก็มเก่า|ห้าจุดห้า|รุ่น|ขนส่ง|ขนทรง|ยูเซอร์|ทีมกี่คน|"
-    r"มาคุยเรื่อง|เปลี่ยนเรื่อง|ถามเรื่อง|ถ้าเป็นธุรกิจ|ธุรกิจ|ร้านผม|ร้านยาง|รายงานสินค้า|เงินสด|ธนาคาร|คลังสินค้า|สต็อก|สต๊อก|โลเคชั่น|"
-    r"โป(?:ร|้)?โม(?:เม)?ชั[น่]น?|โปโมชั[น่]น?|promotion|พักบิล|พักบิน|บาร์โค้ด|ต้นทุน|fifo|lifo|fefo|pos|พีโอเอส|สาขา|ส่วนลด|คูปอง|พนักงานโทร|โทรหาผม|ติดต่อกลับ)",
+    r"มาคุยเรื่อง|เปลี่ยนเรื่อง|ถามเรื่อง|ถ้าเป็นธุรกิจ|ธุรกิจ|ร้านผม|ร้านยาง|รายงานสินค้า|เงินสด|ธนาคาร|คลังสินค้า|คังสินค้า|สต็อก|สต๊อก|โลเคชั่น|"
+    r"โป(?:ร|้)?โม(?:เม)?ชั[น่]น?|โปโมชั[น่]น?|promotion|พักบิล|พักบิน|บาร์โค้ด|ต้นทุน|fifo|lifo|fefo|pos|พีโอเอส|สาขา|ส่วนลด|คูปอง|พนักงานโทร|โทรหาผม|ติดต่อกลับ|"
+    r"ที่อยู่จัดส่ง|ที่อยู่จากส่ง|ที่อยู่จะส่ง|พิกัด|ดาวเทียม|gps|จีพีเอส|เก็บรูป|รูปภาพ|รูปสินค้า|แนบรูป|แนบไฟล์|กี่รูป|กี่ลูก|กี่เบอร์|กี่เบิร์|"
+    r"ต่างประเทศ|นำเข้า|ศุลกากร|อัตราแลกเปลี่ยน|อัตราแรกเปลี่ยน|สกุลเงิน|ต้นทุนแฝง|แต้ม|สะสมแต้ม|รวมแต้ม|รวมแต้|ตัดแต้ม|ครอบครัว|สมาชิก|ทะเบียนลูก|ลูกหนี้|เจ้าหนี้|ขายต่ำกว่าทุน)",
     re.I,
 )
 
@@ -2789,13 +2810,14 @@ def _extract_recent_topic(history: list[dict]) -> str:
             if _BOILERPLATE_CTX_RE.search(c):
                 continue
             if re.fullmatch(
-                r"(?:สวัสดี|ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|อืม|ใช่|ใช่ค่ะ|ใช่ครับ|โอเค|คุยต่อ|อธิบายต่อเลย|"
-                r"ไม่เป็นอย่างงั้น|ไม่เป็นอย่างนั้น|เอาไม่ต้อง|ไม่ต้อง|ไม่เป็นไร|ไม่เอา|ไม่เอาครับ|มันทำงานยังไง|ทำยังไง|แล้วทำยังไง)[\s.,!?…]*",
+                r"(?:สวัสดี|ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|อืม|ใช่|ใช่ค่ะ|ใช่ครับ|ใช่ไหม|ใช่ไหมครับ|โอเค|คุยต่อ|อธิบายต่อเลย|"
+                r"ไม่เป็นอย่างงั้น|ไม่เป็นอย่างนั้น|เอาไม่ต้อง|ไม่ต้อง|ไม่เป็นไร|ไม่เอา|ไม่เอาครับ|มันทำงานยังไง|ทำยังไง|แล้วทำยังไง|"
+                r"ทำยังไงไม่เข้าใจ|ไม่เข้าใจ|งง|ไม่ค่อยเข้าใจ|ตัดแทบได้เลยหรือเปล่า|และเวลาลงบัญชีตอน)[\s.,!?…]*",
                 c,
             ):
                 continue
             if prefer_user and re.fullmatch(
-                r"(?:ไม่เป็น|อย่างงั้น|อย่างนั้น|คุยต่อ|อธิบายต่อ|ทำไม|สรุป|อ๋อ|เอา|ไม่|ต้อง|ครับ|ค่ะ|มัน|ทำงาน|ยังไง|\s)+",
+                r"(?:ไม่เป็น|อย่างงั้น|อย่างนั้น|คุยต่อ|อธิบายต่อ|ทำไม|สรุป|อ๋อ|เอา|ไม่|ต้อง|ครับ|ค่ะ|มัน|ทำงาน|ยังไง|เข้าใจ|ใช่ไหม|\s)+",
                 c,
             ):
                 continue
@@ -2899,15 +2921,37 @@ def _build_topic_pin_hint(heard: str, history: list[dict]) -> str:
     )
 
 
+_TARGET_CUE_MAP = {
+    "count_limit": "เป้าหมายคำถามรอบนี้: ลูกค้าถามจำนวนหรือขอบเขต ให้ตอบจำนวนหรือตัวเลขจริงจากผลค้นขึ้นต้นในประโยคแรกทันที",
+    "pricing_edition": "เป้าหมายคำถามรอบนี้: ลูกค้าถามราคาหรือรุ่นที่เหมาะ ให้บอกชื่อรุ่นและราคาจริงจากตารางราคาในผลค้นขึ้นต้นทันที",
+    "where_menu_report": "เป้าหมายคำถามรอบนี้: ลูกค้าถามชื่อเมนูหรือรายงาน ให้บอกชื่อเมนูและรหัสเมนูสี่หลักจากผลค้นในประโยคแรกทันที",
+    "how_to_step": "เป้าหมายคำถามรอบนี้: ลูกค้าถามวิธีทำหรือขั้นตอน ให้บอกชื่อเมนู รหัสเมนูสี่หลัก และขั้นตอนหลักจากผลค้นในประโยคแรกทันที",
+    "comparison": "เป้าหมายคำถามรอบนี้: ลูกค้าถามเปรียบเทียบ ให้สรุปจุดต่างสำคัญจากผลค้นในประโยคแรกทันที",
+    "troubleshoot": "เป้าหมายคำถามรอบนี้: ลูกค้าถามวิธีแก้ปัญหาหรืออาการเตือน ให้บอกสาเหตุและวิธีแก้จากผลค้นในประโยคแรกทันที",
+    "yes_no_capability": "เป้าหมายคำถามรอบนี้: ลูกค้าถามว่ารองรับหรือทำได้ไหม ให้ฟันธงตามผลค้นพร้อมเงื่อนไขหรือเมนูสำคัญในประโยคแรกทันที",
+}
+
+
+def _build_answer_target_cue(heard: str) -> str:
+    """Return a concise 1-line target focus cue based on question type so DeepSeek answers bullseye in sentence 1."""
+    bm_mod = sys.modules.get("brain_mirror")
+    cls_fn = getattr(bm_mod, "classify_answer_target", None) if bm_mod else None
+    if not callable(cls_fn):
+        return ""
+    tgt = cls_fn(heard)
+    return _TARGET_CUE_MAP.get(tgt, "")
+
+
 def _build_phone_fallback_queries(heard: str, alt_heard: list[str], history: list[dict]) -> list[str]:
-    """Zero-latency (0ms) multi-ear + topic-pinned context query builder when early search_words is absent or skipped."""
+    """Zero-latency (0ms) multi-ear + clean topic-isolated context query builder when early search_words is absent."""
     base = (heard or "").strip()
     if not base:
         return []
-    # Pin recent topic context unless the caller explicitly switched to a standalone new topic
+    # Pin recent topic context ONLY when the caller has NOT introduced a standalone new topic/attribute
     ctx_anchor = ""
     sw_fn = globals().get("_is_explicit_topic_switch")
     topic_switched = bool(sw_fn(base)) if callable(sw_fn) else (len(base) >= 14 and bool(_STANDALONE_TOPIC_RE.search(base)))
+    short_topic_clarifier = bool(not topic_switched and len(base) <= 13 and _STANDALONE_TOPIC_RE.search(base))
     cont_re = globals().get("_CONTINUATION_HINT_RE")
     wants_continuity = (
         len(base) <= 36
@@ -2918,8 +2962,14 @@ def _build_phone_fallback_queries(heard: str, alt_heard: list[str], history: lis
     if history and not topic_switched and wants_continuity:
         ctx_anchor = _extract_recent_topic(history)
     queries: list[str] = []
-    q_primary = f"{base} {ctx_anchor}".strip()[:120] if ctx_anchor and ctx_anchor not in base else base[:120]
-    queries.append(q_primary)
+    if short_topic_clarifier and ctx_anchor and ctx_anchor not in base:
+        q_primary = f"{base} {ctx_anchor}".strip()[:120]
+        queries.append(q_primary)
+        if base[:120] not in queries:
+            queries.append(base[:120])
+    else:
+        q_primary = f"{base} {ctx_anchor}".strip()[:120] if ctx_anchor and ctx_anchor not in base else base[:120]
+        queries.append(q_primary)
     # If secondary OpenThai ear heard a different word (e.g. e1="แรงงาน" vs e2="รายงาน"), search it in parallel (~52ms)
     for alt in (alt_heard or ())[:1]:
         a = (alt or "").strip()
@@ -2927,12 +2977,13 @@ def _build_phone_fallback_queries(heard: str, alt_heard: list[str], history: lis
             q_alt = f"{a} {ctx_anchor}".strip()[:120] if ctx_anchor and ctx_anchor not in a else a[:120]
             if q_alt not in queries:
                 queries.append(q_alt)
-    for hint in _expand_phone_intent_queries(q_primary):
+    intent_hints = _expand_phone_intent_queries(q_primary) or _expand_phone_intent_queries(base)
+    for hint in intent_hints:
         if hint not in queries:
             queries.append(hint)
     # When a strong canonical intent hint matches noisy/spoken speech, put it FIRST so quick_answer hits directly
-    if len(queries) >= 2 and _expand_phone_intent_queries(q_primary):
-        first_hint = _expand_phone_intent_queries(q_primary)[0]
+    if len(queries) >= 2 and intent_hints:
+        first_hint = intent_hints[0]
         if first_hint in queries:
             queries.remove(first_hint)
             queries.insert(0, first_hint)
@@ -2958,7 +3009,10 @@ def search_words(history, heard, alt_heard=None, allow_sync=True):
             text, _ = worker_chat(ask, None)
         log.info("search words: %s, waited %.2fs", "asked early" if early else "asked now", time.perf_counter() - t)
     except (httpx.HTTPError, ValueError, KeyError, TimeoutError) as e:
-        log.warning("search words skipped (%s)", type(e).__name__)
+        if isinstance(e, TimeoutError) and not allow_sync:
+            log.debug("search words early still in flight; using 0ms fallback queries")
+        else:
+            log.warning("search words skipped (%s)", type(e).__name__)
         return "", None
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     # real calls (log 2026-11-09): the jump line came first, or a reply sentence came instead of a query, and that
@@ -3375,12 +3429,12 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                         "include_media": False,
                     })]
                 else:
-                    # Big Voice Brain: local RAM quick_answer with 2,200-char grounded context (0ms network, media-free)
+                    # Big Voice Brain: local RAM quick_answer with 2,500-char grounded context (0ms network, media-free)
                     calls = [("quick_answer", {
                         "question": clean_q0,
                         **zone,
                         "mode": "ultra" if phone_mode else "normal",
-                        "max_chars": 2200 if phone_mode else 3000,
+                        "max_chars": 2500 if phone_mode else 3000,
                         "include_media": False,
                     })]
                     if phone_mode and len(unique_qs) > 1:
@@ -3487,11 +3541,11 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 nearby = BRAIN_MIRROR.search_nearby(
                     sup_q,
                     audience="user",
-                    limit_notes=2,
+                    limit_notes=1,
                     limit_menus=3,
-                    max_chars_per_note=900,
+                    max_chars_per_note=850,
                     exclude_slugs=returned_slugs,
-                    min_score=14.0,
+                    min_score=32.0,
                 )
                 if nearby and nearby.get("text"):
                     log.info(
@@ -3506,8 +3560,10 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             used_nearby_only = abstained and has_nearby
             found = " ".join(f"[{n}] {t}" for (n, _), t in zip(calls, texts))
             topic_pin_hint = _build_topic_pin_hint(heard, history)
-            if topic_pin_hint:
-                found = f"{topic_pin_hint}\n{found}"
+            target_cue = _build_answer_target_cue(heard) if phone_mode else ""
+            prefix_hints = "\n".join(x for x in (target_cue, topic_pin_hint) if x)
+            if prefix_hints:
+                found = f"{prefix_hints}\n{found}"
             prev_kb = any(m["role"] == "assistant" and C.SCREEN_MARK in m["content"] for m in history[-2:])
             sample_hint = (
                 "สายนี้เป็นโทรศัพท์ ห้ามเขียน [จอ] ตาราง หรือรายละเอียดต่อท้ายเด็ดขาด ให้พูดสั้นกระชับ ประโยคแรกไม่เกินสิบห้าคำแล้วจบด้วยครับทันที)"

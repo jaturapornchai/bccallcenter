@@ -115,6 +115,21 @@ _BENCHMARK_CASES: list[tuple[str, str, tuple[str, ...]]] = [
     ("คุณมีเบอร์หรือเปล่าเบลอออฟฟิศของบ้านเชียง", "hit", ("sales-support-implementation-contact", "บ้านเชียงซอฟท์", "bcaccount.com")),
     ("แล้วคุณอยู่ที่ไหนบ้าง ที่เชียงใหม่อยู่ไหน", "hit", ("sales-support-implementation-contact", "เชียงใหม่", "แจ้งวัฒนะ")),
     ("แล้วถ้าผมมีหลายสาขาทำยังไงขอพิธีการด้วย บริษัทเดียวแต่มีหลายสาขา", "hit", ("howto-setup-branch-dept", "1007", "สาขา")),
+    # --- 14 Real-Call Target-Precision Cases (2026-11-25 t8o1y — verify EXACT fact/number/menu in answer!) ---
+    ("แบบนี้ราคาเท่าไหร่ตัวใหม่เนี่ย", "hit_all", ("199", "499", "999")),
+    ("ถ้าผมมีการซื้อสินค้าจากต่างประเทศระบบนี้รองรับไหม", "hit_all", ("2051", "CIF")),
+    ("ลงบัญชีลงมัญติเงินผลต่างอัตราแรกเปลี่ยนทำยังไง", "hit_all", ("9021", "อัตราแลกเปลี่ยน")),
+    ("การซื้อขายต่างประเทศใช่ไหมซือขาสินค้าต่ำประเด็น", "hit_all", ("2051", "ศุลกากร")),
+    ("ถ้าผมมีคังสินค้าอยู่คนละจังหวัดต้องทำยังไง", "hit_all", ("1027", "คลัง")),
+    ("ผมใช้โปรแกรมบ้านเชียงเวอร์ชั่นเก่าทำยังไง", "hit_all", ("BC 5.5", "ย้าย")),
+    ("สรุประบบคุณมีโปรโมชั่นกี่แบบ", "hit_all", ("10 รูปแบบ", "2015")),
+    ("ถ้าผมจะตั้งโปรโมชั่นซื้อห้าแถมหนึ่งต้องทำยังไง", "hit_all", ("2015", "ซื้อครบแถม")),
+    ("แล้วระบบสะสมแต้มทำยังไง", "hit_all", ("1022", "แต้มสะสม")),
+    ("เอาแต้มไปเป็นส่วนรถเลยได้ไหม", "hit_all", ("บันทึกตัดแต้ม", "1022")),
+    ("แล้วมีระบบแต้มแบบครอบครัวไหมลูกค้าหลายคนแต่รวมแต้", "hit_all", ("กลุ่มสมาชิกรวมแต้ม", "กองกลาง")),
+    ("แล้วเบอร์โทรศัพท์ลูกค้าได้กี่เบิร์", "hit_all", ("หลายรายไม่จำกัด", "3 ช่อง")),
+    ("แล้วที่อยู่จากส่งมีพิกัดดาวเทียมไหม", "hit_all", ("ละติจูด", "ลองจิจูด")),
+    ("แล้วระบบนี้เก็บรูปได้กี่ลูก", "hit_all", ("5 ช่องต่อสินค้า", "25 MB")),
     # --- 8 OOV / Abstain Traps — MUST abstain cleanly without fabricating facts ---
     ("เมนู 9999 ใช้ทำอะไรครับ", "abstain", ()),
     ("เมนู 8888 อยู่ตรงไหนครับ", "abstain", ()),
@@ -147,10 +162,11 @@ def run_benchmark(mirror: BrainVaultMirror) -> dict:
         is_abstain = "🛑 Abstain" in ans
         has_media = ("youtube.com" in ans.lower()) or ("youtu.be" in ans.lower()) or ("![" in ans)
 
-        if mode == "hit":
+        if mode in ("hit", "hit_all"):
             hit_total += 1
             ans_low = ans.lower()
-            matched = (not is_abstain) and (not has_media) and any(k.lower() in ans_low for k in expected)
+            kw_ok = all(k.lower() in ans_low for k in expected) if mode == "hit_all" else any(k.lower() in ans_low for k in expected)
+            matched = (not is_abstain) and (not has_media) and kw_ok
             if matched:
                 hit_pass += 1
             details.append({"q": q, "mode": mode, "ok": matched, "ms": ms, "abstain": is_abstain, "media": has_media, "head": ans.splitlines()[0] if ans else ""})

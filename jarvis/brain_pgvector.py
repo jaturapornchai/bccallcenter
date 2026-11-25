@@ -213,6 +213,7 @@ class BrainPgVectorStore:
         self._embed_cache_max = 512
         self._pg_fail_until = 0.0
         self._embed_fail_until = 0.0
+        self._embed_timeout_streak = 0
         self._last_sync_count = 0
         self._last_chunk_total = 0
 
@@ -331,13 +332,22 @@ class BrainPgVectorStore:
             if embs and len(embs[0]) != EMBED_DIM:
                 log.warning("BC Brain embed dim mismatch: got %d expected %d", len(embs[0]), EMBED_DIM)
                 return None
+            self._embed_timeout_streak = 0
             return embs
+        except httpx.TimeoutException as e:
+            self._embed_timeout_streak += 1
+            if self._embed_timeout_streak >= 3:
+                self._embed_fail_until = now + 10.0
+                self._embed_timeout_streak = 0
+            log.warning("BC Brain embed timeout (%s)", type(e).__name__)
+            return None
         except Exception as e:
-            self._embed_fail_until = now + 20.0
+            self._embed_fail_until = now + 15.0
+            self._embed_timeout_streak = 0
             log.warning("BC Brain embed failed (%s)", type(e).__name__)
             return None
 
-    def embed_query(self, query: str, timeout_s: float = 0.6) -> tuple[list[float] | None, float]:
+    def embed_query(self, query: str, timeout_s: float = 1.25) -> tuple[list[float] | None, float]:
         t0 = time.perf_counter()
         key = " ".join((query or "").strip().lower().split())
         if not key:
@@ -585,7 +595,7 @@ class BrainPgVectorStore:
         tokens: list[str],
         audience: str = "user",
         limit: int = 8,
-        timeout_s: float = 0.45,
+        timeout_s: float = 1.25,
         embed_text: str | None = None,
     ) -> dict[str, Any]:
         """Single-SQL Hybrid RRF combining pgvector HNSW cosine + Thai-segmented GIN tsvector."""

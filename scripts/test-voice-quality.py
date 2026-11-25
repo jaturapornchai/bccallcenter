@@ -1193,6 +1193,77 @@ def test_context_understanding_and_adaptive_search():
     assert scope["MENU_CODE_ASK"].search("อยากดูรายงานยอดขายวันนี้กดตรงไหน") is not None
 
 
+def test_target_precision_and_t8o1y_fixes():
+    """Regression from 2026-11-25 live call t8o1y: 4-layer answer-on-target precision, 2-of-3 STT voting & clean topic isolation."""
+    import brain_mirror as bm
+
+    # 1. Target-type classifier covers all 7 customer question targets
+    assert bm.classify_answer_target("แล้วระบบนี้เก็บรูปได้กี่ลูก") == "count_limit"
+    assert bm.classify_answer_target("แล้วเบอร์โทรศัพท์ลูกค้าได้กี่เบิร์") == "count_limit"
+    assert bm.classify_answer_target("แบบนี้ราคาเท่าไหร่ตัวใหม่เนี่ย") == "pricing_edition"
+    assert bm.classify_answer_target("บันทึกซื้อเชื่อเจ้าหนี้เข้าเมนูไหน") == "where_menu_report"
+    assert bm.classify_answer_target("ลงบัญชีลงมัญติเงินผลต่างอัตราแรกเปลี่ยนทำยังไง") == "how_to_step"
+    assert bm.classify_answer_target("เงินมัดจำกับเงินล่วงหน้าต่างกันยังไง") == "comparison"
+    assert bm.classify_answer_target("สต็อกไม่ตรงแก้ยังไง") == "troubleshoot"
+    assert bm.classify_answer_target("ถ้าผมมีการซื้อสินค้าจากต่างประเทศระบบนี้รองรับไหม") == "yes_no_capability"
+
+    # 2. Triple-Ear 2-of-3 OpenThai consensus repairs Whisper e1 mishearings ("กี่ลูก"->"กี่รูป", "กี่เบิร์"->"กี่เบอร์", "รวมแต้"->"รวมแต้ม")
+    scope = load_symbols({
+        "_STT_STUTTER_3_RE", "_STT_STUTTER_2X3_RE", "_has_stt_stutter",
+        "_STT_DOMAIN_FIX_RE", "_STT_EAR1_MISHEARD_RE", "_prefer_openthai_domain",
+        "_FOLLOWUP_START_RE", "_VAGUE_FOLLOWUP_RE", "_STANDALONE_TOPIC_RE",
+        "_BOILERPLATE_CTX_RE", "_EXPLICIT_TOPIC_SWITCH_RE", "_CONTINUATION_HINT_RE",
+        "_PHONE_INTENT_HINTS", "_expand_phone_intent_queries", "_stt_ears_diverge",
+        "_extract_recent_topic", "_is_explicit_topic_switch", "_build_phone_fallback_queries",
+        "_TARGET_CUE_MAP", "_build_answer_target_cue",
+    }, extra_scope={"sys": sys})
+    prefer = scope["_prefer_openthai_domain"]
+    assert prefer("แล้วระบบนี้เก็บรูปได้กี่ลูก", "แล้วระบบนี้เก็บรูปได้กี่รูป", "แล้วระบบนี้เก็บรูปได้กี่รูป") is True
+    assert prefer("แล้วเบอร์โทรศัพท์ลูกค้าได้กี่เบิร์", "แล้วเบอร์โทรศัพท์ลูกค้าได้กี่เบอร์", "แล้วเบอร์โทรศัพท์ลูกค้าได้กี่เบอร์") is True
+    assert prefer("แล้วมีระบบแต้มแบบครอบครัวไหมลูกค้าหลายคนแต่รวมแต้", "แล้วมีระบบแต้มแบบครอบครัวไหมลูกค้าหลายคนแต่รวมแต้ม", "แล้วมีระบบแต้มแบบครอบครัวไหมลูกค้าหลายคนแต่รวมแต้ม") is True
+    assert prefer("ตัดแทบได้เลยหรือเปล่า", "จัดแต้มได้เลยรึเปล่า", "จัดแต้มได้เลยรึเปล่า") is True
+
+    # 3. Clean topic isolation: new attribute questions must NOT drag previous unrelated topic into query
+    hist_phone = [{"role": "user", "content": "แล้วเบอร์โทรศัพท์ลูกค้าได้กี่เบอร์"}, {"role": "assistant", "content": "เก็บได้หลายเบอร์ครับ"}]
+    qs_gps = scope["_build_phone_fallback_queries"]("แล้วที่อยู่จากส่งมีพิกัดดาวเทียมไหม", [], hist_phone)
+    assert all("กี่เบอร์" not in q for q in qs_gps), f"delivery GPS question contaminated by phone count: {qs_gps}"
+
+    hist_gps = [{"role": "user", "content": "พิกัด GPS"}, {"role": "assistant", "content": "เก็บพิกัดละติจูดลองจิจูดได้ครับ"}]
+    qs_img = scope["_build_phone_fallback_queries"]("แล้วระบบนี้เก็บรูปได้กี่รูป", [], hist_gps)
+    assert all("พิกัด" not in q and "GPS" not in q for q in qs_img), f"image count question contaminated by GPS: {qs_img}"
+
+    hist_confused = [
+        {"role": "user", "content": "ระบบสะสมแต้มทำยังไง"},
+        {"role": "assistant", "content": "ตั้งที่เมนู 1022 ครับ"},
+        {"role": "user", "content": "ทำยังไงไม่เข้าใจ"},
+    ]
+    assert "ทำยังไงไม่เข้าใจ" not in scope["_extract_recent_topic"](hist_confused)
+    assert "สะสมแต้ม" in scope["_extract_recent_topic"](hist_confused)
+
+    # 4. Target cue & Bullseye-first prompt invariants
+    cue = scope["_build_answer_target_cue"]("แล้วระบบนี้เก็บรูปได้กี่รูป")
+    assert "จำนวนหรือตัวเลขจริง" in cue and "ประโยคแรกทันที" in cue, f"missing count target cue: {cue}"
+    assert "กฎตอบตรงเป้าหมายสูงสุด" in C.PHONE_PROMPT and "หกศูนย์ศูนย์หนึ่ง" in C.PHONE_PROMPT
+
+    # 5. Live BrainVaultMirror verification for every t8o1y question (exact target facts present, zero abstain)
+    brain = bm.BrainVaultMirror(vault_dir=C.LOCAL_BRAIN_DIR, enable_pgvector=True)
+    brain.load_from_dir(C.LOCAL_BRAIN_DIR, force=True, sync_pgvector=False)
+    checks = [
+        ("แบบนี้ราคาเท่าไหร่ตัวใหม่เนี่ย", ("199", "499", "999")),
+        ("ถ้าผมมีการซื้อสินค้าจากต่างประเทศระบบนี้รองรับไหม", ("2051", "CIF")),
+        ("ลงบัญชีลงมัญติเงินผลต่างอัตราแรกเปลี่ยนทำยังไง", ("9021", "อัตราแลกเปลี่ยน")),
+        ("แล้วมีระบบแต้มแบบครอบครัวไหมลูกค้าหลายคนแต่รวมแต้", ("กลุ่มสมาชิกรวมแต้ม", "กองกลาง")),
+        ("แล้วเบอร์โทรศัพท์ลูกค้าได้กี่เบิร์", ("หลายรายไม่จำกัด", "3 ช่อง")),
+        ("แล้วที่อยู่จากส่งมีพิกัดดาวเทียมไหม", ("ละติจูด", "ลองจิจูด")),
+        ("แล้วระบบนี้เก็บรูปได้กี่ลูก", ("5 ช่องต่อสินค้า", "25 MB")),
+    ]
+    for q, must_have in checks:
+        ans = brain.quick_answer(q, audience="user", mode="ultra")
+        assert "🛑" not in ans, f"t8o1y question must not abstain: {q!r} -> {ans[:220]}"
+        for kw in must_have:
+            assert kw.lower() in ans.lower(), f"missing target fact {kw!r} for {q!r}: {ans[:400]}"
+
+
 TESTS = [
     test_caller_name_rejects_connectors_and_accepts_real_names,
     test_stt_stutter_detector_and_ear2_fallback,
@@ -1215,6 +1286,7 @@ TESTS = [
     test_thai_custom_segmentation_and_pgvector_hybrid,
     test_topic_continuity_pinning_and_voice_exclude,
     test_context_understanding_and_adaptive_search,
+    test_target_precision_and_t8o1y_fixes,
 ]
 
 
