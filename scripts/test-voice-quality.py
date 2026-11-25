@@ -431,8 +431,10 @@ def test_first_call_ai_intro_name_capture_and_callback_confirm():
     intro = scope["FILLER_TEXT"]["phone_intro"]
     extract = scope["_extract_caller_name_py"]
 
-    for kw in ("เอไอ", "พนักงานจริง", "โทรกลับ", "ชื่อ"):
+    for kw in ("เอไอ", "บีซีเอไอแอคเคาท์", "โทรกลับ", "ชื่อ"):
         assert kw in intro, f"phone_intro missing required info {kw!r}: {intro!r}"
+    assert "พนักงานจริง" not in intro, f"autonomous AI intro must not volunteer human agent handoff: {intro!r}"
+    assert "อัตโนมัติ" in C.PHONE_PROMPT and "ไม่ต้องใช้คนรับสาย" in C.PHONE_PROMPT
 
     for raw_reply, want in (
         ("แบงค์ครับ", "แบงค์"),
