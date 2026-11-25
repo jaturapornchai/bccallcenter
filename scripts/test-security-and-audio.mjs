@@ -319,6 +319,17 @@ try {
   const menuRes = brainStore.searchMenus({ q: "4013" });
   assert.ok(menuRes.total >= 700 && menuRes.menus.some((m) => m.code === "4013"), "menu search must find 4013");
 
+  // Hybrid overview keeps strict viewer isolation, normalizes Thai promo phrases, & strips media
+  const hybridOv = await brainStore.getOverviewHybrid({ isAdmin: false, audience: "dev", q: "ซื้อสองแถมหนึ่ง", limit: 30 });
+  assert.equal(hybridOv.audience, "user", "hybrid overview must pin viewer to user audience");
+  assert.ok(hybridOv.notes.every((n) => n.audience === "user"), "hybrid overview must never leak dev notes");
+  assert.ok(hybridOv.notes.every((n) => n.mediaCount === 0), "voice-first brain must strip image/YouTube media");
+  assert.ok(
+    hybridOv.notes.slice(0, 3).some((n) => n.slug === "howto-pos-hardware-display-promo" || n.slug === "howto-price-center-discount-formula"),
+    `buy-get query should surface promo notes in top 3: ${hybridOv.notes.slice(0, 3).map((n) => n.slug).join(",")}`
+  );
+  await brainStore.pgVector?.close?.();
+
   console.log("ALL_SECURITY_AND_AUDIO_TESTS_PASSED");
 } finally {
   if (origAdminEmail === undefined) delete process.env.ADMIN_EMAIL;

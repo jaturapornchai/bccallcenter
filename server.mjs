@@ -438,7 +438,8 @@ app.prepare().then(async () => {
       const folder = reqUrl.searchParams.get("folder") || "";
       const q = (reqUrl.searchParams.get("q") || "").slice(0, 160);
       const limit = Number(reqUrl.searchParams.get("limit") || 150);
-      return sendJson(res, 200, brainStore.getOverview({ isAdmin, audience, folder, q, limit }));
+      const overview = await brainStore.getOverviewHybrid({ isAdmin, audience, folder, q, limit });
+      return sendJson(res, 200, overview);
     }
 
     if (urlPath === "/api/brain/menus" && req.method === "GET") {

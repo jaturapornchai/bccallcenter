@@ -15,10 +15,12 @@
 - **2 บทบาทหลักของ J.A.R.V.I.S (Dual Role — Sales + Call Center) แบบเป็นธรรมชาติไม่น่าเบื่อ**:
   - **พนักงานขายโปรแกรม BC Ai Account**: คุยแบบเพื่อนผ่อนคลาย มีอารมณ์ในน้ำเสียง ไม่ซักไซ้ถามเยอะ ดึงให้ลูกค้าอยากคุยต่อสบายใจ พร้อมแนะนำจุดเด่น/โมดูลจากคลังความรู้จริงและรับฝากข้อมูลติดต่อกลับให้ทีมเดโม
   - **พนักงาน Call Center แนะนำการใช้งาน**: ช่วยตอบวิธีใช้งาน เมนู ขั้นตอน การตั้งค่า และแก้ไขปัญหาโปรแกรม BC Ai Account ตรงจุดทีละขั้น
-  - **คลังความรู้ Embedded Local BC Brain ในเครื่อง (In-Process 100%, `< 1–3 ms`, ไม่ต้องผ่าน MCP HTTP API, Hot-Reload อัตโนมัติ)**:
-    - รวมคลังความรู้ **BC Brain (`bcbrain/vault/` — 380 โน้ต, 735+ เมนู 4 หลัก `1001`–`9070`)** เป็นเนื้อเดียวกับโปรเจกต์นี้ อ่านตรงเข้า RAM ผ่าน **`jarvis/brain_mirror.py`** (`BrainVaultMirror` + `LocalBrainClient`) พร้อมตรวจ `mtime` Hot-Reload อัตโนมัติภายใน 3 วินาทีเมื่อแก้ไฟล์ `.md` โดยไม่ต้องรีสตาร์ท และสร้าง **Bootstrap Pack (`audience: "user"`)** เข้าสู่ System Prompt Caching ทั้งใน J.A.R.V.I.S และ `livekit-voice-ai` ใน `< 1 ms` โดยไม่ยิง HTTP ภายนอก
-    - แบ่งการค้นหาสายโทรศัพท์อัตโนมัติ: (1) `QA_CACHE` ตอบใน ~10ms (พร้อมตัวกรองกัน Abstain/คำตอบติดชื่อลูกค้า/ข้อความชวนโทรกลับ/คำถามกำกวมติดบริบท เช่น "เล่าภาพรวมมาเลย" หรือ "อธิบายเพิ่ม" ที่ไม่มีชื่อสินค้า-หัวข้อชัดเจน และกวาดล้างรายการกำกวมอัตโนมัติตอนโหลดจากดิสก์), (2) **Zero-Blocking Search-Planner (`0.05s` early-result cap + `0ms` Intent Expander + ข้ามรอบบอกชื่อ/ยืนยันโทรกลับ)** ขยายคำถามภาษาพูดชาวบ้านไปสู่คำค้น BC Brain โดยไม่ค้างรอ LLM ก่อนค้น และ (3) **In-Process Direct Engine (`quick_answer`, `batch_ask`, `lookup_menu`, `lookup_error`, `batch_read`, `read_note`, `search_brain`, `traverse_brain`, `list_notes`, `find_media`)** บน BM25 + 46 กลุ่มคำพ้อง + O(1) เมนู + 1-hop Wikilink Graph ภายในโปรเซสเดียวกัน (`0ms` network overhead) พร้อม `aioice` APIPA `169.254.*`/`fe80:*` ICE filter (ลด `WinError 10049`)
-    - **ล็อกโซน `audience: "user"` + Strict `🛑 Abstain` + Abstain-to-Nearby Verified Info Fallback (ห้ามเดา ห้ามแต่งเติม) + แยกเวอร์ชัน BC Account**: สายลูกค้าถูกบังคับให้อยู่ในโซนผู้ใช้งานเสมอ (ห้ามหลุดชื่อตาราง SQL/โค้ด/ไฟล์ภายใน); เมื่อ `quick_answer` / `batch_ask` คืน `🛑 Abstain` หรือไม่ได้คำตอบความมั่นใจสูง (รวมถึง OOV 4-digit menu trap) **จะไม่ตัดจบบทสนทนาเป็น "ไม่มีข้อมูล" ทันที** แต่จะค้น **โน้ตและเมนูใกล้เคียงที่มีอยู่จริงจาก Embedded Local Brain (`BrainVaultMirror.search_nearby` `< 2ms` พร้อมตัวแก้คำเพี้ยน STT ภาษาไทย/คำพ้องธุรกิจและคลังสินค้า) โซน `user`** (พร้อมตัวกันบริบทเรื่องเดิมปนข้ามเมื่อลูกค้าเปลี่ยนหัวข้อชัดเจนใน `BRAIN-NEARBY-SUPPLEMENT`) มาประกอบคำตอบสั้นกระชับ 2–3 ประโยคบนสายโทรศัพท์ โดยบังคับให้แจ้งตรงๆ ว่าส่วนที่ถามตรงๆ ยังไม่มีข้อมูลยืนยัน แล้วเล่าเฉพาะข้อเท็จจริงจากข้อมูลใกล้เคียงที่มีอยู่จริงเท่านั้น **ห้ามเดา ห้ามแต่งเติม และไม่บันทึกลง `QA_CACHE`** พร้อมข้ามการค้นสมองสำหรับคำถามประวัติการโทร/จำนวนครั้งที่โทรในสายเพื่อไม่ให้ `Abstain` ทับข้อมูลจาก `CALL_CALLER_META` และไม่ถามเรื่องโทรกลับถี่เกินไป (เสนอฝากเบอร์โทรกลับเฉพาะเมื่อจำเป็น ลูกค้าขอเอง หรือใช้ **BC Account เวอร์ชันเก่า** พร้อมแจ้งว่าตอนนี้เวอร์ชันล่าสุดคือ **BC Ai Account** ที่ถาม J.A.R.V.I.S ได้ทันที; เพิ่มการตรวจ `LEAD_COUNT` + `LEAD_NUDGE` กันรับปากโทรกลับโดยไม่เรียก `leave_message` และปลดล็อก Grounding เลขเบอร์โทรกลับทุกชุด) (ชุดทดสอบ: `python scripts/test-mcp-startup.py`, `python scripts/test-voice-quality.py`)
+  - **คลังความรู้ Voice-First Big Brain ในเครื่อง (`pythainlp` ตัดคำไทย + PostgreSQL 18 `pgvector` HNSW + Hybrid RRF, ไม่ผ่าน MCP HTTP API, Hot-Reload อัตโนมัติ)**:
+    - รวมคลังความรู้ **BC Brain (`bcbrain/vault/` — 380 โน้ต, 735+ เมนู 4 หลัก `1001`–`9070`, 600+ ข้อความ Error)** เป็นเนื้อเดียวกับโปรเจกต์นี้ โดยออกแบบเพื่อ **ระบบรับโทรศัพท์ด้วยเสียง (Voice-First)** โดยเฉพาะ: ตัดรูปภาพ Markdown และลิงก์ YouTube ออกทั้งหมด (`_strip_voice_media`) เพื่อนำพื้นที่งบคำตอบไปให้ข้อเท็จจริงและขั้นตอนที่ครบถ้วนเต็มที่ (`quick_answer` `ultra` 2,200 / `fast` 2,800 / `normal` 3,600 ตัวอักษร รวมได้สูงสุด 2–3 โน้ตที่เกี่ยวเนื่อง + แนบรหัสเมนู 4 หลักที่เกี่ยวข้องอัตโนมัติ และ Bootstrap Pack 25 โน้ตหลักครอบคลุมทุกโมดูล `1xxx`–`9xxx`)
+    - **ตัดคำภาษาไทยเฉพาะทางบัญชี/ERP (`pythainlp` `newmm` + Custom BC Domain Dictionary)**: รวมคำเฉพาะทาง ~140+ คำ (เช่น `โปรโมชัน`, `ซื้อครบแถม`, `ใบกำกับภาษีอย่างย่อ`, `พักบิล`, `สต็อกติดลบ`, `เข้าทีหลังออกก่อน`, `หักณที่จ่าย`, `ภพ30`, `งบกำไรขาดทุน`, `แยกสาขา`, `หลายนิติบุคคล`) พร้อมกฎแก้คำเพี้ยน STT ภาษาไทย (`โปรโมชั่น`→`โปรโมชัน`, `ซื้อสองแถมหนึ่ง`, `พักบิน`, `ไลโฟ`, `ยอดโครงเรือ`) เพื่อไม่ให้ตัดคำเฉพาะทางแยกออกจากกัน
+    - **PostgreSQL 18 `pgvector` HNSW + Thai `tsvector` GIN Hybrid RRF (`bccallcenter-pg` พอร์ต `127.0.0.1:5446`)**: แตกทั้ง 380 โน้ตและสารบัญ 735 เมนูเป็น **3,256 Section Chunks** ฝังเวกเตอร์ 1024 มิติด้วย Local Ollama **`bge-m3:latest`** (`jarvis/brain_pgvector.py`, `lib/brain-pgvector.mjs`, `docker-compose.brain.yml`) ค้นแบบ Single-SQL Hybrid RRF ผสาน **In-RAM BM25 + pgvector HNSW Cosine + PostgreSQL Thai GIN FTS** ทั้งใน J.A.R.V.I.S และช่องค้นหาบนหน้าเว็บ **สมอง BC** พร้อม Query Embedding LRU Cache (ตอบเฉลี่ย ~`70ms` / cached `< 3ms`), Incremental SHA-256 Sync อัตโนมัติเมื่อแก้ไฟล์ `.md`, Fail-Soft Circuit Breaker หาก DB/Ollama ปิดอยู่ และ **Semantic OOV Abstain Gate** กันคำถามนอกระบบ (เช่น ราคาทอง, อากาศ) ไม่ให้หลงดึงคำซ้ำไปแต่งคำตอบ
+    - แบ่งการค้นหาสายโทรศัพท์อัตโนมัติ: (1) `QA_CACHE` ตอบใน ~10ms (กรองคำถามกำกวม/Abstain/ติดชื่อลูกค้า), (2) **Zero-Blocking Search-Planner (`0.05s` cap + `0ms` Intent Expander + แยกบริบทหัวข้อใหม่จาก `user` turn ไม่ให้คำตอบบอทเก่าปน)**, และ (3) **In-Process Direct Hybrid Engine (`quick_answer`, `batch_ask`, `lookup_menu`, `lookup_error`, `batch_read`, `read_note`, `search_brain`, `traverse_brain`, `list_notes`)** (ซ่อน `find_media` จาก LLM สายโทรศัพท์) พร้อม `aioice` APIPA ICE filter
+    - **ล็อกโซน `audience: "user"` 2 ชั้น (SQL + In-Memory) + Strict `🛑 Abstain` + Abstain-to-Nearby Verified Info Fallback**: สายลูกค้าและผู้ชมหน้าเว็บถูกบังคับให้อยู่ในโซนผู้ใช้งานเสมอ (ห้ามหลุดตาราง SQL/โค้ด/ไฟล์ภายใน); เมื่อ `quick_answer` / `batch_ask` คืน `🛑 Abstain` จะไม่แต่งเรื่องเอง แต่ค้นโน้ต/เมนูใกล้เคียงที่มีอยู่จริงจาก `BrainVaultMirror.search_nearby` (พร้อมตัวกรองคำบ่นลอยๆ เช่น `"ไม่เป็นอย่างงั้น"`/`"คุยต่อ"` ไม่ให้ดึงโน้ตผิดเรื่อง) และเสนอฝากเบอร์โทรกลับเฉพาะเมื่อจำเป็น ลูกค้าขอเอง หรือใช้ **BC Account เวอร์ชันเก่า** (ชุดทดสอบ: `python scripts/sync-brain-pgvector.py --benchmark`, `python scripts/test-mcp-startup.py`, `python scripts/test-voice-quality.py`)
   - **ส่งเบอร์โทรเข้า J.A.R.V.I.S + แนะนำตัวว่าเป็น AI + จำชื่อ & ยืนยันเบอร์โทรกลับ + รวม Callback Ticket เบอร์เดียวกัน + คำแนะนำโทรกลับให้พนักงาน**: ส่งหมายเลขผู้โทร (`caller_phone`) และข้อมูลลูกค้าจาก CRM เข้าสู่ J.A.R.V.I.S โดยตรงพร้อมเก็บโปรไฟล์รายเบอร์ (`jarvis/sessions/caller_profiles.json`): สายใหม่ครั้งแรกจะแนะนำตัวว่าเป็นผู้ช่วย **AI** และแจ้งว่าถ้าต้องการคุยกับพนักงานจริงสามารถแจ้งให้โทรกลับได้ พร้อมถามขอชื่อลูกค้าให้สำเร็จ ทักทายลูกค้าเก่าด้วยเสียงแคชทันที (`~2 วิ`), ตอบเบอร์โทรที่โทรเข้ามาได้ และหากขอคุยกับพนักงานจริงหรือขอให้โทรกลับจะถามยืนยันก่อนเสมอว่าจะให้โทรกลับเบอร์นี้หรือเบอร์อื่น และถามเรื่องที่ต้องการให้โทรกลับ (ปัญหาของโปรแกรมหรือเรื่องอื่น) หากสายนี้ยังไม่มีหัวข้อคุยต่อเนื่อง ก่อนบันทึก `leave_message` และส่ง event `callback_request` สร้าง Ticket ด่วน (`source: "ai_callback"`) **โดยหากเบอร์เดียวกันมี Ticket ที่ยังเปิดอยู่จะสรุปรวมเป็น 1 Ticket เดียวอัตโนมัติ** พร้อมแสดงรายละเอียดครบทุกประเด็น, **คำแนะนำในการโทรกลับให้พนักงาน** (จากกฎโดเมน + Post-Call QA), กระดิ่ง + **เสียงพูดแจ้งเตือนภาษาไทย (Web Speech API, 0 เครดิต ElevenLabs)**, แท็บ `โทรกลับ`, ปุ่มกด **`รับทราบแล้ว`** และ **`ปิด Ticket (พนักงานรับรู้แล้ว)`** ซิงก์เรียลไทม์ทุกหน้าจอ (พร้อมปกปิดข้อมูลในโหมดผู้ชม 100%, ชุดทดสอบ: `node scripts/test-callback-ticket.mjs`)
 - **รับสายเข้าพร้อมกันสูงสุด 5 คู่สาย (Inbound-Only) พร้อมหน้าจอ Realtime 100%** ผ่าน SIP Trunk (UDP 5060 / G.711 PCMU 8kHz), WebSocket Heartbeat + Watchdog Auto-Reconnect (`LIVE` latency indicator), บทสนทนาสด (Live Transcript Feed + คำพูดสดแบบ Karaoke ทุก 180ms), Live Audio Meter จริง (ผู้โทร/AI), Motion Graphic เรดาร์/คลื่นเสียง และโหมดมืด/สว่าง
 - **กระแสเสียงต่อเนื่อง 20ms Outbound RTP + ElevenLabs `eleven_v4_turbo` Streaming TTS + ITU-T G.711 μ-law & Telephony DSP**:
@@ -26,8 +28,8 @@
   - รองรับ **ElevenLabs `eleven_v4_turbo` Streaming TTS** (`jarvis/elevenlabs_tts.py`, ปรับจูนเฉพาะสายโทรศัพท์ `stability 0.65`, `style 0.0`, `similarity_boost 0.72`, ปิด speaker boost) คู่กับ **Bandpass 110–3500 Hz + Soft Pause Noise Gate + Headroom Limiter `0.78`** ใน `jarvis/voice_agent.py` เพื่อตัดเสียงฮัม/ซ่าช่วงหยุดพูดและ fallback อัตโนมัติไป Local OmniVoice หากไม่ได้ตั้งค่า `ELEVENLABS_API_KEY` (ชุดทดสอบ: `python scripts/test-tts-audio-clean.py`)
   - **Local Disk TTS Cache (`jarvis/cache/tts/`) & Ollama Cloud DeepSeek FAQ Cache (`jarvis/cache/qa_cache.json`)**: เก็บไฟล์เสียง PCM 24kHz ลงดิสก์ (LRU สูงสุด 500 MB) และเก็บคำตอบ FAQ ที่ผ่าน Judge จาก **Ollama Cloud (`deepseek-v4.1-flash`, `reasoning_effort="none"`)** แล้ว (TTL 7 วัน, จับคำถามซ้ำ/หางเสียงต่าง/ใกล้เคียงอัตโนมัติ, กันคำตอบขัดข้องไม่ให้เข้า cache) เพื่อประหยัดทั้งเครดิต ElevenLabs และ LLM Token (ตรวจสถิติได้ที่ `GET /cache/stats`)
 - **ระบบกันเสียงไอ/เสียงรบกวนรอบข้าง + Word-Verified Barge-in**:
-  - กรองเสียงฮัม/ลมความถี่ต่ำด้วย **80 Hz High-Pass Filter** (`scipy.signal.butter/sosfilt`), **Noise Floor Gate (`-41 dBFS` สำหรับการรับสาย / `-31 dBFS` สำหรับพูดแทรก)**, ยืนยันเสียงพูดจริงด้วย STT VAD (`voiced()`) ใน `determine_pause` ก่อนเริ่ม turn พร้อม **Semantic Incomplete-Turn Extension** (`0.55s` ปกติ / ขยายเป็น `0.95s` เมื่อยังค้างคำเชื่อมเช่น "ว่า", "แล้ว", "ถ้า", "คือ" หรือประโยคเงื่อนไขสั้นๆ เช่น "แล้วถ้าเป็น..."/"แล้วถ้ามี..." ที่ยังไม่จบท้าย เพื่อไม่ให้ตัดคำกลางประโยค), เก็บคำที่พูดค้างตอนพูดแทรก (`carry`) ข้ามเธรดด้วย `cid` ของสายเพื่อรวมประโยคต่อเนื่องในรอบถัดไปไม่ให้หล่นหาย, กันคิว `EARLY_STT` ซ้อนขณะ GPU ทำงานอยู่, กรองเสียงหลุดสั้นกว่า `0.15s` (`SIP_MIN_TURN_SPEECH_S`) พร้อมบังคับพื้นเสียงขั้นต่ำ `0.08s` แม้เป็นคำสั้นใน `SIP_CUT_INS` (กันเสียง glitch 0.03 วิ เช่น "ครับ" ลอยๆ), กันการตรวจซ้ำใน `process_audio` และกันจับคำเชื่อม/อุทาน/คำไทยที่มี `ชื่อ` แฝง (เช่น `เชื่อม`, `เชื่อว่า`) เป็นชื่อลูกค้าทั้งฝั่ง SIP Engine และ J.A.R.V.I.S (ชุดทดสอบ: `python scripts/test-turn-onset.py`, `python scripts/test-voice-quality.py`, `node scripts/test-callback-ticket.mjs`)
-  - ขณะบอทกำลังพูดจะไม่ตัดคำตอบจากเสียงไอ/กระแอม/คำเพี้ยนสั้น 1 พยางค์หรือตัวเลขลอยๆ แต่ใช้ **OpenThai CPU Streaming** ตรวจยืนยันคำพูดแทรกจริง (`>= 3` ตัวอักษรฐาน, `barge_in_confirmed` + ล้างคิว 20ms RTP ทันที, วัดระดับเสียงพูดล้วนย้อนหลัง `SIP_BARGE_LEVEL_SPAN_S = 3.0` วิเมื่อเสียงช่วงท้ายถูกสายลดระดับ และปิดตัวกรองเสียงสะท้อน `is_echo` เฉพาะสายโทรศัพท์เพื่อไม่ให้ตัดคำแทรกที่ซ้ำคำบอทหรือคำตอบ "ใช่") ชุดทดสอบ: `python scripts/test-barge-in.py`
+  - กรองเสียงฮัม/ลมความถี่ต่ำด้วย **80 Hz High-Pass Filter** (`scipy.signal.butter/sosfilt`), **Noise Floor Gate (`-41 dBFS` สำหรับการรับสาย / `-31 dBFS` สำหรับพูดแทรก)**, ยืนยันเสียงพูดจริงด้วย STT VAD (`voiced()`) ใน `determine_pause` พร้อม **Semantic Incomplete-Turn Extension** (`0.55s` ปกติ / `0.95s` เมื่อค้างคำเชื่อม), **300ms VAD jitter tolerance + Hard Turn-End Cap** (กัน `EARLY_STT` ถูกยกเลิกซ้ำซ้อนและกันเดดแอร์ 10+ วิ), เก็บคำพูดค้าง (`carry`) ข้ามเธรด, กรองเสียงหลุดสั้นกว่า `0.15s` (พื้น `0.08s` สำหรับ `SIP_CUT_INS`) และกันจับคำเชื่อม/คำไทยที่มี `ชื่อ` แฝงเป็นชื่อลูกค้า
+  - ขณะบอทกำลังพูดจะไม่ตัดคำตอบจากเสียงคลิก/เสียงรบกวนสั้น `0.03s–0.13s` โดยตรวจทั้งความยาวเสียงพูดจริงจาก VAD (`voiced_s >= 0.12s` สำหรับคำสั่งหยุด/คีย์เวิร์ด และ `>= 0.22s` ทั่วไป) และ **OpenThai CPU Streaming** (`>= 3` ตัวอักษรฐาน, `barge_in_confirmed` + ล้างคิว 20ms RTP ทันที) ชุดทดสอบ: `python scripts/test-barge-in.py`, `python scripts/test-turn-onset.py`
 - **ระบบฟัง 3 หูขนาน 6 ภาษา (Dual-Mode Triple-Ear ASR — ไทย / ลาว / อังกฤษ / จีน / ญี่ปุ่น / เกาหลี)**:
   - **สายภาษาไทย (GPU + CPU ขนานแบบแยก Pool)**: หูที่ 1 ใช้ **`typhoon-whisper-turbo`** บน GPU (`language="th"`, `BC_STT_PROMPT`, `repetition_penalty=1.15`, `no_repeat_ngram_size=3`, และตัวตรวจคำซ้ำพยางค์/คำโดเมนเห็นตรงกันของ `e2/e3` สลับไป OpenThai อัตโนมัติ, CER 2.3% ไม่หลอนเสียงไทยเป็นภาษาอังกฤษ) พร้อม GPU busy semaphore กันคิวกอง timeout เป็นลูกโซ่ คู่กับ **หูที่ 2 (`OpenThai 2.0 th-TH`)** และ **หูที่ 3 (`OpenThai 2.0 th-mix`)** บน CPU Pool แยกต่างหากสำหรับตรวจคำแทรก (Word-Verified Barge-in) และจับคำขอเปลี่ยนภาษา/ประโยคอังกฤษล้วน + อ่านออกเสียง URL (`www.bcaccount.com`) และ LINE ID (`@bcaccount`) เป็นภาษาไทยชัดเจนก่อนส่ง TTS
   - **สายภาษาอื่น (`en / zh / ja / ko / lo`)**: หูที่ 1 ใช้ **`faster-whisper-large-v3-turbo`** บน CPU (`int8`, `0 GB GPU VRAM`) ถอดเสียงเป็นอักษรของภาษานั้นแท้ๆ โดยไม่ทับศัพท์เป็นคำไทย พร้อม OpenThai CPU ขนานเพื่อรับคำสั่งกลับภาษาไทย
@@ -81,7 +83,9 @@ flowchart LR
 - `lib/crm-store.mjs` — ฐานข้อมูล CRM โลคอล (โปรไฟล์ลูกค้า 360°, ภาษาประจำเบอร์, เคสติดตามงาน และ Auto-Ticket จาก AI QA)
 - `lib/call-memory.mjs` — เก็บประวัติการสนทนารายเบอร์และสร้างบริบทคุยต่อเนื่อง (`data/call-memory.json`)
 - `lib/call-analyzer.mjs` — วิเคราะห์หลังวางสายผ่าน Ollama Cloud (`deepseek-v4.1-flash`)
-- `jarvis/` — ซอร์สโค้ด **J.A.R.V.I.S Voice Agent** (`voice_agent.py`, `brain_mirror.py`, `config.py`, `grounding.py`, `openthai_asr.py`, `google_tools.py`, `desktop_agent.py`, `static/`) รองรับ STT/TTS หลายภาษา, RAM Vault Mirror `<1ms` และ `POST /language`
+- `jarvis/` — ซอร์สโค้ด **J.A.R.V.I.S Voice Agent** (`voice_agent.py`, `brain_mirror.py`, `brain_pgvector.py`, `config.py`, `grounding.py`, `openthai_asr.py`, `google_tools.py`, `desktop_agent.py`, `static/`) รองรับ STT/TTS หลายภาษา, ตัดคำไทยพจนานุกรมเฉพาะทาง BC + PostgreSQL 18 `pgvector` HNSW Hybrid RRF และ `POST /language`
+- `lib/brain-store.mjs` + `lib/brain-pgvector.mjs` — คลังความรู้ **สมอง BC** ฝั่ง Node.js (Hot-Reload + Hybrid Search ผ่าน `pgvector` + ล็อกโซน `user` สำหรับผู้ชม)
+- `docker-compose.brain.yml` + `scripts/sync-brain-pgvector.py` — คอนเทนเนอร์ PostgreSQL 18 (`pgvector/pgvector:0.8.6-pg18`, พอร์ต `127.0.0.1:5446`) และสคริปต์สร้างดัชนี/ทดสอบความแม่นยำ 30 คำถาม (`--benchmark`)
 - `src/` — หน้าจอ **ระบบ BC Call Center** (ค่าเริ่มต้น **โหมดสว่าง** สลับมืด/สว่างได้, Motion Graphic, แผง 5 คู่สายพร้อมปุ่มสลับภาษากลางสาย, ลิ้นชักผล QA และ **CRM Workspace**)
 - `scripts/seed-sme-demo-data.mjs` — ล้างข้อมูลเก่าและจำลองชุดข้อมูลสาธิตธุรกิจ SME (`48` ราย, `6` ภาษา, `165` สาย, `32` เคส) พร้อมคำแนะนำโทรกลับ
 - `scripts/start-jarvis.ps1` — สคริปต์รัน J.A.R.V.I.S จากโฟลเดอร์ `jarvis/`
@@ -115,6 +119,10 @@ flowchart LR
 | `GOOGLE_CLIENT_ID` | Google OAuth 2.0 Web Client ID สำหรับปุ่มเข้าสู่ระบบด้วย Google (ต้องเพิ่มโดเมนใน Authorized JavaScript origins ใน Google Cloud Console) |
 | `ADMIN_EMAIL` / `ADMIN_EMAILS` | อีเมลบัญชี Google ที่มีสิทธิ์ผู้ดูแลเต็มรูปแบบ (ดูเบอร์จริงและควบคุมระบบได้ รองรับหลายบัญชีโดยคั่นด้วยเครื่องหมายจุลภาค `,`) |
 | `AUTH_COOKIE_SECRET` | คีย์สุ่มสำหรับลงนาม `HttpOnly` Session Cookie (เก็บใน `.env.local` เท่านั้น) |
+| `BRAIN_PG_HOST` / `BRAIN_PG_PORT` | โฮสต์และพอร์ตของ PostgreSQL 18 `pgvector` สำหรับสมอง BC (`127.0.0.1` / `5446`) |
+| `BRAIN_PG_DB` / `BRAIN_PG_USER` / `BRAIN_PG_PASSWORD` | ชื่อฐานข้อมูล, ผู้ใช้ และรหัสผ่านของ `bccallcenter-pg` (เก็บใน `.env.local` เท่านั้น) |
+| `BRAIN_PG_ENABLED` | เปิด/ปิด Hybrid Vector Search (`true` / `false`; fail-soft ไปใช้ BM25 ใน RAM อัตโนมัติหากปิด) |
+| `BRAIN_EMBED_URL` / `BRAIN_EMBED_MODEL` | Endpoint และโมเดล Embedding ของ Ollama โลคอล (`http://127.0.0.1:11434/api/embed`, `bge-m3:latest`) |
 
 ### 2. ตั้งค่า J.A.R.V.I.S (`jarvis/.env`)
 คัดลอก `jarvis/.env.example` เป็น `jarvis/.env` แล้วใส่ `DEEPSEEK_API_KEY` (และเตรียมโฟลเดอร์โมเดลใน `jarvis/models/`):
@@ -135,21 +143,25 @@ PUBLIC_SSH=
 ## Dependencies & Usage
 
 ```bash
-# 1. ติดตั้งและ Build ฝั่ง BC Call Center
+# 1. สตาร์ท PostgreSQL 18 pgvector สำหรับสมอง BC และสร้างดัชนี + ทดสอบ 30 คำถาม
+docker compose --env-file .env.local -f docker-compose.brain.yml up -d
+python scripts/sync-brain-pgvector.py --benchmark
+
+# 2. ติดตั้งและ Build ฝั่ง BC Call Center
 npm install
 npm run typecheck
 npm run build
 
-# 2. รัน J.A.R.V.I.S Voice Agent (เทอร์มินัลที่ 1)
+# 3. รัน J.A.R.V.I.S Voice Agent (เทอร์มินัลที่ 1)
 npm run jarvis
 
-# 3. รันระบบ BC Call Center (เทอร์มินัลที่ 2)
+# 4. รันระบบ BC Call Center (เทอร์มินัลที่ 2)
 npm run start
 
-# 4. (ทางเลือกแทนข้อ 2-3) เปิด/รีสตาร์ททั้งสองบริการแบบเบื้องหลังเมื่อไม่มีสายค้าง แล้วตรวจ HTTP 200
+# 5. (ทางเลือกแทนข้อ 3-4) เปิด/รีสตาร์ททั้งสองบริการแบบเบื้องหลังเมื่อไม่มีสายค้าง แล้วตรวจ HTTP 200
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/restart-services.ps1 -Target all
 
-# 5. วิเคราะห์คุณภาพสายจากไฟล์เสียงที่อัดไว้
+# 6. วิเคราะห์คุณภาพสายจากไฟล์เสียงที่อัดไว้
 node scripts/wav-analyze.mjs <sessionId> --transcribe
 ```
 
@@ -170,4 +182,5 @@ node scripts/wav-analyze.mjs <sessionId> --transcribe
 - **Real-time Voice Transport**: [FastRTC](https://github.com/gradio-app/fastrtc) & [LiveKit Agents](https://github.com/livekit/agents)
 - **Speech-to-Text (STT)**: [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper)
 - **Multilingual Text-to-Speech (TTS)**: [k2-fsa/OmniVoice](https://github.com/k2-fsa/OmniVoice)
-- **LLM & Post-Call QA**: [Ollama](https://github.com/ollama/ollama) (DeepSeek)
+- **LLM & Post-Call QA**: [Ollama](https://github.com/ollama/ollama) (DeepSeek & `bge-m3` Embeddings)
+- **Thai NLP & Vector Search**: [PyThaiNLP](https://github.com/PyThaiNLP/pythainlp) & [pgvector](https://github.com/pgvector/pgvector) (PostgreSQL 18 HNSW + GIN)

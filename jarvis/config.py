@@ -12,10 +12,12 @@ if os.path.exists(_env := os.path.join(BASE_DIR, ".env")):
             if _k and not _k.startswith("#"):
                 os.environ.setdefault(_k, _v)
 
-# Also load ONLY shared AI/TTS keys from root ../.env.local (never pull Next.js PORT=3000!)
+# Also load ONLY shared AI/TTS/Brain-PG keys from root ../.env.local (never pull Next.js PORT=3000!)
 _SHARED_ROOT_KEYS = {
     "ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "ELEVENLABS_MODEL_ID", "TTS_PROVIDER",
     "OLLAMA_BASE_URL", "OLLAMA_MODEL", "OLLAMA_API_KEY",
+    "BRAIN_PG_HOST", "BRAIN_PG_PORT", "BRAIN_PG_DB", "BRAIN_PG_USER", "BRAIN_PG_PASSWORD",
+    "BRAIN_PG_ENABLED", "BRAIN_EMBED_URL", "BRAIN_EMBED_MODEL",
 }
 _root_env = os.path.join(os.path.dirname(BASE_DIR), ".env.local")
 if os.path.exists(_root_env):
@@ -222,6 +224,8 @@ SYSTEM_PROMPT = (
     "และ batch_read (อ่านหลายโน้ตที่รู้ slug สูงสุด 5 ใบในรอบเดียว) "
     "ห้ามเสียรอบเรียก read_note ที่ชื่อ playbook ก่อนทุกครั้ง และห้ามวนเรียก search_brain กับ read_note ทีละใบ ถ้าผลค้นรอบแรกมีคำตอบครบแล้วให้ตอบทันทีโดยไม่ต้องค้นซ้ำ "
     "สำหรับลูกค้าและผู้ใช้งานให้ใช้โซน user เสมอ บอกชื่อเมนูพร้อมรหัสเมนูสี่หลักและเส้นทางเมนูภาษาไทยให้เข้าใจง่าย และห้ามพูดชื่อตาราง SQL โค้ด หรือชื่อไฟล์ภายในเด็ดขาด "
+    "ระบบนี้เป็นระบบรับโทรศัพท์ทางเสียง ไม่ต้องอ้างอิงภาพ วิดีโอ ยูทูบ หรือลิงก์เว็บ ให้สรุปอธิบายด้วยเสียงให้ถูกต้อง ครบถ้วน และเข้าใจง่ายแทน "
+    "ห้ามปิดท้ายคำตอบด้วยประโยคคำถามซ้ำซากเดิมอย่าง อยากให้ผมช่วยดูเรื่องไหนต่อดีครับ ทุกครั้ง ให้จบคำตอบอย่างเป็นธรรมชาติหรือเปลี่ยนสำนวนตามเรื่องที่คุยอยู่ "
     "ถ้าสมองคืนคำว่า Abstain หรือไม่มีข้อมูลยืนยันตรงเป๊ะ ห้ามเดาหรือแต่งคำตอบเองเด็ดขาด ให้บอกตรงๆ ว่าส่วนที่ถามตรงๆ ยังไม่มีข้อมูลยืนยัน แล้วหากผลค้นมีข้อมูลใกล้เคียงที่มีอยู่จริง (เช่น ฟีเจอร์ รายงาน หรือเมนูที่เกี่ยวข้อง) ให้เล่าเฉพาะข้อเท็จจริงจากส่วนใกล้เคียงนั้นมาช่วยผู้ฟังต่อโดยห้ามแต่งเติมเอง แต่ถ้าไม่มีแม้แต่ข้อมูลใกล้เคียงจึงแจ้งตรงๆ ว่ายังไม่มีข้อมูลยืนยันในระบบ "
     # ลุงจืด 2026-11-04 "เสียงมีหลายคนพูด": the mic hears the room too ("คุณต่าย คุณต่าย คุณต่าย" got an answer)
     "ไมค์อาจได้ยินคนอื่นในห้องคุยกันเอง คำทักทาย ขอบคุณ ลา คำถาม คำสั่ง และคำตอบของสิ่งที่คุณเพิ่งถาม ถือว่าพูดกับคุณ ให้ตอบตามปกติ "
@@ -245,7 +249,7 @@ BRAIN_VAULT_PACK_URL = os.environ.get("BRAIN_VAULT_PACK_URL", "").strip()
 BRAIN_VAULT_PACK_TTL_S = int(os.environ.get("BRAIN_VAULT_PACK_TTL_S", "1800"))
 # OpenStreetMap Nominatim wants an app that names itself (never a personal email): [แผนที่] lines get coordinates
 GEO_USER_AGENT = "bctest01-voice-secretary/1.0 (+https://callcenter.bcsmethai.com)"
-TOOL_RESULT_CHARS = 6000  # per tool result sent to the LLM (ask_brain returns ~22k chars)
+TOOL_RESULT_CHARS = 9000  # big local voice brain budget so full verified sections reach LLM without truncation
 MAX_TOOL_ROUNDS = 3
 SIP_MAX_TOOL_ROUNDS = 2  # phone calls already get quick_answer prefetch before round 0; cap follow-up rounds to avoid 5-8s TTFA
 BRAIN_MIN_SCORE = 50  # search_brain score that counts as relevant (calibrated 2026-11-04, see brain_first)

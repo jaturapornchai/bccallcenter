@@ -33,6 +33,7 @@ yarn-error.log*
 # J.A.R.V.I.S runtime, models, secrets & sessions
 /jarvis/.env
 /jarvis/.venv/
+/jarvis/_vendor/
 /jarvis/models/
 /jarvis/sessions/
 /jarvis/cache/

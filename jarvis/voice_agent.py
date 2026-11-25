@@ -1879,7 +1879,8 @@ def mcp_tool(server, client, name):
                             audience=aud,
                             limit_notes=2,
                             limit_menus=4,
-                            max_chars_per_note=650,
+                            max_chars_per_note=1100,
+                            min_score=12.0,
                         )
                     if nearby is None:
                         nearby = _mcp_nearby_fallback(client, q_text, audience=aud)
@@ -1942,7 +1943,7 @@ BRAIN_MIRROR = BrainVaultMirror(
     vault_dir=getattr(C, "LOCAL_BRAIN_DIR", ""),
 )
 MCP_CLIENTS: dict[str, object] = {}
-LEGACY_BRAIN_TOOLS = frozenset({"search_brain", "read_note", "ask_brain"})
+LEGACY_BRAIN_TOOLS = frozenset({"search_brain", "read_note", "ask_brain", "find_media"})
 
 
 def _prefetch_mcp_batch(calls: list[tuple[str, dict]], tools: dict) -> None:
@@ -1995,6 +1996,19 @@ def load_mcp_tools():
                 "Local BC Brain (in-process): %d notes, %d menus, %d errors, tools=%s (dir=%s)",
                 st["notes"], st["menus"], st.get("errors", 0), [t["name"] for t in local_tools], local_dir,
             )
+
+            def _warm_pgvector():
+                try:
+                    pg_st = mirror.warmup_pgvector()
+                    if pg_st.get("enabled"):
+                        log.info(
+                            "Local BC Brain pgvector: ready=%s chunks=%d model=%s warmupEmbedMs=%.1fms",
+                            pg_st.get("ready"), pg_st.get("chunks", 0), pg_st.get("model"), float(pg_st.get("warmupEmbedMs") or 0.0),
+                        )
+                except Exception as e:
+                    log.warning("Local BC Brain pgvector warmup skipped (%s)", type(e).__name__)
+
+            threading.Thread(target=_warm_pgvector, name="bcbrain-pgvector-warm", daemon=True).start()
 
     # 2. Optional external MCP servers (only if explicitly configured and not already provided locally)
     for server, url in (getattr(C, "MCP_SERVERS", None) or {}).items():
@@ -2703,7 +2717,9 @@ def _is_incomplete_thai_tail(text: str) -> bool:
 
 _STANDALONE_TOPIC_RE = re.compile(
     r"(?:เบอร์โทร|ติดต่อ|เว็บไซต์|ไลน์|ราคา|แพ็กเกจ|ติดตั้ง|คลาวด์|ออฟฟิศ|เวอร์ชัน|เวอร์ชั่น|รุ่น|"
-    r"มาคุยเรื่อง|เปลี่ยนเรื่อง|ถามเรื่อง|ถ้าเป็นธุรกิจ|ธุรกิจ|ร้านผม|ร้านยาง|รายงานสินค้า|เงินสด|ธนาคาร|คลังสินค้า|สต็อก|สต๊อก|โลเคชั่น)"
+    r"มาคุยเรื่อง|เปลี่ยนเรื่อง|ถามเรื่อง|ถ้าเป็นธุรกิจ|ธุรกิจ|ร้านผม|ร้านยาง|รายงานสินค้า|เงินสด|ธนาคาร|คลังสินค้า|สต็อก|สต๊อก|โลเคชั่น|"
+    r"โปรโมชั[น่]น?|promotion|พักบิล|พักบิน|บาร์โค้ด|ต้นทุน|fifo|lifo|fefo|pos|พีโอเอส|สาขา|ส่วนลด|คูปอง|พนักงานโทร|โทรหาผม|ติดต่อกลับ)",
+    re.I,
 )
 
 
@@ -2732,7 +2748,7 @@ _NON_SEARCH_STRIP_RE = re.compile(
     r"(?:สวัสดี|หวัดดี|ฮัลโหล|ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|คับ|ผมชื่อว่า|ดิฉันชื่อว่า|หนูชื่อว่า|ฉันชื่อว่า|พี่ชื่อว่า|"
     r"ผมชื่อ|ดิฉันชื่อ|หนูชื่อ|ฉันชื่อ|พี่ชื่อ|เรียกผมว่า|เรียกพี่ว่า|เรียกว่า|ชื่อเล่นว่า|ชื่อเล่น|ชื่อว่า|ชื่อ|คุณ|พี่|ท่าน)"
 )
-_CB_INTENT_ONLY_RE = re.compile(r"(?:ฝากเบอร์|โทรกลับ|ติดต่อกลับ|คุยกับพนักงาน|ขอพบพนักงาน|เบอร์นี้|เบอร์เดิม|ใช่เบอร์นี้)")
+_CB_INTENT_ONLY_RE = re.compile(r"(?:ฝากเบอร์|โทรกลับ|ติดต่อกลับ|คุยกับพนักงาน|ขอพบพนักงาน|พนักงานโทร(?:หา|กลับ)|ให้พนักงานโทร|โทรหาผม|เบอร์นี้|เบอร์เดิม|ใช่เบอร์นี้)")
 _REAL_Q_OR_PRODUCT_RE = re.compile(
     r"(?:ราคาเท่าไหร่|ราคา|กี่บาท|แพ็กเกจ|รุ่น|เวอร์ชัน|เวอร์ชั่น|ทำได้ไหม|ทำได้มั้ย|ยังไง|อย่างไร|เมนูไหน|คืออะไร|ต่างกัน|"
     r"เว็บไซต์|เว็บไหน|เบอร์อะไร|ติดต่อที่ไหน|สินค้า|สต็อก|สต๊อก|บัญชี|ภาษี|รายงาน|ติดตั้ง|คลาวด์|ออฟฟิศ|ลองใช้|เดโม|โปรแกรม|ระบบ)"
@@ -2749,16 +2765,24 @@ _BOILERPLATE_CTX_RE = re.compile(
 
 
 def _extract_recent_topic(history: list[dict]) -> str:
-    """Return the most recent substantive non-greeting/non-abstain topic snippet from conversation history."""
-    for m in reversed((history or [])[-6:]):
-        c = (m.get("content") or "").partition(C.SCREEN_MARK)[0].strip()
-        if not c or c.startswith(("(", C.SILENT_MARK)) or len(c) < 6:
-            continue
-        if _BOILERPLATE_CTX_RE.search(c):
-            continue
-        if re.fullmatch(r"(?:สวัสดี|ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|อืม|ใช่|ใช่ค่ะ|ใช่ครับ|โอเค)[\s.,!?…]*", c):
-            continue
-        return c[:60]
+    """Return the most recent substantive user topic snippet (preferring caller turns over verbose bot replies)."""
+    recent = list(reversed((history or [])[-8:]))
+    for prefer_user in (True, False):
+        for m in recent:
+            if prefer_user and m.get("role") != "user":
+                continue
+            if not prefer_user and m.get("role") == "user":
+                continue
+            c = (m.get("content") or "").partition(C.SCREEN_MARK)[0].strip()
+            if not c or c.startswith(("(", C.SILENT_MARK)) or len(c) < 6:
+                continue
+            if _BOILERPLATE_CTX_RE.search(c):
+                continue
+            if re.fullmatch(r"(?:สวัสดี|ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|อืม|ใช่|ใช่ค่ะ|ใช่ครับ|โอเค|คุยต่อ|อธิบายต่อเลย|ไม่เป็นอย่างงั้น|ไม่เป็นอย่างนั้น)[\s.,!?…]*", c):
+                continue
+            if prefer_user and re.fullmatch(r"(?:ไม่เป็น|อย่างงั้น|อย่างนั้น|คุยต่อ|อธิบายต่อ|ทำไม|สรุป|อ๋อ|ครับ|ค่ะ|\s)+", c):
+                continue
+            return c[:60]
     return ""
 
 
@@ -3240,28 +3264,29 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             clean_q0 = unique_qs[0] if unique_qs else ""
             if "quick_answer" in tools and unique_qs:
                 if phone_mode and len(unique_qs) >= 2 and "batch_ask" in tools:
-                    # Single round-trip batch_ask(ultra) for multi-interpretation / multi-intent phone turns
+                    # Single round-trip batch_ask with generous local RAM budget (no images/YouTube on phone)
                     calls = [("batch_ask", {
                         "questions": unique_qs,
                         **zone,
                         "mode": "ultra",
+                        "max_chars_per_answer": 1400,
                         "include_media": False,
                     })]
                 else:
-                    # Single round-trip quick_answer: ultra (~500-700 chars) on phone, normal (~2000 chars) on desktop
+                    # Big Voice Brain: local RAM quick_answer with 2,200-char grounded context (0ms network, media-free)
                     calls = [("quick_answer", {
                         "question": clean_q0,
                         **zone,
                         "mode": "ultra" if phone_mode else "normal",
-                        "max_chars": 700 if phone_mode else 2000,
-                        "include_media": not phone_mode,
+                        "max_chars": 2200 if phone_mode else 3000,
+                        "include_media": False,
                     })]
                     if phone_mode and len(unique_qs) > 1:
                         calls.append(("quick_answer", {
                             "question": unique_qs[1],
                             **zone,
                             "mode": "ultra",
-                            "max_chars": 700,
+                            "max_chars": 1400,
                             "include_media": False,
                         }))
                 if "lookup_menu" in tools and MENU_CODE_ASK.search(f"{heard} {query} {' '.join(alt_heard)}"):
@@ -3321,7 +3346,8 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                     audience=zone.get("audience", "user"),
                     limit_notes=2,
                     limit_menus=4,
-                    max_chars_per_note=650,
+                    max_chars_per_note=1100,
+                    min_score=12.0,
                 )
                 if nearby and nearby.get("text"):
                     log.info(
@@ -3346,9 +3372,9 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                     audience="user",
                     limit_notes=2,
                     limit_menus=3,
-                    max_chars_per_note=450,
+                    max_chars_per_note=900,
                     exclude_slugs=returned_slugs,
-                    min_score=5.0,
+                    min_score=14.0,
                 )
                 if nearby and nearby.get("text"):
                     log.info(
@@ -3793,23 +3819,24 @@ class BargeInReplyOnPause(ReplyOnPause):
             bot_active = state.responding or any(e > now_m and not is_f for _, e, _, is_f in self.playing)
             if phone and not self.cut and bot_active:
                 stream = state.stream  # the handler's thread drops it once the sound turns out to be no turn
-                # Measure peak foreground level across both latest delta and recent stream window
+                # Measure peak foreground level and confirmed voiced duration to prevent 0.03s-0.13s clicks/noise
+                # from triggering false OpenThai barge-ins that silence an active answer (log 2026-11-25 07:43-07:46).
                 recent_tail = stream[-int(sr * 0.5):] if stream is not None else snap
                 dbfs = max(_audio_dbfs(snap16), _audio_dbfs(to16k((sr, recent_tail))))
-                if dbfs < C.SIP_BARGE_MIN_DBFS and stream is not None:
-                    # the line turns a caller down while both sides talk (2026-11-23 16:18: a turn of -28 dBFS sank
-                    # to -40 within half a second and never cut in), so words that come in quiet are gated on the
-                    # speech of the turn so far, the way the turn check measures it
-                    speech = voiced((sr, stream[-int(sr * C.SIP_BARGE_LEVEL_SPAN_S):]))
-                    dbfs = max(dbfs, _audio_dbfs(speech))
+                speech_window = voiced((sr, stream[-int(sr * C.SIP_BARGE_LEVEL_SPAN_S):])) if stream is not None else voiced((sr, snap))
+                voiced_s = speech_window.size / 16000
+                if dbfs < C.SIP_BARGE_MIN_DBFS and speech_window.size:
+                    dbfs = max(dbfs, _audio_dbfs(speech_window))
                 low_bare = bare.lower()
                 base_chars = len(re.sub(r"[\u0e31\u0e34-\u0e3a\u0e47-\u0e4e]", "", bare))
+                is_keyword_or_cut = bare in self.SIP_CUT_INS or any(k in low_bare for k in self._BARGE_KEYWORDS)
+                min_voiced_s = 0.12 if is_keyword_or_cut else 0.22
                 is_real_barge = (
                     dbfs >= C.SIP_BARGE_MIN_DBFS
+                    and voiced_s >= min_voiced_s
                     and not bare.isdigit()
                     and (
-                        bare in self.SIP_CUT_INS
-                        or any(k in low_bare for k in self._BARGE_KEYWORDS)
+                        is_keyword_or_cut
                         or (len(bare) >= C.SIP_BARGE_MIN_CHARS and base_chars >= 3)
                     )
                 )
@@ -3896,7 +3923,8 @@ class BargeInReplyOnPause(ReplyOnPause):
         # new words and re-ran the STT on the whole, growing turn (2026-11-04 19:46: 36 s of audio once a second
         # while the reply was busy, 20 s before the caller's words came out)
         early_silence = getattr(C, "SIP_EARLY_STT_SILENCE_S", C.EARLY_STT_SILENCE_S) if is_phone else C.EARLY_STT_SILENCE_S
-        if early and chunks and state.stream.size - silence * sampling_rate > early[0].size:
+        # Add 300ms VAD jitter tolerance before discarding completed EARLY_STT (prevents 3x redundant TRIPLE-EAR loops & 13s dead air)
+        if early and chunks and state.stream.size - int(silence * sampling_rate) > early[0].size + int(sampling_rate * 0.30):
             EARLY.pop(id(self), None)[1].cancel()  # still queued: it never runs
             early = None
         prev_job = live.get("early_job")
@@ -3912,6 +3940,8 @@ class BargeInReplyOnPause(ReplyOnPause):
             history = session(self.fn is reply_public)[1]
             cur_cid = call_id() if "call_id" in globals() else ""
             early[1].add_done_callback(lambda job, h=history, c=cur_cid, p=is_phone: words_transcribed(job, h, cid=c, phone=p))
+        if is_phone and state.started_talking and state.stream.size >= int(sampling_rate * 9.0) and silence >= 1.05:
+            return True
         return silence >= pause
 
     cut = False  # cut_off() stopped the answer for the speech now being heard; process_audio's turn check clears it

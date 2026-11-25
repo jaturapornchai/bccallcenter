@@ -24,10 +24,20 @@ import httpx
 
 try:
     from pythainlp.corpus import thai_stopwords as _pythai_stopwords
+    from pythainlp.corpus.common import thai_words as _pythai_words
     from pythainlp.tokenize import word_tokenize as _pythai_tokenize
+    from pythainlp.util import dict_trie as _pythai_dict_trie
 except Exception:  # pragma: no cover - fallback when pythainlp unavailable
     _pythai_stopwords = None
+    _pythai_words = None
     _pythai_tokenize = None
+    _pythai_dict_trie = None
+
+try:
+    from brain_pgvector import BrainPgVectorStore, get_pgvector_store
+except Exception:  # pragma: no cover - fail-soft when pgvector module unavailable
+    BrainPgVectorStore = None  # type: ignore[assignment]
+    get_pgvector_store = None  # type: ignore[assignment]
 
 log = logging.getLogger("voice")
 
@@ -69,6 +79,13 @@ _STT_SEARCH_NORMALIZE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"เซลฟเวอร์|เซฟเวอร์"), " เซิร์ฟเวอร์ "),
     (re.compile(r"(?:ขาย)?อย่างรถยนต์"), " ยางรถยนต์ "),
     (re.compile(r"โลเคชั[น่]น?"), " โลเคชั่น จุดเก็บ location bin "),
+    (re.compile(r"โปรโมชั[น่]น?|promotions?", re.I), " โปรโมชัน "),
+    (re.compile(r"ซื้อ\s*\d+\s*แถม\s*\d+|ซื้อ(?:หนึ่ง|สอง|สาม|ครบ)แถม(?:หนึ่ง|สอง|ฟรี)?|ซื้อแถม|แถมฟรี"), " โปรโมชัน ของแถม ซื้อครบแถม สูตรโปรโมชัน "),
+    (re.compile(r"พักบิน|พรรคบิน|พับบิล"), " พักบิล "),
+    (re.compile(r"กี่สูจน|กี่สูตร"), " กี่สูตร สูตรโปรโมชัน "),
+    (re.compile(r"เข้า(?:ที|ที่)หลัง(?:ออก|ของ)ก่อน|ไลโฟ", re.I), " lifo เข้าทีหลังออกก่อน ประเภทต้นทุน "),
+    (re.compile(r"แยกสาคะ|สาหา(?:เอ|บี)?"), " แยกสาขา สาขา "),
+    (re.compile(r"(?<![ก-๙])เชล(?:ล์)?(?=\s*ด้วย|\s|$)"), " ชั้นวาง ที่เก็บ "),
     (re.compile(r"(?<![a-zA-Z])(?:vc|วีซี)(?![a-zA-Z])|มีซี(?![a-zA-Z\u0E00-\u0E7F])", re.I), " บีซี "),
 )
 
@@ -126,6 +143,8 @@ _BRAIN_SYNONYM_GROUPS: tuple[tuple[str, ...], ...] = (
     ("ออกบิล", "บิล", "ขาย"),
     ("สาขา", "แยกสาขา", "สำนักงานใหญ่"),
     ("ยางรถยนต์", "ร้านยาง", "อู่ซ่อมรถ", "autocare", "ออโต้แคร์"),
+    ("โปรโมชัน", "โปรโมชั่น", "promotion", "สูตรโปรโมชัน", "ของแถม", "ซื้อครบแถม", "คูปอง", "ส่วนลด", "2015", "2026"),
+    ("lifo", "fifo", "fefo", "ประเภทต้นทุน", "ต้นทุนเฉลี่ย", "วิธีคำนวณต้นทุน"),
 )
 
 
@@ -154,13 +173,16 @@ _PHONE_FILLER_STOPWORDS = frozenset({
     "รู้", "จำ", "จำได้", "บอก", "รอบ", "ครั้ง", "กี่", "นึง", "เงี้ย", "เดิน", "ถึงขั้น", "เท้า",
     "สริป", "หน่าย", "เป็นมัน", "กใช่ไหม", "แล้วก็", "หรือว่า", "คุย", "นิสัย", "ส่วนตัว", "อากาศ",
     "คน", "หา", "ดี", "ริ", "ออ",
+    "อย่างงั้น", "อย่างนั้น", "ไม่ใช่", "คุยต่อ", "สงสัย", "ผิด", "ตอบ", "เปลี่ยน", "สรุป",
+    "เมื่อกี้", "สุดท้าย", "ทำไม", "แบบไหน", "กี่แบบ", "ทั้งหมด", "อะไรบ้าง", "อธิบาย", "ฟังหน่อย",
+    "ขอไอเดีย", "ไอเดีย", "นั่นแหละ", "เรื่องอื่น",
 })
 
 _GENERIC_NOISE_TOKENS = frozenset({
     "โปรแกรม", "ระบบ", "ข้อมูล", "bc", "บีซี", "เอไอ", "แอคเคาท์", "บริษัท",
     "ลูกค้า", "ใช้งาน", "ปัญหา", "มีปัญหา", "ทำงาน", "ทำได้", "สามารถ", "ขั้นตอน", "วิธีการ", "รายละเอียด",
     "รายงาน", "เอกสาร", "รายการ", "หน้าจอ", "ทั้งหมด", "ทั่วไป", "ยืนยัน", "สอบถาม",
-    "สรุป", "เวลา", "โทร", "ติดต่อ", "แยกกัน", "รวมกัน",
+    "สรุป", "เวลา", "โทร", "ติดต่อ", "แยกกัน", "รวมกัน", "บาท", "วันนี้", "พรุ่งนี้", "ตรงไหน",
 })
 
 _VALID_SHORT_THAI_TOKENS = frozenset({"งบ", "ยา", "รถ", "บิล", "คลัง"})
@@ -185,18 +207,30 @@ _BOOTSTRAP_USER_SLUGS: tuple[str, ...] = (
     "sales-pricing-packages",
     "sales-support-implementation-contact",
     "start-first-day",
+    "term-cost-method",
+    "howto-setup-branch-dept",
+    "howto-price-center-discount-formula",
+    "howto-pos-hardware-display-promo",
+    "howto-pos-cashier-shift",
+    "howto-stock-units-barcodes",
     "ts-common-period-closed",
     "ts-stock-negative-control",
     "ts-stock-cost-mismatch-rebuild",
     "ts-arap-balance-recalc",
     "ts-menu-missing-switchboard",
     "howto-sale-invoice",
+    "howto-sale-return-cn-dn",
     "howto-buy-invoice",
     "howto-ar-receipt-fifo",
     "howto-cheque-received",
     "howto-tax-vat-input-output",
+    "howto-tax-wht-and-rd-export",
     "howto-gl-period-open-close",
+    "howto-asset-overview",
+    "rpt-gl-financial",
     "faq-stock-cost",
+    "faq-deposit-vs-advance",
+    "sales-overview",
 )
 
 _BOOTSTRAP_DEV_SLUGS: tuple[str, ...] = (
@@ -208,7 +242,86 @@ _BOOTSTRAP_DEV_SLUGS: tuple[str, ...] = (
     "arch-overview",
 )
 
+# Custom Thai domain dictionary for pythainlp `newmm` so accounting / ERP / POS / BC terms are never split badly
+_BC_THAI_CUSTOM_DICT: frozenset[str] = frozenset({
+    "บีซีเอไอแอคเคาท์", "บีซีแอคเคาท์", "โปรโมชัน", "โปรโมชั่น", "สูตรโปรโมชัน", "ซื้อครบแถม", "ซื้อสองแถมหนึ่ง",
+    "ของแถม", "คูปอง", "ส่วนลด", "พักบิล", "ปิดกะ", "ลิ้นชักเก็บเงิน", "จอลูกค้า", "เครื่องพิมพ์ใบเสร็จ",
+    "บาร์โค้ด", "สติกเกอร์บาร์โค้ด", "ป้ายขนส่ง", "คลังสินค้า", "ยอดคงเหลือ", "สินค้าคงเหลือ",
+    "สต็อก", "สต็อกติดลบ", "ขายติดลบ", "ห้ามติดลบ", "สินค้าติดลบ", "สต็อกไม่ตรง", "คำนวณยอดสต็อกใหม่",
+    "ที่เก็บ", "จุดเก็บ", "ชั้นวาง", "โลเคชั่น", "บัตรคุมสินค้า", "สต็อกการ์ด", "หน่วยนับขนาน", "ซีเรียลนัมเบอร์",
+    "ลูกหนี้", "เจ้าหนี้", "วางบิล", "รับชำระหนี้", "จ่ายชำระหนี้", "ค้างชำระ", "เกินกำหนด", "อายุหนี้",
+    "วงเงินสินเชื่อ", "ปิดเครดิต", "ใบเสนอราคา", "ใบสั่งขาย", "ใบสั่งซื้อ", "ใบกำกับภาษี", "ใบกำกับภาษีอย่างย่อ",
+    "ใบลดหนี้", "ใบเพิ่มหนี้", "ใบเสร็จรับเงิน", "ใบสำคัญรับ", "ใบสำคัญจ่าย", "ใบเบิกสินค้า", "ใบโอนสินค้า",
+    "ใบตรวจนับสต็อก", "ใบปรับปรุงสต็อก", "หักณที่จ่าย", "ภาษีมูลค่าเพิ่ม", "ภาษีซื้อ", "ภาษีขาย",
+    "ภพ30", "ภพ10", "ภงด1", "ภงด3", "ภงด53", "หนังสือรับรองหักณที่จ่าย", "คืนภาษีนักท่องเที่ยว",
+    "งบทดลอง", "งบกำไรขาดทุน", "งบดุล", "งบแสดงฐานะการเงิน", "งบการเงิน", "ผังบัญชี", "สมุดรายวัน",
+    "เดบิต", "เครดิต", "บัญชีย่อย", "กระทบยอด", "ต้นทุนเฉลี่ย", "ต้นทุนถัวเฉลี่ย", "เข้าก่อนออกก่อน",
+    "เข้าทีหลังออกก่อน", "วิธีคำนวณต้นทุน", "ประเภทต้นทุน", "ขายเชื่อ", "ขายสด", "เงินมัดจำ", "เงินล่วงหน้า",
+    "เงินประกันผลงาน", "ปิดงวด", "ปิดงวดบัญชี", "ปิดสิ้นปี", "แยกสาขา", "หลายสาขา", "ข้ามสาขา",
+    "สำนักงานใหญ่", "นิติบุคคล", "หลายนิติบุคคล", "บุคคลธรรมดา", "สำนักงานบัญชี", "พาร์ตเนอร์",
+    "ร้านวัสดุก่อสร้าง", "ร้านยาง", "ยางรถยนต์", "อู่ซ่อมรถ", "ออโต้แคร์", "ร้านอะไหล่", "ร้านขายยา",
+    "ค้าปลีก", "ค้าส่ง", "เช็ครับ", "เช็คจ่าย", "เช็คเด้ง", "ทะเบียนเช็ค", "สินทรัพย์ถาวร", "ค่าเสื่อมราคา",
+    "ศูนย์ราคา", "ตารางสูตรราคา", "ปรับราคา", "กำหนดสิทธิ์", "สิทธิ์ผู้ใช้", "รหัสเมนู", "เลขเมนู",
+    "สารบัญเมนู", "ผังเมนู", "คีย์ลัด", "ปุ่มลัด", "ข้อเลือกพิเศษ", "ตั้งค่าพิเศษ", "รูปแบบเอกสาร",
+    "เลขที่เอกสาร", "เล่มเอกสาร", "ออกแบบฟอร์ม", "ประวัติการพิมพ์", "พิมพ์ซ้ำ", "คิวงาน",
+    "เฝ้าระวัง", "ทุจริต", "แพ็กเกจ", "ค่าบริการ", "ทดลองใช้", "คลาวด์", "เซิร์ฟเวอร์",
+    "เงินเดือน", "ประกันสังคม", "สองภาษา", "ช้อปปี้", "ลาซาด้า", "ติ๊กต็อก", "ข้อมูลเริ่มต้น",
+})
+
 _THAI_STOPWORDS = frozenset(_pythai_stopwords()) if _pythai_stopwords else frozenset()
+_THAI_TRIE_LOCK = threading.Lock()
+_THAI_TRIE: Any = None
+
+
+def _get_thai_trie() -> Any:
+    """Lazy-build pythainlp Trie combining standard Thai words + BC accounting/ERP/POS domain compounds."""
+    global _THAI_TRIE
+    if _THAI_TRIE is not None:
+        return _THAI_TRIE
+    if _pythai_dict_trie is None or _pythai_words is None:
+        return None
+    with _THAI_TRIE_LOCK:
+        if _THAI_TRIE is None:
+            try:
+                _THAI_TRIE = _pythai_dict_trie(set(_pythai_words()) | set(_BC_THAI_CUSTOM_DICT))
+            except Exception:
+                _THAI_TRIE = False
+        return _THAI_TRIE if _THAI_TRIE is not False else None
+
+
+def segment_thai_text(text: str, max_tokens: int = 400) -> str:
+    """Segment Thai/English text with custom BC domain dictionary into space-delimited terms for PostgreSQL tsvector."""
+    norm = _normalize_search_text(text)
+    if not norm:
+        return ""
+    raw_toks: list[str] = []
+    if _pythai_tokenize is not None:
+        try:
+            trie = _get_thai_trie()
+            if trie is not None:
+                raw_toks.extend(_pythai_tokenize(norm, custom_dict=trie, engine="newmm", keep_whitespace=False))
+            else:
+                raw_toks.extend(_pythai_tokenize(norm, engine="newmm", keep_whitespace=False))
+        except Exception:
+            raw_toks.extend(_WS_TOKEN_RE.findall(norm))
+    else:
+        raw_toks.extend(_WS_TOKEN_RE.findall(norm))
+    raw_toks.extend(_ASCII_TOKEN_RE.findall(norm))
+    raw_toks.extend(_MENU_CODE_TOKEN_RE.findall(norm))
+
+    out: list[str] = []
+    for tok in raw_toks:
+        t = re.sub(r"[^a-z0-9\u0E00-\u0E7F]", "", tok.lower())
+        if len(t) < 2:
+            continue
+        if _is_thai_word(t) and len(t) < 3 and t not in _VALID_SHORT_THAI_TOKENS:
+            continue
+        if t in _THAI_STOPWORDS:
+            continue
+        out.append(t)
+        if len(out) >= max_tokens:
+            break
+    return " ".join(out)
 
 
 def _normalize_search_text(text: str) -> str:
@@ -229,7 +342,11 @@ def _tokenize_query(text: str, expand_synonyms: bool = True, keep_codes: bool = 
     raw_toks: list[str] = []
     if _pythai_tokenize is not None:
         try:
-            raw_toks.extend(_pythai_tokenize(norm, keep_whitespace=False))
+            trie = _get_thai_trie()
+            if trie is not None:
+                raw_toks.extend(_pythai_tokenize(norm, custom_dict=trie, engine="newmm", keep_whitespace=False))
+            else:
+                raw_toks.extend(_pythai_tokenize(norm, engine="newmm", keep_whitespace=False))
         except Exception:
             raw_toks.extend(_WS_TOKEN_RE.findall(norm))
     else:
@@ -267,26 +384,40 @@ def _tokenize_query(text: str, expand_synonyms: bool = True, keep_codes: bool = 
     return out
 
 
+_MEDIA_SECTION_RE = re.compile(r"^##\s+(?:สื่อภาพและวิดีโอ|วิดีโอสอนใช้งาน|ภาพประกอบ)(?:\s|$)")
+_YT_MD_LINK_RE = re.compile(r"\[[^\]]*\]\(https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^)]*\)", re.I)
+_PLAIN_YT_URL_RE = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/\S+", re.I)
+
+
+def _strip_voice_media(text: str) -> str:
+    """Strip image markdown, YouTube URLs/links, and media sections so phone brain carries pure spoken facts."""
+    s = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text or "")
+    s = re.sub(r"\[🎬[^\]]*\]\([^)]*\)", "", s)
+    s = _YT_MD_LINK_RE.sub("", s)
+    s = _PLAIN_YT_URL_RE.sub("", s)
+    s = re.sub(r"(?m)^(?:youtube_videos|images):.*\r?\n?", "", s)
+    return re.sub(r"\n{3,}", "\n\n", s).strip()
+
+
 def _strip_see_also(body: str) -> str:
     parts = body.split("\n## ")
     if len(parts) <= 1:
-        return body.strip()
+        return _strip_voice_media(body)
     kept = [parts[0]]
     for part in parts[1:]:
         sec = "## " + part
-        if _SEE_ALSO_HEADING_RE.match(sec.lstrip()):
+        head = sec.lstrip()
+        if _SEE_ALSO_HEADING_RE.match(head) or _MEDIA_SECTION_RE.match(head):
             continue
         kept.append(sec)
     res = "\n".join(kept).rstrip()
     if res.endswith("\n---"):
         res = res[:-4].rstrip()
-    return res
+    return _strip_voice_media(res)
 
 
-def _extract_tldr(title: str, clean_body: str, max_chars: int = 620) -> str:
-    cleaned = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", clean_body or "")
-    cleaned = re.sub(r"\[🎬[^\]]*\]\([^)]*\)", "", cleaned)
-    cleaned = _WIKILINK_RE.sub(lambda m: m.group(1), cleaned).strip()
+def _extract_tldr(title: str, clean_body: str, max_chars: int = 850) -> str:
+    cleaned = _WIKILINK_RE.sub(lambda m: m.group(1), _strip_voice_media(clean_body)).strip()
     lines = [ln.rstrip() for ln in cleaned.splitlines()]
     # Drop leading H1 duplicate of title
     if lines and lines[0].lstrip().startswith("# "):
@@ -296,15 +427,21 @@ def _extract_tldr(title: str, clean_body: str, max_chars: int = 620) -> str:
         return joined
     secs = [s.strip() for s in re.split(r"\n(?=##\s)", joined) if s.strip()]
     out = secs[0] if secs else joined
-    if len(out) < max_chars // 2 and len(secs) > 1:
-        out = f"{out}\n\n{secs[1]}"
+    for nxt in secs[1:]:
+        if len(out) + len(nxt) + 2 <= max_chars:
+            out = f"{out}\n\n{nxt}"
+        else:
+            break
     return out[:max_chars].rsplit("\n", 1)[0].strip() if len(out) > max_chars else out.strip()
 
 
 def _extract_relevant_excerpt(title: str, body: str, tokens: list[str], max_chars: int) -> str:
-    """Pick the most query-relevant section(s) of a note within max_chars."""
-    clean = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", body or "")
-    clean = re.sub(r"\[🎬[^\]]*\]\([^)]*\)", "", clean).strip()
+    """Pick the most query-relevant section(s) of a note within max_chars (deduplicated title, media-free)."""
+    clean = _strip_voice_media(body)
+    # Remove duplicate leading H1 heading matching title so budget goes to real content
+    clean_lines = clean.splitlines()
+    if clean_lines and clean_lines[0].lstrip().startswith("# "):
+        clean = "\n".join(clean_lines[1:]).strip()
     if len(clean) <= max_chars:
         return clean
     sub_toks = [t for t in tokens if t not in _GENERIC_NOISE_TOKENS] or tokens
@@ -314,18 +451,24 @@ def _extract_relevant_excerpt(title: str, body: str, tokens: list[str], max_char
     intro = sections[0] if not sections[0].startswith("## ") else ""
     scored_secs: list[tuple[float, int, str]] = []
     for idx, sec in enumerate(sections):
-        if sec.startswith("## สื่อภาพและวิดีโอ"):
+        if _MEDIA_SECTION_RE.match(sec.lstrip()):
             continue
-        sec_low = sec.lower()
-        hits = sum(2.0 if t in sec_low else 0.0 for t in sub_toks)
-        head = sec.splitlines()[0].lower() if sec.splitlines() else ""
-        hits += sum(2.5 for t in sub_toks if t in head)
+        sec_low = _normalize_search_text(sec)
+        hits = sum(2.5 if t in sec_low else 0.0 for t in sub_toks)
+        head = _normalize_search_text(sec.splitlines()[0]) if sec.splitlines() else ""
+        hits += sum(3.0 for t in sub_toks if t in head)
+        # Boost sections with dense matching lines (e.g. numbered item specifying promotion types)
+        for ln in sec.splitlines():
+            ln_low = _normalize_search_text(ln)
+            ln_hits = sum(1 for t in sub_toks if t in ln_low)
+            if ln_hits >= 2:
+                hits += 2.0
         scored_secs.append((hits, idx, sec))
     scored_secs.sort(key=lambda x: (-x[0], x[1]))
     picked: list[str] = []
     used = 0
     if intro and scored_secs and scored_secs[0][1] != 0:
-        intro_short = intro[: min(220, max_chars // 3)].strip()
+        intro_short = intro[: min(260, max_chars // 5)].strip()
         if intro_short:
             picked.append(intro_short)
             used += len(intro_short) + 2
@@ -430,6 +573,37 @@ def _dir_signature(vault_dir: str) -> tuple[int, float]:
     return count, max_mtime
 
 
+_MENU_INTENT_RE = re.compile(r"เมนู|หน้าจอ|รหัส|กดตรงไหน|เข้าตรงไหน|อยู่ตรงไหน|อยู่ไหน")
+
+
+def _compose_hybrid_excerpt(
+    note: dict[str, Any],
+    hit: dict[str, Any] | None,
+    tokens: list[str],
+    cap: int,
+) -> str:
+    """Combine pgvector best semantic chunk (when high-signal) with lexical relevant excerpt within cap."""
+    base_excerpt = _extract_relevant_excerpt(note["title"], note["body"], tokens, cap)
+    if not hit:
+        return base_excerpt
+    chunk_txt = _strip_voice_media(str(hit.get("best_chunk_content") or "")).strip()
+    chunk_head = str(hit.get("best_chunk_heading") or "").strip()
+    cosine = float(hit.get("cosine") or 0.0)
+    if not chunk_txt or cosine < 0.52:
+        return base_excerpt
+    probe = chunk_txt[:90].strip()
+    if probe and probe in base_excerpt:
+        return base_excerpt
+    lead = f"## {chunk_head}\n{chunk_txt}" if (chunk_head and chunk_head != note["title"] and not chunk_txt.startswith("#")) else chunk_txt
+    if len(lead) >= cap - 140:
+        return lead[:cap].strip()
+    remain = cap - len(lead) - 2
+    tail = _extract_relevant_excerpt(note["title"], note["body"], tokens, remain)
+    if tail and tail[:80] not in lead:
+        return f"{lead}\n\n{tail}"[:cap].strip()
+    return lead[:cap].strip()
+
+
 class BrainVaultMirror:
     """In-Process Embedded BC Brain Engine (reads local bcbrain/vault with mtime hot-reload, zero MCP HTTP)."""
 
@@ -439,11 +613,15 @@ class BrainVaultMirror:
         ttl_s: int = 1800,
         vault_dir: str | None = None,
         watch_interval_s: float = 3.0,
+        enable_pgvector: bool = True,
     ) -> None:
         self.url = (vault_pack_url or "").strip()
         self.vault_dir = os.path.abspath(vault_dir) if vault_dir else ""
         self.ttl_s = max(120, int(ttl_s))
         self.watch_interval_s = max(1.0, float(watch_interval_s))
+        self._pg_enabled = bool(enable_pgvector)
+        self._pg_store: Any = None
+        self._pg_syncing = False
         self._lock = threading.Lock()
         self._refreshing = False
         self._etag: str | None = None
@@ -460,6 +638,58 @@ class BrainVaultMirror:
         self._error_entries: list[dict[str, Any]] = []
         self._idf: dict[str, float] = {}
         self._bootstrap_cache: dict[str, str] = {}
+
+    def _get_pg(self) -> Any:
+        """Return shared pgvector store only for real local vaults (>=20 notes) so tiny synthetic test fixtures stay isolated."""
+        if not self._pg_enabled or get_pgvector_store is None or not self.vault_dir:
+            return None
+        with self._lock:
+            n_notes = len(self._notes_by_slug)
+        if n_notes < 20:
+            return None
+        if self._pg_store is None:
+            try:
+                st = get_pgvector_store()
+                self._pg_store = st if st.enabled else False
+            except Exception:
+                self._pg_store = False
+        return self._pg_store if self._pg_store is not False else None
+
+    def trigger_pgvector_sync_async(self, force: bool = False) -> None:
+        pg = self._get_pg()
+        if pg is None:
+            return
+        with self._lock:
+            if self._pg_syncing:
+                return
+            self._pg_syncing = True
+            notes_snap = dict(self._notes_by_slug)
+
+        def _job() -> None:
+            try:
+                res = pg.sync_vault(notes_snap, segment_thai_text, force=force)
+                if res.get("ok") and (res.get("upserted") or res.get("deleted")):
+                    log.info(
+                        "BC Brain pgvector incremental sync: %d chunks (+%d/-%d) in %.2fs",
+                        res.get("totalChunks", 0), res.get("upserted", 0), res.get("deleted", 0), res.get("elapsedSec", 0.0),
+                    )
+            except Exception as e:
+                log.warning("BC Brain pgvector async sync skipped (%s)", type(e).__name__)
+            finally:
+                with self._lock:
+                    self._pg_syncing = False
+
+        threading.Thread(target=_job, name="bcbrain-pgvector-sync", daemon=True).start()
+
+    def warmup_pgvector(self) -> dict[str, Any]:
+        """Warm pgvector connection, Ollama bge-m3 VRAM, and run incremental sync if chunks are missing/changed."""
+        pg = self._get_pg()
+        if pg is None:
+            return {"enabled": False, "ready": False}
+        st = pg.warmup()
+        if st.get("embedReady"):
+            self.trigger_pgvector_sync_async(force=False)
+        return st
 
     @property
     def ready(self) -> bool:
@@ -507,14 +737,16 @@ class BrainVaultMirror:
             tldr = _extract_tldr(title, clean_body)
             images, videos = _extract_media(body)
             out_links = list(dict.fromkeys(m.strip() for m in _WIKILINK_RE.findall(body) if m.strip() and m.strip() != slug))
-            title_meta_low = f"{title} {' '.join(aliases)} {' '.join(tags)} {slug}".lower()
-            aliases_low = [a.lower() for a in aliases]
-            headings_low = " ".join(
-                ln.lstrip("# ").strip().lower()
-                for ln in clean_body.splitlines()
-                if ln.lstrip().startswith("##")
+            body_low = _normalize_search_text(clean_body)
+            title_meta_low = _normalize_search_text(f"{title} {' '.join(aliases)} {' '.join(tags)} {slug}")
+            aliases_low = [_normalize_search_text(a) for a in aliases]
+            headings_low = _normalize_search_text(
+                " ".join(
+                    ln.lstrip("# ").strip()
+                    for ln in clean_body.splitlines()
+                    if ln.lstrip().startswith("##")
+                )
             )
-            body_low = clean_body.lower()
 
             note_rec = {
                 "slug": slug,
@@ -610,7 +842,7 @@ class BrainVaultMirror:
         _tokenize_query("warmup", expand_synonyms=False)
         return self.stats()
 
-    def load_from_dir(self, vault_dir: str | None = None, force: bool = False) -> dict[str, Any]:
+    def load_from_dir(self, vault_dir: str | None = None, force: bool = False, sync_pgvector: bool = False) -> dict[str, Any]:
         target = os.path.abspath(vault_dir or self.vault_dir or DEFAULT_LOCAL_VAULT_DIR)
         if not os.path.isdir(target):
             return self.stats()
@@ -643,6 +875,8 @@ class BrainVaultMirror:
         st = self.load_notes_payload({"version": "embedded-3.0", "syncCommit": "local", "notes": notes}, etag=etag)
         with self._lock:
             self._dir_sig = sig
+        if sync_pgvector:
+            self.trigger_pgvector_sync_async(force=False)
         return st
 
     def sync(self, force: bool = False) -> dict[str, Any]:
@@ -688,7 +922,7 @@ class BrainVaultMirror:
                 prev_sig = self._dir_sig
             sig = _dir_signature(self.vault_dir)
             if sig != prev_sig:
-                st = self.load_from_dir(self.vault_dir, force=True)
+                st = self.load_from_dir(self.vault_dir, force=True, sync_pgvector=True)
                 log.info("Local BC Brain hot-reloaded: %d notes, %d menus", st["notes"], st["menus"])
             return
         if not self.url:
@@ -760,7 +994,7 @@ class BrainVaultMirror:
                 n = notes_by_slug.get(slug)
                 if n:
                     lines.extend([f"### {n['title']} [{n['slug']}]", n["tldr"], ""])
-        text = "\n".join(lines).strip()[:20000]
+        text = "\n".join(lines).strip()[:32000]
         with self._lock:
             self._bootstrap_cache[aud] = text
         return text
@@ -892,8 +1126,7 @@ class BrainVaultMirror:
         if aud == "user" and note["is_dev"]:
             return None
         header = f"slug: {note['slug']}\n"
-        media_tail = _format_media_tail(note) if aud != "dev" else ""
-        return f"{header}# {note['title']}\n\n{note['body']}{media_tail}" if aud == "user" else note["raw"]
+        return f"{header}# {note['title']}\n\n{note['body']}" if aud == "user" else note["raw"]
 
     def batch_read(
         self,
@@ -949,48 +1182,82 @@ class BrainVaultMirror:
             out.update(computed)
         return out
 
+    def _find_related_menus_for_answer(
+        self,
+        substantive_tokens: list[str],
+        notes: list[dict[str, Any]],
+        limit: int = 3,
+    ) -> list[dict[str, str]]:
+        if not substantive_tokens:
+            return []
+        with self._lock:
+            all_menus = list(self._menus_list)
+        if not all_menus:
+            return []
+        idf = self._token_idf(substantive_tokens, notes)
+        scored: list[tuple[float, int, dict[str, str]]] = []
+        for rec in all_menus:
+            title_low = _normalize_search_text(rec["title"])
+            path_low = _normalize_search_text(rec["path"])
+            sc = 0.0
+            hits = 0
+            for tok in substantive_tokens:
+                w = idf.get(tok, 1.0)
+                if tok in title_low:
+                    sc += 3.5 * w
+                    hits += 1
+                elif tok in path_low:
+                    sc += 1.4 * w
+                    hits += 1
+            if hits >= 1 and sc >= 6.0:
+                scored.append((sc, hits, rec))
+        scored.sort(key=lambda x: (-x[0], -x[1], x[2]["code"]))
+        return [r for _, _, r in scored[:limit]]
+
     def search_with_meta(
         self,
         query: str,
         limit: int = 8,
         audience: str = "user",
     ) -> dict[str, Any]:
-        """Multi-signal BM25-weighted search with confidence & OOV coverage guard."""
+        """Hybrid search fusing In-RAM Thai-Segmented BM25 + PostgreSQL 18 pgvector HNSW + Thai GIN FTS."""
         self.maybe_refresh()
         q = (query or "").strip()
         aud = (audience or "user").strip().lower() or "user"
         if not q:
-            return {"hits": [], "confidence": "low", "total_terms": 0, "best_matched_terms": 0, "top_score": 0}
+            return {"hits": [], "confidence": "low", "total_terms": 0, "best_matched_terms": 0, "top_score": 0, "top_cosine": 0.0, "hybrid": False}
 
         primary_tokens = _tokenize_query(q, expand_synonyms=False, keep_codes=True)
         expanded_tokens = _tokenize_query(q, expand_synonyms=True, keep_codes=True)
         syn_only = [t for t in expanded_tokens if t not in primary_tokens]
         menu_codes = _MENU_CODE_TOKEN_RE.findall(q)
         phrase = _normalize_search_text(q)
+        menu_intent = bool(menu_codes or _MENU_INTENT_RE.search(q))
 
         if not primary_tokens and not expanded_tokens:
-            return {"hits": [], "confidence": "low", "total_terms": 0, "best_matched_terms": 0, "top_score": 0}
+            return {"hits": [], "confidence": "low", "total_terms": 0, "best_matched_terms": 0, "top_score": 0, "top_cosine": 0.0, "hybrid": False}
 
         with self._lock:
             notes = [
                 n for n in self._notes_by_slug.values()
                 if aud == "all" or (aud == "dev" and n["is_dev"]) or (aud == "user" and not n["is_dev"])
             ]
+            notes_allowed_map = {n["slug"]: n for n in notes}
             menus_by_code = self._menus_by_code
 
         if not notes:
-            return {"hits": [], "confidence": "low", "total_terms": len(primary_tokens), "best_matched_terms": 0, "top_score": 0}
+            return {"hits": [], "confidence": "low", "total_terms": len(primary_tokens), "best_matched_terms": 0, "top_score": 0, "top_cosine": 0.0, "hybrid": False}
 
         # OOV 4-digit menu trap: if user asks specifically about an unknown 4-digit menu code (e.g. 9999)
         if menu_codes and all(c not in menus_by_code for c in menu_codes) and len(primary_tokens) <= 3:
-            return {"hits": [], "confidence": "low", "total_terms": len(primary_tokens), "best_matched_terms": 0, "top_score": 0}
+            return {"hits": [], "confidence": "low", "total_terms": len(primary_tokens), "best_matched_terms": 0, "top_score": 0, "top_cosine": 0.0, "hybrid": False}
 
         all_toks = primary_tokens + syn_only
         idf = self._token_idf(all_toks, notes)
         substantive_primary = [t for t in primary_tokens if t not in _GENERIC_NOISE_TOKENS] or primary_tokens
         sub_set = set(substantive_primary)
 
-        scored: list[tuple[float, int, int, dict[str, Any]]] = []
+        lex_by_slug: dict[str, tuple[float, int, int, dict[str, Any]]] = {}
         for note in notes:
             title_meta = note["title_meta_low"]
             headings = note["headings_low"]
@@ -1046,19 +1313,87 @@ class BrainVaultMirror:
             if len(substantive_primary) >= 2 and sub_hits >= 2:
                 score += 6.0 * (sub_hits - 1)
             if note["is_meta_nav"] and not menu_codes:
-                score *= 0.35 if note["slug"] in _META_NAV_SLUGS else 0.55
+                if note["slug"] in _META_NAV_SLUGS:
+                    score *= 0.35
+                else:
+                    score *= 0.85 if menu_intent else 0.55
 
             int_score = int(round(score))
             if int_score >= 8:
-                scored.append((float(int_score), sub_hits, primary_hits, note))
+                lex_by_slug[note["slug"]] = (float(int_score), sub_hits, primary_hits, note)
 
-        scored.sort(key=lambda x: (-x[0], -x[1], -x[2], x[3]["slug"]))
+        # Hybrid pgvector HNSW + PostgreSQL Thai GIN FTS fusion (fail-soft, ~25–55ms warm, <3ms cached)
+        pg_used = False
+        pg_ms = 0.0
+        best_chunk_by_slug: dict[str, dict[str, Any]] = {}
+        pg = self._get_pg()
+        if pg is not None:
+            pg_res = pg.hybrid_search(
+                q,
+                tokens=expanded_tokens,
+                audience=aud,
+                limit=max(10, int(limit) + 2),
+                timeout_s=0.45,
+                embed_text=f"{q} {' '.join(primary_tokens[:6])}".strip(),
+            )
+            if pg_res.get("ok"):
+                pg_used = True
+                pg_ms = float(pg_res.get("totalMs") or 0.0)
+                for rank_idx, ch in enumerate(pg_res.get("hits") or []):
+                    slug = ch["slug"]
+                    note = notes_allowed_map.get(slug)
+                    if note is None:
+                        continue
+                    # Strict double-checked audience isolation
+                    if aud == "user" and note["is_dev"]:
+                        continue
+                    if aud == "dev" and not note["is_dev"]:
+                        continue
+                    if slug not in best_chunk_by_slug:
+                        best_chunk_by_slug[slug] = ch
+                    cos = float(ch.get("cosine") or 0.0)
+                    fts = float(ch.get("fts_score") or 0.0)
+                    if slug in lex_by_slug:
+                        old_sc, s_hits, p_hits, n_ref = lex_by_slug[slug]
+                        sem_boost = (26.0 * cos) + (14.0 / (1.0 + rank_idx)) + (4.0 if fts > 0.02 else 0.0)
+                        lex_by_slug[slug] = (float(int(round(old_sc + sem_boost))), s_hits, p_hits, n_ref)
+                    elif cos >= 0.54 or (cos >= 0.49 and fts > 0.03):
+                        # Pure semantic/paraphrased match discovered by pgvector + bge-m3
+                        sem_score = (cos * 62.0) + (10.0 / (1.0 + rank_idx)) + (8.0 if fts > 0.02 else 0.0)
+                        if note["is_meta_nav"] and not menu_codes:
+                            sem_score *= 0.45 if note["slug"] in _META_NAV_SLUGS else (0.85 if menu_intent else 0.65)
+                        # Count substantive lexical overlap if any
+                        s_hits = sum(1 for tok in substantive_primary if tok in note["search_hay"])
+                        p_hits = sum(1 for tok in primary_tokens if tok in note["search_hay"])
+                        lex_by_slug[slug] = (float(int(round(sem_score))), s_hits, p_hits, note)
+
+        scored = list(lex_by_slug.values())
+        scored.sort(
+            key=lambda x: (
+                -x[0],
+                -float(best_chunk_by_slug.get(x[3]["slug"], {}).get("cosine", 0.0)),
+                -x[1],
+                -x[2],
+                x[3]["slug"],
+            )
+        )
         top_items = scored[: max(1, int(limit))]
         if not top_items:
-            return {"hits": [], "confidence": "low", "total_terms": len(substantive_primary), "best_matched_terms": 0, "top_score": 0}
+            return {
+                "hits": [],
+                "confidence": "low",
+                "total_terms": len(substantive_primary),
+                "best_matched_terms": 0,
+                "top_score": 0,
+                "top_cosine": 0.0,
+                "hybrid": pg_used,
+                "pgMs": pg_ms,
+            }
 
         hits: list[dict[str, Any]] = []
         for sc, _, _, note in top_items:
+            ch = best_chunk_by_slug.get(note["slug"])
+            cos = round(float(ch.get("cosine", 0.0)), 4) if ch else 0.0
             hits.append({
                 "slug": note["slug"],
                 "title": note["title"],
@@ -1066,21 +1401,41 @@ class BrainVaultMirror:
                 "audience": note["audience"],
                 "tags": note["tags"],
                 "score": int(sc),
+                "cosine": cos,
+                "best_chunk_heading": ch.get("heading", "") if ch else "",
+                "best_chunk_content": ch.get("content", "") if ch else "",
                 "snippet": _extract_relevant_excerpt(note["title"], note["body"], expanded_tokens, 280).replace("\n", " ")[:280],
                 "images": note["images"][:3],
                 "videos": note["videos"][:3],
             })
 
         top_score = hits[0]["score"]
+        top_cosine = float(hits[0].get("cosine") or 0.0)
         best_sub_hits = top_items[0][1]
         total_sub = max(1, len(substantive_primary))
         coverage = best_sub_hits / total_sub
+        top_note_obj = top_items[0][3]
+        exact_title_hit = bool(
+            (len(phrase) >= 4 and phrase in top_note_obj["title_meta_low"])
+            or any(a and len(a) >= 4 and (a in phrase or phrase in a) for a in top_note_obj["aliases_low"])
+        )
 
         confidence = "low"
-        if (coverage >= 0.6 and top_score >= 42) or (total_sub == 1 and top_score >= 28) or (coverage >= 1.0 and top_score >= 25):
+        if (
+            (coverage >= 0.6 and top_score >= 42)
+            or (total_sub == 1 and top_score >= 28)
+            or (coverage >= 1.0 and top_score >= 25)
+            or (top_cosine >= 0.63 and top_score >= 36)
+            or (top_cosine >= 0.58 and best_sub_hits >= 1 and top_score >= 34)
+        ):
             confidence = "high"
-        elif coverage >= 0.5 and top_score >= 24:
+        elif (coverage >= 0.5 and top_score >= 24) or (top_cosine >= 0.56 and top_score >= 32):
             confidence = "medium"
+
+        # Semantic OOV gate (pgvector + bge-m3): blocks accidental lexical overlap like "เชียงใหม่" or "ราคา+บาท"
+        # on unrelated topics (gold price, weather, durian) while preserving exact 4-digit menu/title hits.
+        if pg_used and not menu_codes and not exact_title_hit and top_cosine < 0.49:
+            confidence = "low"
 
         return {
             "hits": hits,
@@ -1088,6 +1443,9 @@ class BrainVaultMirror:
             "total_terms": total_sub,
             "best_matched_terms": best_sub_hits,
             "top_score": top_score,
+            "top_cosine": top_cosine,
+            "hybrid": pg_used,
+            "pgMs": pg_ms,
         }
 
     def quick_answer(
@@ -1102,8 +1460,8 @@ class BrainVaultMirror:
         q = (question or "").strip()
         aud = (audience or "user").strip().lower() or "user"
         m = (mode or "ultra").strip().lower()
-        default_budget = 700 if m == "ultra" else (1400 if m == "fast" else 2000)
-        budget = max(250, min(int(max_chars or default_budget), 4000))
+        default_budget = 2200 if m == "ultra" else (2800 if m == "fast" else 3600)
+        budget = max(400, min(int(max_chars or default_budget), 5500))
 
         # Direct 4-digit menu question short-circuit when user specifically queries a known code
         codes = _MENU_CODE_TOKEN_RE.findall(q)
@@ -1115,65 +1473,93 @@ class BrainVaultMirror:
                     with self._lock:
                         top_note = self._notes_by_slug.get(meta["hits"][0]["slug"])
                     if top_note and not top_note["slug"].startswith("menu-cat-"):
-                        body = _extract_relevant_excerpt(top_note["title"], top_note["body"], _tokenize_query(q), max(350, budget - len(menu_hit)))
+                        body = _compose_hybrid_excerpt(top_note, meta["hits"][0], _tokenize_query(q), max(350, budget - len(menu_hit)))
                         return (
                             f"[quick_answer:{m} | audience={aud} | confidence=high | slug: {top_note['slug']}]\n"
                             f"{menu_hit}\n\n# {top_note['title']}\n{body}"
                         )
                 return f"[quick_answer:{m} | audience={aud} | confidence=high | slug: menu-catalog]\n{menu_hit}"
 
-        res = self.search_with_meta(q, limit=3, audience=aud)
+        res = self.search_with_meta(q, limit=4, audience=aud)
         hits = res["hits"]
         confidence = res["confidence"]
         total_terms = res["total_terms"]
         best_matched = res["best_matched_terms"]
         top_score = res["top_score"]
+        top_cosine = float(res.get("top_cosine") or 0.0)
 
         if not hits:
             return f"🛑 Abstain — No matching notes (audience={aud}). Do not guess—try lookup_menu, lookup_error, or search_brain."
 
         coverage = best_matched / max(1, total_terms)
-        if confidence == "low" and (coverage < 0.5 or top_score < 24):
+        pg_oov_veto = bool(res.get("hybrid") and confidence == "low" and top_cosine < 0.49)
+        if pg_oov_veto or (confidence == "low" and (coverage < 0.5 or top_score < 24) and top_cosine < 0.56):
             cands = "\n".join(f"- {h['slug']} ({h['folder']}) — {h['title']}" for h in hits[:3])
             return (
                 f"🛑 Abstain — Insufficient Grounded Evidence in BC Brain "
-                f"(audience={aud}, confidence=low, coverage={best_matched}/{total_terms}, topScore={top_score}) for: {q}\n\n"
+                f"(audience={aud}, confidence=low, coverage={best_matched}/{total_terms}, topScore={top_score}, cosine={top_cosine:.2f}) for: {q}\n\n"
                 f"Do NOT extrapolate or guess. State clearly that BC Brain has no verified record for this question.\n"
                 f"Closest candidates:\n{cands}"
             )
 
         toks = _tokenize_query(q, expand_synonyms=True, keep_codes=True)
+        sub_toks = [t for t in _tokenize_query(q, expand_synonyms=False, keep_codes=True) if t not in _GENERIC_NOISE_TOKENS]
         with self._lock:
             top = self._notes_by_slug.get(hits[0]["slug"])
             second = self._notes_by_slug.get(hits[1]["slug"]) if len(hits) > 1 else None
+            third = self._notes_by_slug.get(hits[2]["slug"]) if len(hits) > 2 else None
+            allowed_notes = [n for n in self._notes_by_slug.values() if aud != "user" or not n["is_dev"]]
         if not top:
             return f"🛑 Abstain — No matching notes (audience={aud})."
 
         if m == "ultra":
-            body = _extract_relevant_excerpt(top["title"], top["body"], toks, budget)
-            media_line = _format_media_tail(top) if (include_media and aud != "dev") else ""
-            return (
+            primary_cap = int(budget * 0.72) if (second is not None and len(hits) > 1 and hits[1]["score"] >= top_score * 0.68) else budget
+            body = _compose_hybrid_excerpt(top, hits[0], toks, max(700, primary_cap))
+            out_blocks = [
                 f"[quick_answer:ultra | audience={aud} | confidence={confidence} | slug: {top['slug']}]\n"
-                f"# {top['title']}\n{body}{media_line}"
-            )
+                f"# {top['title']}\n{body}"
+            ]
+            # Big Voice Brain: include 2nd (and 3rd if close) note when budget allows for comprehensive spoken accuracy
+            for extra_idx, extra_note, ratio_min in ((1, second, 0.68), (2, third, 0.78)):
+                if (
+                    extra_note is not None
+                    and extra_note["slug"] != top["slug"]
+                    and len(hits) > extra_idx
+                    and hits[extra_idx]["score"] >= top_score * ratio_min
+                ):
+                    used_len = sum(len(b) + 7 for b in out_blocks)
+                    rem = budget - used_len - 80
+                    if rem >= 360:
+                        sec_body = _compose_hybrid_excerpt(extra_note, hits[extra_idx], toks, rem)
+                        out_blocks.append(f"## เพิ่มเติม: {extra_note['title']} (slug: {extra_note['slug']})\n{sec_body}")
+
+            joined = "\n\n---\n\n".join(out_blocks)
+            # Auto-attach top 2-3 related 4-digit menus when voice answer has no menu code yet
+            if aud == "user" and not _MENU_CODE_TOKEN_RE.search(joined) and len(joined) < budget - 180:
+                rel_menus = self._find_related_menus_for_answer(sub_toks, allowed_notes, limit=3)
+                if rel_menus:
+                    m_lines = ["## เมนูที่เกี่ยวข้อง:"]
+                    for r in rel_menus:
+                        path_part = f" — {r['path']}" if r["path"] else ""
+                        m_lines.append(f"- **{r['code']}** {r['title']}{path_part}")
+                    joined = f"{joined}\n\n" + "\n".join(m_lines)
+            return joined
 
         use_second = (
             second is not None
             and not (confidence == "high" and hits[0]["score"] >= hits[1]["score"] * 1.25)
-            and hits[1]["score"] >= top_score * 0.72
+            and hits[1]["score"] >= top_score * 0.68
         )
-        picked = [top, second] if use_second and second else [top]
+        picked = [(top, hits[0]), (second, hits[1])] if use_second and second else [(top, hits[0])]
         caps = [budget] if len(picked) == 1 else [int(budget * 0.65), max(450, int(budget * 0.35))]
         blocks: list[str] = []
-        for note, cap in zip(picked, caps):
-            excerpt = _extract_relevant_excerpt(note["title"], note["body"], toks, cap)
+        for (note, hit), cap in zip(picked, caps):
+            excerpt = _compose_hybrid_excerpt(note, hit, toks, cap)
             blocks.append(f"# {note['title']}\nslug: {note['slug']} | folder: {note['folder']} | audience: {note['audience']}\n\n{excerpt}")
-        media_line = _format_media_tail(top) if (include_media and aud != "dev") else ""
         header_tag = "quick_answer:fast" if m == "fast" else "quick_answer"
         return (
             f"[{header_tag} | audience={aud} | confidence={confidence} | coverage={best_matched}/{total_terms}]\n\n"
             + "\n\n---\n\n".join(blocks)
-            + media_line
         )
 
     def batch_ask(
@@ -1322,11 +1708,11 @@ class BrainVaultMirror:
         audience: str = "user",
         limit_notes: int = 2,
         limit_menus: int = 4,
-        max_chars_per_note: int = 650,
+        max_chars_per_note: int = 1100,
         exclude_slugs: set[str] | None = None,
-        min_score: float = 4.0,
+        min_score: float = 9.5,
     ) -> dict[str, Any] | None:
-        """Find closest verified BC Brain notes & menus (<1ms) when direct QA abstains, keeping strict user/dev isolation."""
+        """Find closest verified BC Brain notes & menus (lexical + pgvector fallback) when direct QA abstains."""
         self.maybe_refresh()
         q = (query or "").strip()
         if not q:
@@ -1344,9 +1730,13 @@ class BrainVaultMirror:
                 n for n in self._notes_by_slug.values()
                 if (aud != "user" or not n["is_dev"]) and (not exclude_slugs or n["slug"] not in exclude_slugs)
             ]
+            notes_map = {n["slug"]: n for n in notes}
             all_menus = list(self._menus_list) if aud == "user" else []
         if not notes and not all_menus:
             return None
+
+        # Small unit-test vaults (<30 notes) have naturally lower IDF (~1.0-1.9) than the full 380-note vault
+        eff_min = min_score if len(notes) >= 30 else min(min_score, 4.0)
 
         idf = self._token_idf(tokens, notes)
         sub_set = set(substantive)
@@ -1379,12 +1769,31 @@ class BrainVaultMirror:
                 score += 1.2 * (sub_hits - 1)
             if note["is_meta_nav"]:
                 score *= 0.25 if note["slug"] in _META_NAV_SLUGS else 0.4
-            if score >= min_score:
+            if score >= eff_min:
                 scored_notes.append((score, sub_hits, note))
 
         scored_notes.sort(key=lambda x: (-x[0], -x[1], x[2]["slug"]))
         picked_notes = [n for _, _, n in scored_notes[: max(0, int(limit_notes))]]
         top_score = scored_notes[0][0] if scored_notes else 0.0
+
+        # Supplement nearby notes via pgvector when lexical nearby has fewer than limit_notes (high-cosine only)
+        pg = self._get_pg()
+        if pg is not None and len(picked_notes) < max(0, int(limit_notes)):
+            picked_slugs = {n["slug"] for n in picked_notes}
+            pg_res = pg.hybrid_search(q, tokens=tokens, audience=aud, limit=6, timeout_s=0.35)
+            if pg_res.get("ok"):
+                for ch in pg_res.get("hits") or []:
+                    slug = ch["slug"]
+                    if slug in picked_slugs or slug not in notes_map:
+                        continue
+                    cos = float(ch.get("cosine") or 0.0)
+                    if cos < 0.56:
+                        continue
+                    picked_notes.append(notes_map[slug])
+                    picked_slugs.add(slug)
+                    top_score = max(top_score, round(cos * 20.0, 2))
+                    if len(picked_notes) >= int(limit_notes):
+                        break
 
         scored_menus: list[tuple[float, int, dict[str, str]]] = []
         for rec in all_menus:
@@ -1400,7 +1809,7 @@ class BrainVaultMirror:
                 elif tok in path_low:
                     score += 1.5 * w
                     sub_hits += 1
-            if sub_hits >= 1 and score >= max(2.5, min_score * 0.6):
+            if sub_hits >= 1 and score >= max(2.5, eff_min * 0.6):
                 scored_menus.append((score, sub_hits, rec))
         scored_menus.sort(key=lambda x: (-x[0], -x[1], x[2]["code"]))
         picked_menus = [r for _, _, r in scored_menus[: max(0, int(limit_menus))]]

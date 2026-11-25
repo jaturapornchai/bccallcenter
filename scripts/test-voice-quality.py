@@ -1037,6 +1037,82 @@ def test_embedded_local_bcbrain_no_mcp_api():
         assert hb.stats()["notes"] == 2 and "ข้อมูลใหม่ทันที" in (hb.read_note("faq-hot-new", audience="user") or "")
 
 
+def test_voice_first_big_brain_and_zyx59_fixes():
+    """Regression from 2026-11-25 calls (zyx59, bzy7y, 8y14z) + voice-first media-free big brain."""
+    from brain_mirror import BrainVaultMirror
+
+    brain = BrainVaultMirror(vault_dir=C.LOCAL_BRAIN_DIR)
+    brain.load_from_dir(C.LOCAL_BRAIN_DIR, force=True)
+
+    # 1. STT spelling "โปรโมชั่น" (with tone mark) must match "โปรโมชัน" note and include "10 รูปแบบ" with big voice budget
+    qa_promo = brain.quick_answer("สรุปว่าโปรโมชั่นมีทั้งหมดกี่แบบอะไรบ้าง", audience="user", mode="ultra", max_chars=2200)
+    assert "🛑" not in qa_promo, f"promotion query must not abstain: {qa_promo[:250]}"
+    assert "10 รูปแบบ" in qa_promo, f"big voice brain must include '10 รูปแบบ': {qa_promo[:500]}"
+    assert "youtube.com" not in qa_promo.lower() and "![" not in qa_promo, "voice brain must strip images/YouTube"
+
+    # 2. Filler/frustration turns ("ไม่เป็นอย่างงั้น") must NOT pull unrelated deposit notes via low nearby score
+    assert brain.search_nearby("ไม่เป็นอย่างงั้น", audience="user") is None, "filler turn must not match deposit note"
+    assert brain.search_nearby("คุยต่อ", audience="user") is None, "bare continuation must not match random note"
+
+    # 3. Bootstrap pack must be large, voice-ready, and free of YouTube URLs or images
+    bp = brain.get_bootstrap_pack("user")
+    assert len(bp) > 8000 and "youtube.com" not in bp.lower() and "![" not in bp
+
+    # 4. Context isolation & callback detection from zyx59/8y14z
+    scope = load_symbols({
+        "_FOLLOWUP_START_RE", "_VAGUE_FOLLOWUP_RE", "_STANDALONE_TOPIC_RE",
+        "_BOILERPLATE_CTX_RE", "_NON_SEARCH_STRIP_RE", "_CB_INTENT_ONLY_RE",
+        "_REAL_Q_OR_PRODUCT_RE", "_CALL_META_ASK_RE", "_CLOSING_ONLY_RE",
+        "_PHONE_INTENT_HINTS", "_expand_phone_intent_queries",
+        "_stt_ears_diverge", "_extract_recent_topic", "_build_phone_fallback_queries",
+        "_is_non_search_phone_turn",
+    })
+    hist = [
+        {"role": "user", "content": "อธิบายต่อเลย"},
+        {"role": "assistant", "content": "ได้เลยครับลุงจืด ระบบตั้งบาร์โค้ดผูกกับหน่วยนับได้ครับ แต่ละบาร์โค้ดกำหนดราคาขายได้สูงสุดสี่ระดับ"},
+    ]
+    qs_promo = scope["_build_phone_fallback_queries"]("แล้วมีโปรโมชั่นกี่แบบ", [], hist)
+    assert all("บาร์โค้ด" not in q for q in qs_promo), f"standalone promotion question must not inherit barcode reply: {qs_promo}"
+    assert scope["_is_non_search_phone_turn"]("งั้นคุณบอกให้พนักงานโทรหาผมด้วยแล้วกัน", "", hist) is True
+
+
+def test_thai_custom_segmentation_and_pgvector_hybrid():
+    """Verify pythainlp custom BC dict segmentation + PostgreSQL pgvector HNSW Hybrid RRF + user/dev isolation + fail-soft."""
+    from brain_mirror import BrainVaultMirror, segment_thai_text, _tokenize_query
+    from brain_pgvector import BrainPgVectorStore
+
+    # 1. Custom BC Thai dictionary keeps domain compounds intact (no bad fragmentation)
+    seg = segment_thai_text("ตั้งค่าใบกำกับภาษีอย่างย่อ พักบิลหน้าร้าน สต็อกติดลบ เข้าทีหลังออกก่อน โปรโมชั่น")
+    for expected in ("ใบกำกับภาษีอย่างย่อ", "พักบิล", "สต็อกติดลบ", "เข้าทีหลังออกก่อน", "โปรโมชัน"):
+        assert expected in seg, f"missing custom Thai token {expected!r} in: {seg}"
+    promo_toks = _tokenize_query("ซื้อสองแถมหนึ่งตั้งค่ายังไง", expand_synonyms=False)
+    assert "โปรโมชัน" in promo_toks and "ซื้อครบแถม" in promo_toks, f"buy-get normalization failed: {promo_toks}"
+
+    # 2. Fail-soft when pgvector disabled or unreachable (never crashes or blocks phone calls)
+    disabled_pg = BrainPgVectorStore(enabled=False)
+    assert disabled_pg.hybrid_search("โปรโมชั่น", tokens=["โปรโมชัน"], audience="user")["ok"] is False
+
+    # 3. Live pgvector Hybrid RRF verification when local bccallcenter-pg is running
+    brain = BrainVaultMirror(vault_dir=C.LOCAL_BRAIN_DIR, enable_pgvector=True)
+    brain.load_from_dir(C.LOCAL_BRAIN_DIR, force=True, sync_pgvector=False)
+    pg = brain._get_pg()
+    if pg is not None and pg.stats().get("ready"):
+        res = brain.search_with_meta("ซื้อสองแถมหนึ่งตั้งค่ายังไง", limit=5, audience="user")
+        assert res["hybrid"] is True and res["hits"], f"expected pgvector hybrid hits: {res}"
+        assert res["hits"][0]["slug"] in ("howto-pos-hardware-display-promo", "howto-price-center-discount-formula")
+        assert all(h["audience"] == "user" for h in res["hits"]), "pgvector user search leaked dev note!"
+
+        # Semantic OOV gate blocks unrelated queries with accidental keyword overlap
+        oov_gold = brain.quick_answer("ราคาทองคำแท่งวันนี้บาทละเท่าไหร่ครับ", audience="user")
+        oov_weather = brain.quick_answer("อากาศที่เชียงใหม่พรุ่งนี้ฝนจะตกไหม", audience="user")
+        assert "🛑 Abstain" in oov_gold, f"gold price must abstain: {oov_gold[:200]}"
+        assert "🛑 Abstain" in oov_weather, f"weather must abstain: {oov_weather[:200]}"
+
+        # Strict SQL audience isolation check directly on pgvector store
+        pg_user = pg.hybrid_search("ic_trans sql api endpoint", tokens=["ic_trans", "sql", "api"], audience="user", limit=8)
+        assert pg_user["ok"] is True and all(h["audience"] == "user" for h in pg_user["hits"]), "pgvector SQL leaked dev chunk!"
+
+
 TESTS = [
     test_caller_name_rejects_connectors_and_accepts_real_names,
     test_stt_stutter_detector_and_ear2_fallback,
@@ -1055,6 +1131,8 @@ TESTS = [
     test_abstain_nearby_fallback_zero_hallucination,
     test_wok98_log_5_improvements,
     test_embedded_local_bcbrain_no_mcp_api,
+    test_voice_first_big_brain_and_zyx59_fixes,
+    test_thai_custom_segmentation_and_pgvector_hybrid,
 ]
 
 
