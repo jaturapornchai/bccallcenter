@@ -8,6 +8,7 @@ import {
   BellOff,
   BellRing,
   Bot,
+  Brain,
   Briefcase,
   ChevronRight,
   Clock3,
@@ -48,6 +49,7 @@ import {
 import { AnalyticsWorkspace } from "@/components/AnalyticsWorkspace";
 import { AuthControls } from "@/components/AuthControls";
 import type { AuthState } from "@/components/AuthControls";
+import { BrainWorkspace } from "@/components/BrainWorkspace";
 import { CallQaDrawer, formatScore, scoreTone, sentimentMeta } from "@/components/CallQaDrawer";
 import { CallbackAlertPanel, CallbackTicketList } from "@/components/CallbackAlertPanel";
 import { CrmWorkspace } from "@/components/CrmWorkspace";
@@ -97,7 +99,7 @@ const INITIAL_STATE: ConsoleState = {
 };
 
 type RightTab = "callbacks" | "qa" | "callers" | "history";
-type MainView = "console" | "crm" | "analytics";
+type MainView = "console" | "crm" | "analytics" | "brain";
 
 export default function ConsolePage() {
   const [theme, setTheme] = useState<"dark" | "light">("light");
@@ -789,6 +791,14 @@ export default function ConsolePage() {
                 <BarChart3 className="h-3.5 w-3.5" />
                 <span>สถิติ &amp; ROI</span>
               </button>
+              <button
+                type="button"
+                onClick={() => setActiveView("brain")}
+                className={`cc-btn h-7 px-3 text-xs ${activeView === "brain" ? "cc-btn--tone tone-held" : "border-transparent bg-transparent"}`}
+              >
+                <Brain className="h-3.5 w-3.5" />
+                <span>สมอง BC</span>
+              </button>
             </div>
 
             <span className={`cc-chip h-9 rounded-xl px-3 font-mono tabular-nums ${wsConnected ? "tone-in" : "tone-held"}`} title="สถานะเชื่อมต่อเรียลไทม์ (WebSocket)">
@@ -960,7 +970,9 @@ export default function ConsolePage() {
           </div>
         )}
 
-        {activeView === "analytics" ? (
+        {activeView === "brain" ? (
+          <BrainWorkspace readOnly={isReadOnly} onNotify={(m) => setToast(m)} />
+        ) : activeView === "analytics" ? (
           <AnalyticsWorkspace readOnly={isReadOnly} syncVersion={syncVersion} onNotify={(m) => setToast(m)} />
         ) : activeView === "crm" ? (
           <CrmWorkspace

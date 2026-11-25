@@ -13,3 +13,7 @@
 - **Brand**: ใช้ชื่อ **ระบบ BC Call Center** และผู้ช่วยเสียง **J.A.R.V.I.S** (ไม่ใช้ `javis.bcsmethai.com`)
 - **Unified Repo (รวม BC Brain เป็นเนื้อเดียวกัน ไม่ผ่าน MCP API)**: รวม Frontend/SIP Engine (`server.mjs`, `lib/`, `src/`), ผู้ช่วยเสียง **J.A.R.V.I.S** (`jarvis/`), คลังความรู้ **Embedded BC Brain** (`bcbrain/vault/`, อ่านตรงเข้า RAM ผ่าน `jarvis/brain_mirror.py` พร้อม mtime hot-reload โดยไม่ผ่าน MCP HTTP API), และชุด `livekit-voice-ai/` อยู่ในโปรเจกต์นี้ทั้งหมด
 - **ปรับปรุงคลังความรู้ใน `bcbrain/vault/` ได้โดยตรง**: เมื่อพบช่องว่างความรู้จากสายจริงหรือได้ข้อมูลยืนยันจากลุงจืด ให้เพิ่ม/แก้ไขโน้ต `.md` ใน `bcbrain/vault/` ของโปรเจกต์นี้ได้ทันที (ห้ามเดาหรือแต่งเติมข้อมูลเอง, ล็อกโซน `audience: "user"` ปลอดศัพท์โค้ด/SQL สำหรับสายลูกค้า, และสแกนความลับก่อน commit เสมอ) ส่วนหัวข้อที่ยังรอข้อเท็จจริงจากลุงจืดให้จดไว้ใน `docs/brain-wishlist.md`
+
+## UX/UI Ownership Rule (Claude Opus)
+- **ให้ Claude Opus รับผิดชอบงาน UX/UI หน้าจอทั้งหมดของโปรเจกต์นี้**: ทุกงานออกแบบ ปรับเลย์เอาต์ ปรับสไตล์/ธีม จัดตำแหน่งองค์ประกอบ และตรวจรีวิว UX/UI บนหน้าเว็บทั้งหมด (`src/app/**`, `src/components/**`, `jarvis/static/**`) ให้มอบหมายหรือให้ **Claude Opus** (รุ่นสูงสุดที่มี เช่น `Claude Opus 5.5 (High)`) เป็นผู้รับผิดชอบหลักเสมอ
+- **มาตรฐาน UX/UI ที่ต้องยึด**: ภาษาไทยเข้าใจง่ายสำหรับผู้ใช้คนไทย, Baseline-First (ปุ่ม/แท็บ/ช่องกรอก/ไอคอน/Badge ในแถวเดียวกันอยู่ระนาบ Baseline เป๊ะ), ใช้ Global Shared CSS (`.cc-*` / `.tone-*`) รองรับทั้งโหมดมืดและโหมดสว่าง 100% และตรวจสอบหน้าจอจริงผ่าน Browser หลัง Deploy เสมอ

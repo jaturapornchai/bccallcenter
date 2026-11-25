@@ -14,6 +14,7 @@ import {
   verifyGoogleIdToken,
   verifySessionFromCookieHeader,
 } from "./lib/auth.mjs";
+import { LocalBrainStore } from "./lib/brain-store.mjs";
 import { getRecordingPath } from "./lib/call-recorder.mjs";
 import { SipEngine } from "./lib/sip-engine.mjs";
 
@@ -28,6 +29,8 @@ const port = Number(process.env.PORT || 3000);
 
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
+
+const brainStore = new LocalBrainStore();
 
 const sip = new SipEngine({
   host: process.env.SIP_HOST || "",
@@ -421,6 +424,45 @@ app.prepare().then(async () => {
         topModules,
         cache: cacheStats,
       });
+    }
+
+    // Embedded Local BC Brain Explorer APIs (reads bcbrain/vault in RAM with hot-reload; viewer restricted to user zone)
+    if (urlPath === "/api/brain/overview" && req.method === "GET") {
+      const session = verifySessionFromCookieHeader(req.headers.cookie || "");
+      const isAdmin = Boolean(session?.isAdmin);
+      const reqUrl = new URL(req.url || "/", "http://127.0.0.1");
+      if (reqUrl.searchParams.get("refresh") === "1") {
+        brainStore.reload(true);
+      }
+      const audience = reqUrl.searchParams.get("audience") || "user";
+      const folder = reqUrl.searchParams.get("folder") || "";
+      const q = (reqUrl.searchParams.get("q") || "").slice(0, 160);
+      const limit = Number(reqUrl.searchParams.get("limit") || 150);
+      return sendJson(res, 200, brainStore.getOverview({ isAdmin, audience, folder, q, limit }));
+    }
+
+    if (urlPath === "/api/brain/menus" && req.method === "GET") {
+      const reqUrl = new URL(req.url || "/", "http://127.0.0.1");
+      if (reqUrl.searchParams.get("refresh") === "1") {
+        brainStore.reload(true);
+      }
+      const q = (reqUrl.searchParams.get("q") || "").slice(0, 120);
+      const group = (reqUrl.searchParams.get("group") || "").slice(0, 4);
+      const limit = Number(reqUrl.searchParams.get("limit") || 150);
+      return sendJson(res, 200, brainStore.searchMenus({ q, group, limit }));
+    }
+
+    if (urlPath.startsWith("/api/brain/note/") && req.method === "GET") {
+      const session = verifySessionFromCookieHeader(req.headers.cookie || "");
+      const isAdmin = Boolean(session?.isAdmin);
+      let rawSlug = "";
+      try {
+        rawSlug = decodeURIComponent(urlPath.slice("/api/brain/note/".length));
+      } catch {
+        return sendJson(res, 400, { ok: false, error: "รหัสโน้ตไม่ถูกต้อง" });
+      }
+      const result = brainStore.getNote(rawSlug, { isAdmin });
+      return sendJson(res, result.status || (result.ok ? 200 : 400), result);
     }
 
     return handle(req, res);

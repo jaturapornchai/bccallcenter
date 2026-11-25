@@ -287,6 +287,38 @@ try {
   assert.ok(bridgeSrc.includes("const MULAW_MAX = 32635") && bridgeSrc.includes("const MULAW_BIAS = 0x84"), "audio-bridge.ts must use ITU-T G.711 16-bit table");
   assert.ok(bridgeSrc.includes("async disableAudio()") && bridgeSrc.includes("if (!this.isReady || !this.ctx"), "audio-bridge.ts must cleanly stop mic and output on disableAudio()");
 
+  // 7. Embedded LocalBrainStore viewer isolation, path-traversal block & 4-digit menu search
+  const { LocalBrainStore } = await import(pathToFileURL(path.join(origCwd, "lib", "brain-store.mjs")).href);
+  const brainStore = new LocalBrainStore({
+    vaultDir: path.join(origCwd, "bcbrain", "vault"),
+    wishlistPath: path.join(origCwd, "docs", "brain-wishlist.md"),
+  });
+  const viewerOv = brainStore.getOverview({ isAdmin: false, audience: "dev", limit: 400 });
+  assert.equal(viewerOv.audience, "user", "viewer must be pinned to user audience even if requesting dev");
+  assert.ok(viewerOv.stats.totalNotes >= 240 && viewerOv.stats.devNotes === 0, `viewer must only see user notes: ${JSON.stringify(viewerOv.stats)}`);
+  assert.ok(viewerOv.notes.every((n) => n.audience === "user"), "viewer overview must never leak dev notes");
+
+  const adminOv = brainStore.getOverview({ isAdmin: true, audience: "all", limit: 400 });
+  assert.ok(adminOv.stats.totalNotes >= 350 && adminOv.stats.devNotes >= 100, `admin must see full embedded vault: ${JSON.stringify(adminOv.stats)}`);
+
+  const viewerDevNote = brainStore.getNote("api-overview", { isAdmin: false });
+  assert.equal(viewerDevNote.ok, false);
+  assert.equal(viewerDevNote.status, 403, "viewer must get 403 for dev note");
+  const adminDevNote = brainStore.getNote("api-overview", { isAdmin: true });
+  assert.equal(adminDevNote.ok, true);
+  assert.equal(adminDevNote.status, 200);
+
+  const traversal = brainStore.getNote("../../.env.local", { isAdmin: true });
+  assert.equal(traversal.ok, false);
+  assert.equal(traversal.status, 400, "path traversal slug must be rejected with 400");
+
+  const viewerSalesNote = brainStore.getNote("sales-overview", { isAdmin: false });
+  assert.equal(viewerSalesNote.ok, true);
+  assert.equal(/\b0[689]\d-\d{3}-\d{4}\b/.test(viewerSalesNote.note.body), false, "viewer note body must mask mobile digits");
+
+  const menuRes = brainStore.searchMenus({ q: "4013" });
+  assert.ok(menuRes.total >= 700 && menuRes.menus.some((m) => m.code === "4013"), "menu search must find 4013");
+
   console.log("ALL_SECURITY_AND_AUDIO_TESTS_PASSED");
 } finally {
   if (origAdminEmail === undefined) delete process.env.ADMIN_EMAIL;
