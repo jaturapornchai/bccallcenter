@@ -2811,16 +2811,94 @@ def _is_non_search_phone_turn(heard: str, detected_name: str, history: list[dict
     return False
 
 
+_EXPLICIT_TOPIC_SWITCH_RE = re.compile(
+    r"(?:เปลี่ยนเรื่อง|เรื่องอื่น|ถามเรื่องอื่น|อีกเรื่อง(?:นึง|หนึ่ง)?|ขอถามอีกเรื่อง|มาคุยเรื่อง|หันมาคุยเรื่อง|ย้ายไปเรื่อง)"
+)
+_CONTINUATION_HINT_RE = re.compile(
+    r"(?:ต่อเลย|เล่าต่อ|อธิบายต่อ|คุยต่อ|แล้วยังไง|แล้วต้อง|แล้วถ้า|แล้วมัน|มันทำ|อันนั้น|อันนี้|เรื่องนี้|เรื่องเดิม|"
+    r"กี่แบบ|กี่สูตร|กี่วิธี|ตั้งค่ายังไง|ตั้งค่าตรงไหน|ทำยังไง|กดตรงไหน|เข้าเมนูไหน|รายละเอียด|ตัวอย่าง|เพิ่มเติม)"
+)
+_BRAIN_MISS_LOG_PATH = os.path.join(os.path.dirname(C.BASE_DIR), "data", "brain-miss-log.jsonl")
+_BRAIN_MISS_LOCK = threading.Lock()
+
+
+def _record_brain_miss(
+    query: str,
+    *,
+    ctx_topic: str = "",
+    reason: str = "abstain",
+    top_slug: str = "",
+    top_cosine: float = 0.0,
+    lang: str = "th",
+) -> None:
+    """Append sanitized missed/abstained customer query to data/brain-miss-log.jsonl for continuous brain improvement."""
+    q_clean = re.sub(r"\b0[689]\d[- ]?\d{3}[- ]?\d{4}\b", "[phone]", str(query or "")).strip()
+    q_clean = LONG_NUMBER.sub("[num]", q_clean).strip()
+    if len(q_clean) < 5:
+        return
+    if re.fullmatch(r"(?:สวัสดี|ครับ|ค่ะ|คะ|อืม|ใช่|โอเค|ขอบคุณ|ไม่เป็นอย่างงั้น|คุยต่อ|\s)+", q_clean):
+        return
+    ctx_clean = re.sub(r"\b0[689]\d[- ]?\d{3}[- ]?\d{4}\b", "[phone]", str(ctx_topic or "")).strip()[:80]
+    rec = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "query": q_clean[:180],
+        "ctxTopic": ctx_clean,
+        "reason": str(reason or "abstain")[:40],
+        "topSlug": str(top_slug or "")[:80],
+        "topCosine": round(float(top_cosine or 0.0), 3),
+        "lang": str(lang or "th")[:8],
+    }
+    try:
+        os.makedirs(os.path.dirname(_BRAIN_MISS_LOG_PATH), exist_ok=True)
+        with _BRAIN_MISS_LOCK:
+            with open(_BRAIN_MISS_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def _is_explicit_topic_switch(heard: str) -> bool:
+    s = (heard or "").strip()
+    if not s:
+        return False
+    if _EXPLICIT_TOPIC_SWITCH_RE.search(s):
+        return True
+    return len(s) >= 14 and bool(_STANDALONE_TOPIC_RE.search(s))
+
+
+def _build_topic_pin_hint(heard: str, history: list[dict]) -> str:
+    """Build an explicit system pin hint so the LLM stays strictly on the current topic until the caller switches."""
+    if not history:
+        return ""
+    s = (heard or "").strip()
+    if not s or _is_explicit_topic_switch(s):
+        return ""
+    ctx = _extract_recent_topic(history)
+    if not ctx:
+        return ""
+    return (
+        f"กฎต่อเนื่องหัวข้อเดิม: ตอนนี้กำลังคุยต่อเนื่องเรื่อง \"{ctx}\" อยู่ "
+        "ห้ามตอบข้ามไปเรื่องอื่นหรือโมดูลอื่นที่ลูกค้าไม่ได้ถาม ให้ตอบต่อเนื่องในเรื่องเดิมนี้จนกว่าลูกค้าจะเปลี่ยนเรื่องชัดเจน "
+    )
+
+
 def _build_phone_fallback_queries(heard: str, alt_heard: list[str], history: list[dict]) -> list[str]:
-    """Zero-latency (0ms) multi-ear + context query builder when early search_words is absent or skipped."""
+    """Zero-latency (0ms) multi-ear + topic-pinned context query builder when early search_words is absent or skipped."""
     base = (heard or "").strip()
     if not base:
         return []
-    # Attach recent topic context whenever the turn is short OR opens with a continuation word (e.g. "แล้วมีรายงานให้ดูไหม")
-    # unless the caller clearly asked a standalone topic question (e.g. "แล้วก็เบอร์โทรติดต่อเบอร์อะไร").
+    # Pin recent topic context unless the caller explicitly switched to a standalone new topic
     ctx_anchor = ""
-    standalone_topic = len(base) >= 14 and bool(_STANDALONE_TOPIC_RE.search(base))
-    if history and not standalone_topic and (len(base) <= 20 or bool(_FOLLOWUP_START_RE.match(base)) or bool(_VAGUE_FOLLOWUP_RE.search(base))):
+    sw_fn = globals().get("_is_explicit_topic_switch")
+    topic_switched = bool(sw_fn(base)) if callable(sw_fn) else (len(base) >= 14 and bool(_STANDALONE_TOPIC_RE.search(base)))
+    cont_re = globals().get("_CONTINUATION_HINT_RE")
+    wants_continuity = (
+        len(base) <= 36
+        or bool(_FOLLOWUP_START_RE.match(base))
+        or bool(_VAGUE_FOLLOWUP_RE.search(base))
+        or bool(cont_re and cont_re.search(base))
+    )
+    if history and not topic_switched and wants_continuity:
         ctx_anchor = _extract_recent_topic(history)
     queries: list[str] = []
     q_primary = f"{base} {ctx_anchor}".strip()[:120] if ctx_anchor and ctx_anchor not in base else base[:120]
@@ -3339,15 +3417,27 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 read = any(n in ("read_note", "batch_read") for n, _ in calls)
             has_nearby = "[ข้อมูลใกล้เคียงจากคลังความรู้ BC" in " ".join(texts)
             ctx_topic = _extract_recent_topic(history)
+            topic_switched = _is_explicit_topic_switch(heard)
+            if abstained and phone_mode:
+                m_cos = re.search(r"cosine=([0-9.]+)", qa_text or "")
+                m_slug = re.search(r"-\s+([a-z0-9._-]+)\s+\(", qa_text or "")
+                _record_brain_miss(
+                    heard,
+                    ctx_topic="" if topic_switched else ctx_topic,
+                    reason="abstain",
+                    top_slug=m_slug.group(1) if m_slug else "",
+                    top_cosine=float(m_cos.group(1)) if m_cos else 0.0,
+                    lang=active_lang,
+                )
             if abstained and not has_nearby and BRAIN_MIRROR.ready:
-                nearby_q = " ".join(x for x in (clean_q0 or heard, ctx_topic) if x).strip()
+                nearby_q = " ".join(x for x in (clean_q0 or heard, "" if topic_switched else ctx_topic) if x).strip()
                 nearby = BRAIN_MIRROR.search_nearby(
                     nearby_q,
                     audience=zone.get("audience", "user"),
                     limit_notes=2,
                     limit_menus=4,
                     max_chars_per_note=1100,
-                    min_score=12.0,
+                    min_score=13.5 if (ctx_topic and not topic_switched) else 12.0,
                 )
                 if nearby and nearby.get("text"):
                     log.info(
@@ -3363,8 +3453,9 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                 returned_slugs = set(re.findall(r"slug:\s*([\w.-]+)", " ".join(texts)))
                 need_sup_ctx = bool(
                     ctx_topic
+                    and not topic_switched
                     and not _STANDALONE_TOPIC_RE.search(heard)
-                    and (len(heard) <= 22 or bool(_FOLLOWUP_START_RE.match(heard)) or bool(_VAGUE_FOLLOWUP_RE.search(heard)))
+                    and (len(heard) <= 36 or bool(_FOLLOWUP_START_RE.match(heard)) or bool(_VAGUE_FOLLOWUP_RE.search(heard)) or bool(_CONTINUATION_HINT_RE.search(heard)))
                 )
                 sup_q = " ".join(x for x in (heard, ctx_topic if need_sup_ctx else "") if x).strip()
                 nearby = BRAIN_MIRROR.search_nearby(
@@ -3388,6 +3479,9 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
                     has_nearby = True
             used_nearby_only = abstained and has_nearby
             found = " ".join(f"[{n}] {t}" for (n, _), t in zip(calls, texts))
+            topic_pin_hint = _build_topic_pin_hint(heard, history)
+            if topic_pin_hint:
+                found = f"{topic_pin_hint}\n{found}"
             prev_kb = any(m["role"] == "assistant" and C.SCREEN_MARK in m["content"] for m in history[-2:])
             sample_hint = (
                 "สายนี้เป็นโทรศัพท์ ห้ามเขียน [จอ] ตาราง หรือรายละเอียดต่อท้ายเด็ดขาด ให้พูดสั้นกระชับ ประโยคแรกไม่เกินสิบห้าคำแล้วจบด้วยครับทันที)"

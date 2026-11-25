@@ -403,6 +403,7 @@ export function CallQaDrawer({
   const [teachOpen, setTeachOpen] = useState(false);
   const [teachQ, setTeachQ] = useState("");
   const [teachA, setTeachA] = useState("");
+  const [teachPromoteBrain, setTeachPromoteBrain] = useState(true);
   const [teachStatus, setTeachStatus] = useState<string | null>(null);
   const [teachSaving, setTeachSaving] = useState(false);
 
@@ -460,13 +461,22 @@ export function CallQaDrawer({
       const res = await fetch("/api/teach", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: teachQ.trim(), answer: teachA.trim(), lang: "th" }),
+        body: JSON.stringify({
+          question: teachQ.trim(),
+          answer: teachA.trim(),
+          lang: "th",
+          promoteToBrain: teachPromoteBrain,
+        }),
       });
       const j = await res.json();
       if (!res.ok || !j.ok) {
         setTeachStatus(`ไม่สำเร็จ: ${j.error || "เกิดข้อผิดพลาด"}`);
       } else {
-        setTeachStatus("สอน J.A.R.V.I.S เรียบร้อยแล้ว! สายถัดไปที่ถามเรื่องนี้จะตอบได้ทันที");
+        setTeachStatus(
+          j.promoted?.ok
+            ? `สอน J.A.R.V.I.S + บันทึกถาวรเข้าสมอง BC (${j.promoted.slug}) และกำลังซิงก์ pgvector แล้ว!`
+            : "สอน J.A.R.V.I.S เรียบร้อยแล้ว! สายถัดไปที่ถามเรื่องนี้จะตอบได้ทันที"
+        );
         setTeachA("");
       }
     } catch {
@@ -581,7 +591,16 @@ export function CallQaDrawer({
                 className="w-full rounded-lg border border-[var(--cc-border)] bg-[var(--cc-surface)] px-3 py-1.5 text-xs cc-text outline-none focus:border-emerald-500"
               />
               {teachStatus && <p className="text-[11px] font-medium cc-text">{teachStatus}</p>}
-              <div className="flex justify-end">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] cc-muted">
+                  <input
+                    type="checkbox"
+                    checked={teachPromoteBrain}
+                    onChange={(e) => setTeachPromoteBrain(e.target.checked)}
+                    className="h-3.5 w-3.5 rounded"
+                  />
+                  <span>บันทึกถาวรเข้าสมอง BC (pgvector)</span>
+                </label>
                 <button type="submit" disabled={teachSaving} className="cc-btn cc-btn--tone tone-in h-8 px-3 text-xs">
                   <BookOpenCheck className="h-3.5 w-3.5" />
                   <span>{teachSaving ? "กำลังบันทึก..." : "บันทึกสอน AI ทันที"}</span>

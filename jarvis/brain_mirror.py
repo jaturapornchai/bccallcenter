@@ -191,6 +191,7 @@ _ASCII_TOKEN_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{1,}")
 _META_NAV_SLUGS = frozenset({
     "index", "playbook-sales", "playbook-call-center", "website-manual-and-blog-directory", "video-visual-tutorials",
 })
+_VOICE_EXCLUDE_SLUGS = frozenset({"video-visual-tutorials", "website-manual-and-blog-directory"})
 
 _BOOTSTRAP_HOT_CODES: tuple[str, ...] = (
     "1002", "1003", "1004", "1005", "1015", "1097", "1098",
@@ -1313,6 +1314,8 @@ class BrainVaultMirror:
             if len(substantive_primary) >= 2 and sub_hits >= 2:
                 score += 6.0 * (sub_hits - 1)
             if note["is_meta_nav"] and not menu_codes:
+                if note["slug"] in _VOICE_EXCLUDE_SLUGS:
+                    continue
                 if note["slug"] in _META_NAV_SLUGS:
                     score *= 0.35
                 else:
@@ -1325,6 +1328,7 @@ class BrainVaultMirror:
         # Hybrid pgvector HNSW + PostgreSQL Thai GIN FTS fusion (fail-soft, ~25–55ms warm, <3ms cached)
         pg_used = False
         pg_ms = 0.0
+        max_pg_cosine = 0.0
         best_chunk_by_slug: dict[str, dict[str, Any]] = {}
         pg = self._get_pg()
         if pg is not None:
@@ -1332,7 +1336,7 @@ class BrainVaultMirror:
                 q,
                 tokens=expanded_tokens,
                 audience=aud,
-                limit=max(10, int(limit) + 2),
+                limit=max(12, int(limit) + 4),
                 timeout_s=0.45,
                 embed_text=f"{q} {' '.join(primary_tokens[:6])}".strip(),
             )
@@ -1352,6 +1356,8 @@ class BrainVaultMirror:
                     if slug not in best_chunk_by_slug:
                         best_chunk_by_slug[slug] = ch
                     cos = float(ch.get("cosine") or 0.0)
+                    if cos > max_pg_cosine:
+                        max_pg_cosine = cos
                     fts = float(ch.get("fts_score") or 0.0)
                     if slug in lex_by_slug:
                         old_sc, s_hits, p_hits, n_ref = lex_by_slug[slug]
@@ -1433,8 +1439,10 @@ class BrainVaultMirror:
             confidence = "medium"
 
         # Semantic OOV gate (pgvector + bge-m3): blocks accidental lexical overlap like "เชียงใหม่" or "ราคา+บาท"
-        # on unrelated topics (gold price, weather, durian) while preserving exact 4-digit menu/title hits.
-        if pg_used and not menu_codes and not exact_title_hit and top_cosine < 0.49:
+        # on unrelated topics (gold price, weather, durian) while preserving exact 4-digit menu/title hits and
+        # strong in-domain lexical matches whose query itself has strong semantic relevance (max_pg_cosine >= 0.52).
+        effective_domain_cos = top_cosine if top_cosine > 0.0 else (max_pg_cosine if (coverage >= 0.85 and top_score >= 120) else 0.0)
+        if pg_used and not menu_codes and not exact_title_hit and effective_domain_cos < 0.49:
             confidence = "low"
 
         return {
@@ -1443,7 +1451,7 @@ class BrainVaultMirror:
             "total_terms": total_sub,
             "best_matched_terms": best_sub_hits,
             "top_score": top_score,
-            "top_cosine": top_cosine,
+            "top_cosine": round(effective_domain_cos, 4),
             "hybrid": pg_used,
             "pgMs": pg_ms,
         }

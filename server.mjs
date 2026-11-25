@@ -262,21 +262,33 @@ app.prepare().then(async () => {
       if (req.method === "POST") {
         try {
           const body = await readJsonBody(req);
+          const qStr = String(body.question || "").trim();
+          const aStr = String(body.answer || "").trim();
+          const promoteToBrain = Boolean(body.promoteToBrain);
           const r = await fetch(`${sip.jarvisUrl}/teach`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              question: String(body.question || "").trim(),
-              answer: String(body.answer || "").trim(),
+              question: qStr,
+              answer: aStr,
               lang: String(body.lang || "th").trim() || "th",
             }),
             signal: AbortSignal.timeout(5000),
           });
           const data = await r.json();
-          if (r.ok && data?.ok !== false) {
-            broadcastDataSync("analytics", `${getActorLabel(session.name)}สอนคำตอบ AI เพิ่มในคลัง`, null, session.email);
+          let promoted = null;
+          if (r.ok && data?.ok !== false && promoteToBrain) {
+            promoted = brainStore.promoteTaughtEntry({ question: qStr, answer: aStr });
           }
-          return sendJson(res, r.status, data);
+          if (r.ok && data?.ok !== false) {
+            broadcastDataSync(
+              "analytics",
+              `${getActorLabel(session.name)}${promoted?.ok ? "สอนและบันทึกเข้าสมอง BC ถาวรแล้ว" : "สอนคำตอบ AI เพิ่มในคลัง"}`,
+              null,
+              session.email
+            );
+          }
+          return sendJson(res, r.status, { ...data, promoted });
         } catch (err) {
           return sendJson(res, 502, { ok: false, error: err.message });
         }
@@ -464,6 +476,68 @@ app.prepare().then(async () => {
       }
       const result = brainStore.getNote(rawSlug, { isAdmin });
       return sendJson(res, result.status || (result.ok ? 200 : 400), result);
+    }
+
+    // Admin-Only Brain Editor: save/update user-zone .md note, resolve Wishlist, and trigger pgvector incremental sync
+    if (urlPath === "/api/brain/notes" && req.method === "POST") {
+      const session = verifySessionFromCookieHeader(req.headers.cookie || "");
+      if (!session?.isAdmin) {
+        return sendJson(res, 403, { ok: false, error: "สงวนสิทธิ์การแก้ไขและเติมคลังสมองเฉพาะผู้ดูแลระบบ" });
+      }
+      try {
+        const body = await readJsonBody(req);
+        const result = brainStore.saveUserNote({
+          slug: body.slug,
+          folder: body.folder || "faq",
+          title: body.title,
+          aliases: body.aliases,
+          tags: body.tags,
+          body: body.body,
+          resolveWishlistSlug: body.resolveWishlistSlug || "",
+          clearMissQuery: body.clearMissQuery || "",
+        });
+        if (result.ok) {
+          broadcastDataSync("analytics", `${getActorLabel(session.name)}อัปเดตโน้ตสมอง BC (${result.slug})`, null, session.email);
+        }
+        return sendJson(res, result.status || (result.ok ? 200 : 400), result);
+      } catch (err) {
+        return sendJson(res, 400, { ok: false, error: err.message });
+      }
+    }
+
+    if (urlPath === "/api/brain/promote-teach" && req.method === "POST") {
+      const session = verifySessionFromCookieHeader(req.headers.cookie || "");
+      if (!session?.isAdmin) {
+        return sendJson(res, 403, { ok: false, error: "สงวนสิทธิ์การโปรโมตคำสอนเข้าสมองเฉพาะผู้ดูแลระบบ" });
+      }
+      try {
+        const body = await readJsonBody(req);
+        const result = brainStore.promoteTaughtEntry({
+          question: body.question,
+          answer: body.answer,
+          slug: body.slug || "",
+        });
+        if (result.ok) {
+          broadcastDataSync("analytics", `${getActorLabel(session.name)}ย้ายคำตอบที่สอนเข้าสมอง BC ถาวร (${result.slug})`, null, session.email);
+        }
+        return sendJson(res, result.status || (result.ok ? 200 : 400), result);
+      } catch (err) {
+        return sendJson(res, 400, { ok: false, error: err.message });
+      }
+    }
+
+    if (urlPath === "/api/brain/misses/clear" && req.method === "POST") {
+      const session = verifySessionFromCookieHeader(req.headers.cookie || "");
+      if (!session?.isAdmin) {
+        return sendJson(res, 403, { ok: false, error: "สงวนสิทธิ์การล้างรายการเฉพาะผู้ดูแลระบบ" });
+      }
+      try {
+        const body = await readJsonBody(req);
+        const result = brainStore.clearMissEntry(body.query);
+        return sendJson(res, result.ok ? 200 : 400, result);
+      } catch (err) {
+        return sendJson(res, 400, { ok: false, error: err.message });
+      }
     }
 
     return handle(req, res);

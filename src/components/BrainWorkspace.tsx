@@ -2,12 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertCircle,
   ArrowLeft,
   BookOpen,
   Brain,
   CheckCircle2,
   Clock3,
   Copy,
+  Database,
   ExternalLink,
   FileText,
   FolderOpen,
@@ -15,11 +17,15 @@ import {
   Link2,
   ListChecks,
   Lock,
+  Pencil,
+  Plus,
   RefreshCw,
+  Save,
   Search,
   Sparkles,
   Table2,
   Tag,
+  Trash2,
   Video,
   X,
 } from "lucide-react";
@@ -75,6 +81,17 @@ interface BrainWishlistItem {
   details: string[];
 }
 
+interface BrainMissItem {
+  query: string;
+  rawKey: string;
+  count: number;
+  lastAt: string;
+  ctxTopic: string;
+  topSlug: string;
+  topCosine: number;
+  reason: string;
+}
+
 interface BrainOverviewResponse {
   ok: boolean;
   mode: string;
@@ -88,6 +105,15 @@ interface BrainOverviewResponse {
     totalMenus: number;
     matchedNotes: number;
     pendingWishlist: number;
+    missCount?: number;
+    vector?: {
+      enabled: boolean;
+      ready: boolean;
+      chunks: number;
+      notes: number;
+      model: string;
+      tokenizer: string;
+    };
   };
   folders: BrainFolder[];
   notes: BrainNoteSummary[];
@@ -95,6 +121,11 @@ interface BrainOverviewResponse {
     pendingCount: number;
     doneCount: number;
     items: BrainWishlistItem[];
+  };
+  misses?: {
+    totalEvents: number;
+    uniqueCount: number;
+    items: BrainMissItem[];
   };
 }
 
@@ -116,7 +147,17 @@ interface BrainMenusResponse {
   menus: BrainMenuEntry[];
 }
 
-type SubTab = "notes" | "menus" | "wishlist";
+type SubTab = "notes" | "menus" | "wishlist" | "misses";
+
+const USER_WRITE_FOLDERS: { value: string; label: string }[] = [
+  { value: "faq", label: "คำถามที่พบบ่อย (faq)" },
+  { value: "howto", label: "คู่มือใช้งานทีละขั้น (howto)" },
+  { value: "reports", label: "รายงาน & งบการเงิน (reports)" },
+  { value: "sales", label: "งานขาย & แพ็กเกจ (sales)" },
+  { value: "systems", label: "ภาพรวมโมดูลระบบ (systems)" },
+  { value: "glossary", label: "คำศัพท์บัญชี/ระบบ (glossary)" },
+  { value: "troubleshoot", label: "แก้ไขปัญหา & Error (troubleshoot)" },
+];
 
 function formatShortTime(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -455,6 +496,19 @@ export function BrainWorkspace({
   const [menusData, setMenusData] = useState<BrainMenusResponse | null>(null);
   const [menusLoading, setMenusLoading] = useState(false);
 
+  // Admin-only Note Editor / Fill-Wishlist / Fill-Miss Modal
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [edSlug, setEdSlug] = useState("");
+  const [edFolder, setEdFolder] = useState("faq");
+  const [edTitle, setEdTitle] = useState("");
+  const [edAliases, setEdAliases] = useState("");
+  const [edTags, setEdTags] = useState("");
+  const [edBody, setEdBody] = useState("");
+  const [edResolveWishlist, setEdResolveWishlist] = useState("");
+  const [edClearMiss, setEdClearMiss] = useState("");
+  const [edSaving, setEdSaving] = useState(false);
+  const [edError, setEdError] = useState<string | null>(null);
+
   const readerTopRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -597,7 +651,168 @@ export function BrainWorkspace({
     [onNotify]
   );
 
+  const openEditorNew = useCallback(() => {
+    setEdSlug("");
+    setEdFolder("faq");
+    setEdTitle("");
+    setEdAliases("");
+    setEdTags("");
+    setEdBody("");
+    setEdResolveWishlist("");
+    setEdClearMiss("");
+    setEdError(null);
+    setEditorOpen(true);
+  }, []);
+
+  const openEditorForNote = useCallback((note: BrainNoteDetail) => {
+    setEdSlug(note.slug);
+    setEdFolder(USER_WRITE_FOLDERS.some((f) => f.value === note.folder) ? note.folder : "faq");
+    setEdTitle(note.title);
+    setEdAliases(note.aliases.join("\n"));
+    setEdTags(note.tags.join(", "));
+    setEdBody(note.body);
+    setEdResolveWishlist("");
+    setEdClearMiss("");
+    setEdError(null);
+    setEditorOpen(true);
+  }, []);
+
+  const openEditorForWishlist = useCallback((item: BrainWishlistItem) => {
+    const slugGuess = item.slug || `faq-${Date.now().toString(36)}`;
+    const folderGuess = slugGuess.startsWith("rpt-")
+      ? "reports"
+      : slugGuess.startsWith("howto-")
+      ? "howto"
+      : slugGuess.startsWith("sales-")
+      ? "sales"
+      : slugGuess.startsWith("sys-")
+      ? "systems"
+      : slugGuess.startsWith("term-")
+      ? "glossary"
+      : slugGuess.startsWith("ts-")
+      ? "troubleshoot"
+      : "faq";
+    setEdSlug(slugGuess);
+    setEdFolder(folderGuess);
+    setEdTitle(item.title);
+    setEdAliases(item.title);
+    setEdTags(folderGuess);
+    setEdBody(
+      `## คำตอบยืนยันสำหรับลูกค้า\n\n` +
+        (item.details.length ? `> โจทย์จากสายจริง:\n> ${item.details.slice(0, 2).join("\n> ")}\n\n` : "") +
+        `พิมพ์ข้อเท็จจริง ขั้นตอน และรหัสเมนู 4 หลักที่ถูกต้องที่นี่...`
+    );
+    setEdResolveWishlist(item.slug || item.title);
+    setEdClearMiss("");
+    setEdError(null);
+    setEditorOpen(true);
+  }, []);
+
+  const openEditorForMiss = useCallback((item: BrainMissItem) => {
+    setEdSlug(`faq-miss-${Date.now().toString(36).slice(-5)}`);
+    setEdFolder("faq");
+    setEdTitle(item.query.slice(0, 90));
+    setEdAliases(item.query);
+    setEdTags("faq, call-center");
+    setEdBody(`## คำถามจากสายลูกค้า\n${item.query}\n\n## คำตอบยืนยันสำหรับลูกค้า\n`);
+    setEdResolveWishlist("");
+    setEdClearMiss(item.query);
+    setEdError(null);
+    setEditorOpen(true);
+  }, []);
+
+  const handleSaveNote = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (readOnly) return;
+      setEdError(null);
+      setEdSaving(true);
+      try {
+        const res = await fetch("/api/brain/notes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            slug: edSlug.trim(),
+            folder: edFolder,
+            title: edTitle.trim(),
+            aliases: edAliases
+              .split(/\r?\n|,/)
+              .map((x) => x.trim())
+              .filter(Boolean),
+            tags: edTags
+              .split(",")
+              .map((x) => x.trim())
+              .filter(Boolean),
+            body: edBody.trim(),
+            resolveWishlistSlug: edResolveWishlist,
+            clearMissQuery: edClearMiss,
+          }),
+        });
+        const j = (await res.json()) as {
+          ok?: boolean;
+          slug?: string;
+          wishlistResolved?: boolean;
+          pgSyncTriggered?: boolean;
+          error?: string;
+        };
+        if (!res.ok || !j.ok) {
+          setEdError(j.error || "บันทึกโน้ตไม่สำเร็จ");
+          return;
+        }
+        setEditorOpen(false);
+        onNotify?.(
+          `บันทึกโน้ต ${j.slug} เข้าสมอง BC แล้ว${j.wishlistResolved ? " + ปิดคิวรอเติมแล้ว" : ""}${
+            j.pgSyncTriggered ? " (กำลังซิงก์ pgvector)" : ""
+          }`
+        );
+        await loadOverview(false);
+        if (j.slug) {
+          void openNote(j.slug, false);
+        }
+      } catch {
+        setEdError("ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์เพื่อบันทึกโน้ตได้");
+      } finally {
+        setEdSaving(false);
+      }
+    },
+    [
+      readOnly,
+      edSlug,
+      edFolder,
+      edTitle,
+      edAliases,
+      edTags,
+      edBody,
+      edResolveWishlist,
+      edClearMiss,
+      onNotify,
+      loadOverview,
+      openNote,
+    ]
+  );
+
+  const handleClearMiss = useCallback(
+    async (qText: string) => {
+      if (readOnly) return;
+      try {
+        const res = await fetch("/api/brain/misses/clear", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: qText }),
+        });
+        if (res.ok) {
+          onNotify?.("ล้างรายการคำถามนี้แล้ว");
+          void loadOverview(false);
+        }
+      } catch {
+        onNotify?.("ไม่สามารถล้างรายการได้");
+      }
+    },
+    [readOnly, onNotify, loadOverview]
+  );
+
   const stats = overview?.stats;
+  const vectorStats = stats?.vector;
 
   return (
     <div className="space-y-4">
@@ -655,14 +870,19 @@ export function BrainWorkspace({
 
         <div className="cc-panel p-3.5">
           <div className="flex items-center justify-between gap-2">
-            <span className="cc-label">โหมดเชื่อมต่อสมอง</span>
-            <span className="cc-chip tone-in py-0.5 text-[10px]">
-              <Sparkles className="h-3 w-3" />
-              <span>0ms In-Process</span>
+            <span className="cc-label">เครื่องค้นหาสมองเสียง</span>
+            <span className={`cc-chip py-0.5 text-[10px] ${vectorStats?.ready ? "tone-in" : "tone-ai"}`}>
+              <Database className="h-3 w-3" />
+              <span>{vectorStats?.ready ? "pgvector + ตัดคำไทย" : "Local RAM"}</span>
             </span>
           </div>
           <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-sm font-semibold cc-text">ฝังในเครื่อง • Hot-Reload</span>
+            <span className="font-mono text-lg font-bold tabular-nums cc-text">
+              {vectorStats?.ready ? vectorStats.chunks.toLocaleString("th-TH") : "0ms"}
+            </span>
+            <span className="text-xs cc-muted">
+              {vectorStats?.ready ? `chunks · ${vectorStats.model.replace(":latest", "")}` : "ฝังในเครื่อง • Hot-Reload"}
+            </span>
           </div>
           <div className="mt-0.5 flex items-center gap-1 text-[11px] cc-dim">
             <Clock3 className="h-3 w-3" />
@@ -675,7 +895,7 @@ export function BrainWorkspace({
       <div className="cc-panel p-3">
         <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="inline-flex items-center gap-1 rounded-xl border border-[var(--cc-border)] bg-[var(--cc-inset)] p-1">
+            <div className="inline-flex flex-wrap items-center gap-1 rounded-xl border border-[var(--cc-border)] bg-[var(--cc-inset)] p-1">
               <button
                 type="button"
                 onClick={() => setSubTab("notes")}
@@ -704,6 +924,17 @@ export function BrainWorkspace({
                 <span>รอเติมเข้าสมอง</span>
                 {(stats?.pendingWishlist ?? 0) > 0 && (
                   <span className="cc-chip tone-held py-0 text-[10px] tabular-nums">{stats?.pendingWishlist}</span>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSubTab("misses")}
+                className={`cc-btn h-7 px-3 text-xs ${subTab === "misses" ? "cc-btn--tone tone-danger" : "border-transparent bg-transparent"}`}
+              >
+                <AlertCircle className="h-3.5 w-3.5" />
+                <span>คำถามที่ตอบไม่ได้</span>
+                {(stats?.missCount ?? 0) > 0 && (
+                  <span className="cc-chip tone-danger py-0 text-[10px] tabular-nums">{stats?.missCount}</span>
                 )}
               </button>
             </div>
@@ -742,19 +973,31 @@ export function BrainWorkspace({
             )}
           </div>
 
-          <button
-            type="button"
-            disabled={refreshing}
-            onClick={() => {
-              void loadOverview(true);
-              if (subTab === "menus") void loadMenus(true);
-              if (selectedSlug) void openNote(selectedSlug, false);
-            }}
-            className="cc-btn h-8 px-3 text-xs"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
-            <span>รีเฟรชสมอง</span>
-          </button>
+          <div className="flex items-center gap-2">
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={openEditorNew}
+                className="cc-btn cc-btn--tone tone-in h-8 px-3 text-xs"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>เพิ่มโน้ตใหม่</span>
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={refreshing}
+              onClick={() => {
+                void loadOverview(true);
+                if (subTab === "menus") void loadMenus(true);
+                if (selectedSlug) void openNote(selectedSlug, false);
+              }}
+              className="cc-btn h-8 px-3 text-xs"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+              <span>รีเฟรชสมอง</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -893,6 +1136,17 @@ export function BrainWorkspace({
                   </div>
 
                   <div className="flex items-center gap-2">
+                    {!readOnly && noteDetail.audience === "user" && (
+                      <button
+                        type="button"
+                        onClick={() => openEditorForNote(noteDetail)}
+                        className="cc-btn cc-btn--tone tone-live h-7 px-2.5 text-[11px]"
+                        title="แก้ไขโน้ตนี้ในคลังสมอง"
+                      >
+                        <Pencil className="h-3 w-3" />
+                        <span>แก้ไขโน้ต</span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => void handleCopySlug(noteDetail.slug)}
@@ -1150,9 +1404,21 @@ export function BrainWorkspace({
                       )}
                       <span className="text-xs font-semibold cc-text">{item.title}</span>
                     </div>
-                    {item.slug && (
-                      <span className="cc-chip tone-idle py-0 font-mono text-[10.5px]">{item.slug}</span>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {item.slug && (
+                        <span className="cc-chip tone-idle py-0 font-mono text-[10.5px]">{item.slug}</span>
+                      )}
+                      {!readOnly && !item.done && (
+                        <button
+                          type="button"
+                          onClick={() => openEditorForWishlist(item)}
+                          className="cc-btn cc-btn--tone tone-in h-7 px-2.5 text-[11px]"
+                        >
+                          <Plus className="h-3 w-3" />
+                          <span>เติมลงสมอง</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
                   {item.details.length > 0 && (
                     <ul className="mt-2 space-y-1 pl-6 text-xs leading-relaxed cc-muted list-disc">
@@ -1165,6 +1431,202 @@ export function BrainWorkspace({
               ))
             )}
           </div>
+        </div>
+      )}
+
+      {/* TAB 4: BRAIN MISS LOG (ABSTAINED / LOW-COSINE CALL QUERIES) */}
+      {subTab === "misses" && (
+        <div className="cc-panel p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--cc-border)] pb-3">
+            <div>
+              <h2 className="text-sm font-semibold cc-text">
+                คำถามจากสายจริงที่สมองยังตอบไม่ตรง (Brain Miss Log)
+              </h2>
+              <p className="mt-0.5 text-xs cc-muted">
+                จัดอันดับตามจำนวนครั้งที่ลูกค้าถามซ้ำแล้วติด Abstain เพื่อเติมข้อมูลเข้าสมองและซิงก์ pgvector ต่อเนื่อง
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="cc-chip tone-danger h-7 px-2.5 text-xs tabular-nums">
+                {overview?.misses?.uniqueCount ?? 0} หัวข้อ ({overview?.misses?.totalEvents ?? 0} ครั้ง)
+              </span>
+            </div>
+          </div>
+
+          <div className="mt-3 space-y-2.5">
+            {(overview?.misses?.items || []).length === 0 ? (
+              <div className="py-10 text-center text-xs cc-dim">
+                ยังไม่มีคำถามที่ติด Abstain สะสมใหม่ — ระบบจะบันทึกอัตโนมัติเมื่อมีสายโทรเข้าถามเรื่องที่ยังไม่มีในสมอง
+              </div>
+            ) : (
+              (overview?.misses?.items || []).map((m) => (
+                <div
+                  key={m.rawKey}
+                  className="rounded-xl border border-[var(--cc-border)] bg-[var(--cc-inset)] p-3.5"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <span className="cc-chip tone-danger py-0 font-mono text-[10.5px] tabular-nums">
+                        ×{m.count}
+                      </span>
+                      <span className="text-xs font-semibold cc-text">{m.query}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] cc-dim">{formatShortTime(m.lastAt)}</span>
+                      {!readOnly && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => openEditorForMiss(m)}
+                            className="cc-btn cc-btn--tone tone-in h-7 px-2.5 text-[11px]"
+                          >
+                            <Plus className="h-3 w-3" />
+                            <span>เติมลงสมอง</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleClearMiss(m.query)}
+                            className="cc-btn h-7 w-7 px-0 tone-danger"
+                            title="ล้างรายการนี้"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] cc-dim">
+                    {m.ctxTopic && <span>บริบทเดิม: {m.ctxTopic}</span>}
+                    {m.topSlug && <span className="font-mono">ใกล้สุด: {m.topSlug}</span>}
+                    {m.topCosine > 0 && <span className="font-mono">cosine={m.topCosine.toFixed(2)}</span>}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ADMIN-ONLY NOTE EDITOR MODAL */}
+      {editorOpen && !readOnly && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label="บันทึกข้อมูลเข้าสมอง BC">
+          <button type="button" aria-label="ปิดหน้าต่าง" onClick={() => setEditorOpen(false)} className="cc-overlay absolute inset-0 cursor-default" />
+          <form
+            onSubmit={(e) => void handleSaveNote(e)}
+            className="cc-panel relative z-10 flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden p-5"
+          >
+            <div className="flex items-center justify-between gap-2 border-b border-[var(--cc-border)] pb-3">
+              <div className="flex items-center gap-2">
+                <Brain className="h-4 w-4 text-[var(--tone)] tone-ai" />
+                <h3 className="text-sm font-bold cc-text">
+                  {edResolveWishlist ? "เติมข้อเท็จจริงปิดคิวรอเติมเข้าสมอง BC" : "เพิ่ม / แก้ไขโน้ตสมอง BC (โซนลูกค้า)"}
+                </h3>
+              </div>
+              <button type="button" onClick={() => setEditorOpen(false)} className="cc-btn h-7 w-7 px-0">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="cc-scroll mt-3 flex-1 space-y-3 overflow-y-auto pr-1 text-xs">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block font-medium cc-muted">รหัสโน้ต (slug ภาษาอังกฤษตัวเล็ก)</label>
+                  <input
+                    type="text"
+                    required
+                    value={edSlug}
+                    onChange={(e) => setEdSlug(e.target.value)}
+                    placeholder="เช่น faq-promotion-10-types"
+                    className="cc-input h-9 w-full px-3 font-mono text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block font-medium cc-muted">หมวดโซนลูกค้า (ปลอดศัพท์โค้ด/SQL)</label>
+                  <select
+                    value={edFolder}
+                    onChange={(e) => setEdFolder(e.target.value)}
+                    className="cc-input h-9 w-full px-3 text-xs"
+                  >
+                    {USER_WRITE_FOLDERS.map((f) => (
+                      <option key={f.value} value={f.value}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-1 block font-medium cc-muted">หัวข้อโน้ต (ภาษาไทยชัดเจน)</label>
+                <input
+                  type="text"
+                  required
+                  value={edTitle}
+                  onChange={(e) => setEdTitle(e.target.value)}
+                  placeholder="เช่น รายละเอียดโปรโมชันอัตโนมัติครบทั้ง 10 รูปแบบ"
+                  className="cc-input h-9 w-full px-3 text-xs"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block font-medium cc-muted">คำพูด/คำถามที่ลูกค้ามักถาม (บรรทัดละ 1 ประโยค)</label>
+                  <textarea
+                    rows={2}
+                    value={edAliases}
+                    onChange={(e) => setEdAliases(e.target.value)}
+                    placeholder="โปรโมชั่นมีกี่แบบ&#10;ซื้อสองแถมหนึ่งตั้งค่ายังไง"
+                    className="cc-input w-full px-3 py-2 text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block font-medium cc-muted">แท็กค้นหา (คั่นด้วยจุลภาค)</label>
+                  <textarea
+                    rows={2}
+                    value={edTags}
+                    onChange={(e) => setEdTags(e.target.value)}
+                    placeholder="faq, promotion, pos"
+                    className="cc-input w-full px-3 py-2 text-xs"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-1 block font-medium cc-muted">
+                  เนื้อหาข้อเท็จจริงสำหรับตอบลูกค้าทางเสียง (ระบุขั้นตอนและรหัสเมนู 4 หลัก ไม่มีภาพ/YouTube)
+                </label>
+                <textarea
+                  rows={8}
+                  required
+                  value={edBody}
+                  onChange={(e) => setEdBody(e.target.value)}
+                  placeholder="พิมพ์ข้อเท็จจริงและขั้นตอนที่ต้องการให้ J.A.R.V.I.S ใช้ตอบลูกค้า..."
+                  className="cc-input w-full px-3 py-2 font-sans text-xs leading-relaxed"
+                />
+              </div>
+
+              {edError && (
+                <div className="rounded-lg border border-[var(--tone-line)] bg-[var(--tone-soft)] px-3 py-2 text-xs cc-ink tone-danger">
+                  {edError}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--cc-border)] pt-3">
+              <span className="text-[11px] cc-dim">
+                บันทึกแล้ว Hot-Reload เข้า RAM ใน 3 วิ + ซิงก์ PostgreSQL pgvector อัตโนมัติ
+              </span>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => setEditorOpen(false)} className="cc-btn h-8 px-3 text-xs">
+                  <span>ยกเลิก</span>
+                </button>
+                <button type="submit" disabled={edSaving} className="cc-btn cc-btn--tone tone-in h-8 px-3.5 text-xs">
+                  <Save className="h-3.5 w-3.5" />
+                  <span>{edSaving ? "กำลังบันทึก..." : "บันทึกเข้าสมอง + ซิงก์ pgvector"}</span>
+                </button>
+              </div>
+            </div>
+          </form>
         </div>
       )}
     </div>

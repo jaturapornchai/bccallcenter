@@ -1113,6 +1113,39 @@ def test_thai_custom_segmentation_and_pgvector_hybrid():
         assert pg_user["ok"] is True and all(h["audience"] == "user" for h in pg_user["hits"]), "pgvector SQL leaked dev chunk!"
 
 
+def test_topic_continuity_pinning_and_voice_exclude():
+    """Verify conversation continuity rule (no cross-topic jumping) + voice exclusion of video directories."""
+    from brain_mirror import BrainVaultMirror
+
+    scope = load_symbols({
+        "_FOLLOWUP_START_RE", "_VAGUE_FOLLOWUP_RE", "_STANDALONE_TOPIC_RE",
+        "_BOILERPLATE_CTX_RE", "_EXPLICIT_TOPIC_SWITCH_RE", "_CONTINUATION_HINT_RE",
+        "_PHONE_INTENT_HINTS", "_expand_phone_intent_queries", "_stt_ears_diverge",
+        "_extract_recent_topic", "_is_explicit_topic_switch", "_build_topic_pin_hint",
+        "_build_phone_fallback_queries",
+    })
+    hist = [
+        {"role": "user", "content": "สอบถามเรื่องโปรโมชั่นหน้าร้าน POS ครับ"},
+        {"role": "assistant", "content": "ตั้งโปรโมชันได้ 10 รูปแบบครับ"},
+    ]
+    # 1. Continuation questions must stay pinned to current topic (not jump topics)
+    assert scope["_is_explicit_topic_switch"]("แล้วตั้งค่ายังไงมีกี่สูตรครับ") is False
+    pin = scope["_build_topic_pin_hint"]("แล้วตั้งค่ายังไงมีกี่สูตรครับ", hist)
+    assert "โปรโมชั่น" in pin and "ห้ามตอบข้ามไปเรื่องอื่น" in pin, f"expected topic pin hint: {pin}"
+    qs = scope["_build_phone_fallback_queries"]("แล้วต้องตั้งค่าตรงไหนบ้างครับ", [], hist)
+    assert any("โปรโมชั่น" in q for q in qs), f"continuation query must carry pinned topic: {qs}"
+
+    # 2. Explicit topic switch unlocks pinning cleanly
+    assert scope["_is_explicit_topic_switch"]("ขอถามอีกเรื่องนะครับ เรื่องงบกำไรขาดทุน") is True
+    assert scope["_build_topic_pin_hint"]("ขอถามอีกเรื่องนะครับ เรื่องงบกำไรขาดทุน", hist) == ""
+
+    # 3. Video/link directory notes excluded from voice search results
+    brain = BrainVaultMirror(vault_dir=C.LOCAL_BRAIN_DIR, enable_pgvector=False)
+    brain.load_from_dir(C.LOCAL_BRAIN_DIR, force=True, sync_pgvector=False)
+    res_vid = brain.search_with_meta("คลิปวิดีโอสอนใช้งานยูทูป", limit=5, audience="user")
+    assert all(h["slug"] != "video-visual-tutorials" for h in res_vid["hits"]), "video directory must be excluded from voice brain"
+
+
 TESTS = [
     test_caller_name_rejects_connectors_and_accepts_real_names,
     test_stt_stutter_detector_and_ear2_fallback,
@@ -1133,6 +1166,7 @@ TESTS = [
     test_embedded_local_bcbrain_no_mcp_api,
     test_voice_first_big_brain_and_zyx59_fixes,
     test_thai_custom_segmentation_and_pgvector_hybrid,
+    test_topic_continuity_pinning_and_voice_exclude,
 ]
 
 

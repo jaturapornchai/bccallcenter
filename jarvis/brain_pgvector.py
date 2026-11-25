@@ -430,9 +430,12 @@ class BrainPgVectorStore:
         if not self.enabled or not self.ensure_schema():
             return {"ok": False, "enabled": self.enabled, "reason": "pgvector unavailable"}
 
-        # Build desired chunks in memory
+        # Build desired chunks in memory (skip media-only index directories unsuitable for voice)
+        voice_exclude = frozenset({"video-visual-tutorials", "website-manual-and-blog-directory"})
         desired: dict[tuple[str, int], dict[str, Any]] = {}
         for slug, note in sorted(notes_by_slug.items()):
+            if slug in voice_exclude:
+                continue
             title = str(note.get("title") or slug).strip()
             folder = str(note.get("folder") or "").strip()
             audience = "dev" if note.get("is_dev") else "user"

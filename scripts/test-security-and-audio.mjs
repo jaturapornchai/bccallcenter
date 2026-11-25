@@ -330,6 +330,51 @@ try {
   );
   await brainStore.pgVector?.close?.();
 
+  // 8. Admin Brain Editor, Wishlist auto-archive, Secret Guard & Brain Miss Log (isolated in tmpDir)
+  const tmpVault = path.join(tmpDir, "vault");
+  const tmpWl = path.join(tmpDir, "wishlist.md");
+  const tmpMiss = path.join(tmpDir, "brain-miss-log.jsonl");
+  fs.mkdirSync(path.join(tmpVault, "faq"), { recursive: true });
+  fs.writeFileSync(
+    tmpWl,
+    "# Wishlist\n\n## 1. Pending\n\n- [ ] **ทดสอบเติมเข้าสมอง** (slug แนะนำ: `faq-test-fill`)\n  - คำถาม: ทดสอบ\n\n## 3. Archive\n\n",
+    "utf8"
+  );
+  const fakePhone = ["081", "234", "5678"].join("-");
+  fs.writeFileSync(
+    tmpMiss,
+    JSON.stringify({ ts: "2026-11-25T01:00:00Z", query: `ทดสอบคำถาม ${fakePhone}`, ctxTopic: "", reason: "abstain", topCosine: 0.41 }) + "\n",
+    "utf8"
+  );
+  const isolatedBrain = new LocalBrainStore({ vaultDir: tmpVault, wishlistPath: tmpWl, missLogPath: tmpMiss });
+  const badFolder = isolatedBrain.saveUserNote({ slug: "bad-dev", folder: "schema", title: "Dev", body: "SELECT * FROM x", syncPgvector: false });
+  assert.equal(badFolder.ok, false, "must block writing to dev folders");
+  const badSecret = isolatedBrain.saveUserNote({ slug: "bad-sec", folder: "faq", title: "Key", body: "token " + "sk" + "-" + "a".repeat(26), syncPgvector: false });
+  assert.equal(badSecret.ok, false, "must block saving API keys into vault");
+  const saved = isolatedBrain.saveUserNote({
+    slug: "faq-test-fill",
+    folder: "faq",
+    title: "ทดสอบเติมเข้าสมอง",
+    aliases: ["ทดสอบคำถาม"],
+    body: "คำตอบทดสอบยืนยันครบถ้วน พร้อม https://youtu.be/abc12345",
+    resolveWishlistSlug: "faq-test-fill",
+    syncPgvector: false,
+  });
+  assert.equal(saved.ok, true);
+  assert.equal(saved.wishlistResolved, true, "must archive matching wishlist entry");
+  const readBack = isolatedBrain.getNote("faq-test-fill", { isAdmin: false });
+  assert.equal(readBack.ok, true);
+  assert.equal(readBack.note.body.includes("youtu.be"), false, "saved note must strip YouTube URLs");
+
+  const missViewer = isolatedBrain.getMissReport({ isAdmin: false });
+  assert.equal(missViewer.uniqueCount, 1);
+  assert.equal(missViewer.items[0].query.includes(fakePhone), false, "viewer miss log must mask mobile numbers");
+
+  const promoRes = isolatedBrain.promoteTaughtEntry({ question: "คำถามสอนถาวร", answer: "คำตอบยืนยันสำหรับลูกค้า", syncPgvector: false });
+  assert.equal(promoRes.ok, true, "promoteTaughtEntry must create permanent FAQ note");
+  assert.ok(isolatedBrain.getNote(promoRes.slug, { isAdmin: false }).ok);
+  await isolatedBrain.pgVector?.close?.();
+
   console.log("ALL_SECURITY_AND_AUDIO_TESTS_PASSED");
 } finally {
   if (origAdminEmail === undefined) delete process.env.ADMIN_EMAIL;

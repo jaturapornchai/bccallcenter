@@ -5,6 +5,7 @@ import {
   BarChart3,
   BookOpenCheck,
   Bot,
+  Brain,
   CheckCircle2,
   Clock3,
   Coins,
@@ -84,7 +85,9 @@ export function AnalyticsWorkspace({
   const [refreshing, setRefreshing] = useState(false);
   const [qInput, setQInput] = useState("");
   const [aInput, setAInput] = useState("");
+  const [promoteToBrain, setPromoteToBrain] = useState(true);
   const [savingTeach, setSavingTeach] = useState(false);
+  const [promotingKey, setPromotingKey] = useState<string | null>(null);
 
   const loadAll = useCallback(async (manual = false) => {
     if (manual) setRefreshing(true);
@@ -138,7 +141,7 @@ export function AnalyticsWorkspace({
       const res = await fetch("/api/teach", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, answer, lang: "th" }),
+        body: JSON.stringify({ question, answer, lang: "th", promoteToBrain }),
       });
       const j = await res.json();
       if (!res.ok || !j.ok) {
@@ -146,13 +149,39 @@ export function AnalyticsWorkspace({
       } else {
         setQInput("");
         setAInput("");
-        onNotify?.("สอนคำตอบให้ J.A.R.V.I.S เรียบร้อย รอบหน้าตอบได้ทันที!");
+        onNotify?.(
+          j.promoted?.ok
+            ? `สอน AI + บันทึกถาวรเข้าสมอง BC (${j.promoted.slug}) และกำลังซิงก์ pgvector แล้ว!`
+            : "สอนคำตอบให้ J.A.R.V.I.S เรียบร้อย รอบหน้าตอบได้ทันที!"
+        );
         void loadAll(false);
       }
     } catch {
       onNotify?.("ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์เพื่อบันทึกคำตอบได้");
     } finally {
       setSavingTeach(false);
+    }
+  };
+
+  const handlePromoteEntry = async (item: TaughtEntry) => {
+    if (readOnly) return;
+    setPromotingKey(item.key);
+    try {
+      const res = await fetch("/api/brain/promote-teach", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: item.question, answer: item.answer }),
+      });
+      const j = (await res.json().catch(() => ({}))) as { ok?: boolean; slug?: string; error?: string };
+      if (res.ok && j?.ok) {
+        onNotify?.(`ย้ายคำตอบเข้าสมอง BC ถาวรแล้ว (${j.slug}) และกำลังซิงก์ pgvector`);
+      } else {
+        onNotify?.(j?.error || "ย้ายเข้าสมองไม่สำเร็จ");
+      }
+    } catch {
+      onNotify?.("ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์เพื่อย้ายคำตอบได้");
+    } finally {
+      setPromotingKey(null);
     }
   };
 
@@ -432,7 +461,16 @@ export function AnalyticsWorkspace({
                 placeholder="คำตอบภาษาพูดสั้นๆ 1-2 ประโยคที่อยากให้ J.A.R.V.I.S พูดตอบลูกค้า..."
                 className="w-full rounded-lg border border-[var(--cc-border)] bg-[var(--cc-surface)] px-3 py-2 text-xs cc-text outline-none focus:border-sky-500"
               />
-              <div className="flex justify-end">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] cc-muted">
+                  <input
+                    type="checkbox"
+                    checked={promoteToBrain}
+                    onChange={(e) => setPromoteToBrain(e.target.checked)}
+                    className="h-3.5 w-3.5 rounded"
+                  />
+                  <span>บันทึกถาวรเข้าสมอง BC (pgvector)</span>
+                </label>
                 <button type="submit" disabled={savingTeach} className="cc-btn cc-btn--tone tone-in h-8 px-3 text-xs">
                   <Plus className="h-3.5 w-3.5" />
                   <span>{savingTeach ? "กำลังบันทึก..." : "บันทึกสอน AI ทันที"}</span>
@@ -461,14 +499,26 @@ export function AnalyticsWorkspace({
                     <div className="text-[11px] cc-dim">ใช้งานแล้ว {item.hits} ครั้ง</div>
                   </div>
                   {!readOnly && (
-                    <button
-                      type="button"
-                      onClick={() => void handleDeleteEntry(item.key)}
-                      className="cc-btn h-7 w-7 shrink-0 px-0 tone-danger"
-                      title="ลบคำตอบนี้"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={promotingKey === item.key}
+                        onClick={() => void handlePromoteEntry(item)}
+                        className="cc-btn cc-btn--tone tone-ai h-7 px-2 text-[11px]"
+                        title="ย้ายคำตอบนี้เป็นโน้ตถาวรเข้าสมอง BC + pgvector"
+                      >
+                        <Brain className="h-3 w-3" />
+                        <span>{promotingKey === item.key ? "กำลังย้าย..." : "เข้าสมอง"}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteEntry(item.key)}
+                        className="cc-btn h-7 w-7 px-0 tone-danger"
+                        title="ลบคำตอบนี้"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   )}
                 </div>
               ))}
