@@ -1315,6 +1315,83 @@ def test_0gr19_name_correction_barge_floor_and_keepalive():
     assert "🛑" not in ans_cmp and "POS" in ans_cmp and "ออฟไลน์" in ans_cmp, f"POS competitor comparison miss: {ans_cmp[:300]}"
 
 
+def test_2dg88_wghhy_k7lyn_log_improvements():
+    """Regression from 2026-11-25..26 live calls (2dg88, wghhy, k7lyn):
+    - Non-search filter blocks repeated caller name ('นครครับ'), bare ack ('ครับ', 'ครับ อ่าง'), bot-name ask, closing ('เดี๋ยวเข้าไปทดลอง'), and meta 'คุยอะไรกันต่อดี'
+    - _extract_recent_topic ignores bare caller names and meta-questions
+    - Standalone 'คุณมีกี่ระบบ' does not drag previous comparison question into search
+    - Whisper e1 STT typo 'โประแกมป์' / 'ร้อนวัสดุ' / 'ครัพ' repairs to OpenThai e2 and hits verified sales/system highlights (zero false abstain)."""
+    from brain_mirror import BrainVaultMirror
+
+    scope = load_symbols({
+        "_STT_STUTTER_3_RE", "_STT_STUTTER_2X3_RE", "_has_stt_stutter",
+        "_STT_DOMAIN_FIX_RE", "_STT_EAR1_MISHEARD_RE", "_prefer_openthai_domain",
+        "_NON_SEARCH_STRIP_RE", "_CB_INTENT_ONLY_RE", "_REAL_Q_OR_PRODUCT_RE",
+        "_CALL_META_ASK_RE", "_CLOSING_ONLY_RE", "_BOILERPLATE_CTX_RE",
+        "_FOLLOWUP_START_RE", "_VAGUE_FOLLOWUP_RE", "_STANDALONE_TOPIC_RE",
+        "_EXPLICIT_TOPIC_SWITCH_RE", "_CONTINUATION_HINT_RE",
+        "_PHONE_INTENT_HINTS", "_expand_phone_intent_queries", "_stt_ears_diverge",
+        "_extract_recent_topic", "_is_non_search_phone_turn",
+        "_is_explicit_topic_switch", "_build_phone_fallback_queries",
+    }, extra_scope={"sys": sys})
+
+    non_search = scope["_is_non_search_phone_turn"]
+    extract_topic = scope["_extract_recent_topic"]
+    prefer = scope["_prefer_openthai_domain"]
+    build_qs = scope["_build_phone_fallback_queries"]
+
+    # 1. Repeated caller name, bare ack, closing, bot-name ask, meta-next-topic all skip brain search
+    assert non_search("นครครับ", "", [], current_name="นคร") is True
+    assert non_search("ครับ", "", [], current_name="นคร") is True
+    assert non_search("ครับ อ่าง", "", [], current_name="นคร") is True
+    assert non_search("โอเคครับเดี๋ยวยังไงจะเข้าไปทดลองนะครัพ", "", [], current_name="นคร") is True
+    assert non_search("มากครับชื่อคุณอะไรครัป", "", [], current_name="นคร") is True
+    assert non_search("แล้วเราจะคุยอะไรกันต่อดี", "", [], current_name="ลุงจืด") is True
+    # Real product questions MUST NOT be skipped
+    assert non_search("คุณมีกี่ระบบ", "", [], current_name="ลุงจืด") is False
+    assert non_search("โปรแกรมคุณเก่งกว่าโประแกมป์อื่นยังไง", "", [], current_name="ลุงจืด") is False
+    assert non_search("แล้วจะไปใช้ฟรีได้ยังไงครับ", "", [], current_name="นคร") is False
+
+    # 2. _extract_recent_topic ignores bare name / meta turns so they never contaminate follow-ups
+    hist_name = [
+        {"role": "user", "content": "นครครับ"},
+        {"role": "assistant", "content": "ยินดีที่ได้รู้จักครับคุณนคร"},
+    ]
+    assert "นคร" not in extract_topic(hist_name, current_name="นคร")
+
+    hist_meta = [
+        {"role": "user", "content": "เราคุยอะไรกันมาบ้างแล้ว"},
+        {"role": "assistant", "content": "เราคุยเรื่องระบบบัญชีและการขายครับ"},
+    ]
+    assert "คุยอะไรกันมาบ้าง" not in extract_topic(hist_meta)
+
+    # 3. 'คุณมีกี่ระบบ' is an explicit standalone topic switch and does NOT drag previous comparison turn
+    hist_cmp = [
+        {"role": "user", "content": "โปรแกรมคุณเก่งกว่าโประแกมป์อื่นยังไง"},
+        {"role": "assistant", "content": "จุดเด่นของบีซีเอไอแอคเคาท์มีสี่ด้านครับ"},
+    ]
+    qs_sys = build_qs("คุณมีกี่ระบบ", [], hist_cmp)
+    assert all("เก่งกว่า" not in q and "โประแกมป์" not in q for q in qs_sys), f"contaminated system count query: {qs_sys}"
+
+    # 4. OpenThai e2 beats Whisper e1 on real typos ('โประแกมป์', 'ร้อนวัสดุ', 'ครัพ'/'ครัป') even when e3 mixes English
+    assert prefer("โปรแกรมคุณเก่งกว่าโประแกมป์อื่นยังไง", "โปรแกรมคุณเก่งกว่าโปรแกรมอื่นยังไง", "program คุณเก่งกว่า program อื่นยังไง") is True
+    assert prefer("ทำงานที่ร้านครับเป็นร้อนวัสดุก่อสร้างครัพ", "ทำงานที่ร้านครับเป็นร้านวัสดุก่อสร้างครับ", "ทำงานที่ร้านครับเป็นร้านวัสดุก่อสร้างครับ") is True
+    assert prefer("มากครับชื่อคุณอะไรครัป", "มากครับชื่อคุณอะไรครับ", "มากครับชื่อคุณอะไรครับ") is True
+
+    # 5. Live BrainVaultMirror verification for 2dg88 queries (no false abstain)
+    brain = BrainVaultMirror(vault_dir=C.LOCAL_BRAIN_DIR, enable_pgvector=True)
+    brain.load_from_dir(C.LOCAL_BRAIN_DIR, force=True, sync_pgvector=False)
+    for q, must_have in (
+        ("โปรแกรมคุณเก่งกว่าโประแกมป์อื่นยังไง", ("BC Ai Account", "15 ระบบ")),
+        ("คุณมีกี่ระบบ", ("15 ระบบ", "4 กลุ่ม")),
+        ("แล้วระบบบัญชีของคุณมีกี่เมนู", ("735", "9 หมวด")),
+    ):
+        ans = brain.quick_answer(q, audience="user", mode="ultra")
+        assert "🛑" not in ans, f"2dg88 query must not abstain: {q!r} -> {ans[:220]}"
+        for kw in must_have:
+            assert kw.lower() in ans.lower(), f"missing {kw!r} in {q!r}: {ans[:320]}"
+
+
 TESTS = [
     test_caller_name_rejects_connectors_and_accepts_real_names,
     test_stt_stutter_detector_and_ear2_fallback,
@@ -1339,6 +1416,7 @@ TESTS = [
     test_context_understanding_and_adaptive_search,
     test_target_precision_and_t8o1y_fixes,
     test_0gr19_name_correction_barge_floor_and_keepalive,
+    test_2dg88_wghhy_k7lyn_log_improvements,
 ]
 
 

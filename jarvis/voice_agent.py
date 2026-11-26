@@ -638,13 +638,14 @@ _STT_DOMAIN_FIX_RE = re.compile(
     r"อัตราแลกเปลี่ยน|ต่างประเทศ|นำเข้า|ส่วนลด|สมาชิก|ครอบครัว|โปรโมชั[่้]?น|คลังสินค้า)"
 )
 _STT_EAR1_MISHEARD_RE = re.compile(
-    r"(?:กี่เบิร์|กี่ลูก|รวมแต้(?!ม)|ตัดแทบ|ส่วนรถ|คังสินค้า|ที่อยู่จากส่ง|ต่ำประเด็น|ลงมัญติ|อัตราแรกเปลี่ยน|\bPLS\b)"
+    r"(?:กี่เบิร์|กี่ลูก|รวมแต้(?!ม)|ตัดแทบ|ส่วนรถ|คังสินค้า|ที่อยู่จากส่ง|ต่ำประเด็น|ลงมัญติ|อัตราแรกเปลี่ยน|\bPLS\b|"
+    r"โประแกมป์|โประแก็ม|ร้อนวัสดุ|(?:นะ)?ครั[พปฐ](?=\s|$))"
 )
 
 
 def _prefer_openthai_domain(ear1: str, ear2: str, ear3: str) -> bool:
     """True when both OpenThai ears (e2 & e3) agree on a canonical BC domain word missing from Whisper e1,
-    OR when e2/e3 form a clean 2-of-3 consensus repairing a misheard Whisper e1 token (e.g. กี่ลูก->กี่รูป, กี่เบิร์->กี่เบอร์)."""
+    OR when e2/e3 form a clean consensus repairing a misheard Whisper e1 token (e.g. กี่ลูก->กี่รูป, โประแกมป์->โปรแกรม)."""
     e1, e2, e3 = (ear1 or "").strip(), (ear2 or "").strip(), (ear3 or "").strip()
     if not e2 or not e3 or _has_stt_stutter(e2):
         return False
@@ -655,8 +656,12 @@ def _prefer_openthai_domain(ear1: str, ear2: str, ear3: str) -> bool:
     n2 = re.sub(r"\s+", "", e2).lower()
     n3 = re.sub(r"\s+", "", e3).lower()
     mis_re = globals().get("_STT_EAR1_MISHEARD_RE")
-    if n2 and n2 == n3 and mis_re is not None and mis_re.search(e1) and not mis_re.search(e2):
-        return True
+    if mis_re is not None and mis_re.search(e1) and not mis_re.search(e2):
+        if n2 and n2 == n3:
+            return True
+        # e3 is th-mix and may spell a Thai word in English (e.g. e2="โปรแกรม..." vs e3="program...")
+        if len(e2) >= max(4, int(len(e1) * 0.65)) and not mis_re.search(e3):
+            return True
     return False
 
 
@@ -2725,6 +2730,8 @@ _PHONE_INTENT_HINTS = (
     (re.compile(r"(?:เก็บรูป.*กี่(?:รูป|ลูก)|แนบรูป.*กี่(?:รูป|ลูก)|รูปภาพ.*กี่(?:รูป|ลูก))"), "เก็บรูปภาพได้กี่รูป รูปภาพสินค้า 5 ช่อง 2001 2005 ไฟล์แนบเอกสาร 25 MB"),
     (re.compile(r"(?:แต้ม.*(?:ครอบครัว|รวมแต้|หลายคน)|กลุ่มสมาชิกรวมแต้ม)"), "ระบบสมาชิก กลุ่มสมาชิกรวมแต้ม ครอบครัว แต้มสะสม บันทึกตัดแต้ม 1022 POS"),
     (re.compile(r"(?:ตัด(?:แต้ม|แทบ)|จัดแต้ม|ใช้แต้ม|เอาแต้ม).*(?:ส่วน(?:ลด|รถ)|หน้าร้าน|pos|pls|เลยได้ไหม)", re.I), "ระบบสมาชิก แต้มสะสม บันทึกตัดแต้ม ส่วนลด 1022 6001 POS"),
+    (re.compile(r"(?:(?:คุณ|ระบบ|โปรแกรม)?มีกี่ระบบ|มีระบบอะไรบ้าง|มีกี่โมดูล)"), "ภาพรวมระบบทั้งหมด 15 ระบบ 4 กลุ่มหลัก พอร์ทัลกลาง BC Ai Account"),
+    (re.compile(r"(?:เก่งกว่า|ดีกว่า|เด่นกว่า|ต่างจาก|เทียบกับ).*(?:โปรแกรมอื่น|โประแกมป์อื่น|เจ้าอื่น|ค่ายอื่น|คนอื่น|คู่แข่ง)"), "ภาพรวมจุดเด่น BC Ai Account 4 รุ่น 15 ระบบ บัญชี ภาษี 17 ประเภทธุรกิจ Switchboard"),
 )
 
 
@@ -2787,6 +2794,7 @@ def _is_incomplete_thai_tail(text: str) -> bool:
 _STANDALONE_TOPIC_RE = re.compile(
     r"(?:เบอร์โทร|ติดต่อ|เว็บไซต์|เว็ปไซต์|เวบไซต์|ไลน์|ราคา|แพ็กเกจ|ติดตั้ง|คลาวด์|ออฟฟิศ|เบลอออฟฟิศ|อยู่ที่ไหน|เชียงใหม่|บ้านเชียง|"
     r"เวอร์ชัน|เวอร์ชั่น|ไว้ท่านเก่า|โปรแกรมเก่า|โประแก็มเก่า|ห้าจุดห้า|รุ่น|ขนส่ง|ขนทรง|ยูเซอร์|ทีมกี่คน|"
+    r"กี่ระบบ|มีระบบอะไรบ้าง|กี่เมนู|กี่หมวด|เก่งกว่า|จุดเด่น|"
     r"มาคุยเรื่อง|เปลี่ยนเรื่อง|ถามเรื่อง|ถ้าเป็นธุรกิจ|ธุรกิจ|ร้านผม|ร้านยาง|รายงานสินค้า|เงินสด|ธนาคาร|คลังสินค้า|คังสินค้า|สต็อก|สต๊อก|โลเคชั่น|"
     r"โป(?:ร|้)?โม(?:เม)?ชั[น่]น?|โปโมชั[น่]น?|promotion|พักบิล|พักบิน|บาร์โค้ด|ต้นทุน|fifo|lifo|fefo|pos|พีโอเอส|สาขา|ส่วนลด|คูปอง|พนักงานโทร|โทรหาผม|ติดต่อกลับ|"
     r"ที่อยู่จัดส่ง|ที่อยู่จากส่ง|ที่อยู่จะส่ง|พิกัด|ดาวเทียม|gps|จีพีเอส|เก็บรูป|รูปภาพ|รูปสินค้า|แนบรูป|แนบไฟล์|กี่รูป|กี่ลูก|กี่เบอร์|กี่เบิร์|"
@@ -2827,18 +2835,26 @@ _REAL_Q_OR_PRODUCT_RE = re.compile(
 )
 _CALL_META_ASK_RE = re.compile(
     r"(?:โทร(?:หา|มา|เข้า).*กี่(?:รอบ|ครั้ง)|รวมแล้วโทรกี่ครั้ง|จำได้(?:ไหม|หรือเปล่า|รึเปล่า).*(?:กี่รอบ|กี่ครั้ง|คุยอะไร)|"
-    r"(?:เคย)?คุยอะไรกัน(?:มา)?บ้าง|เบอร์(?:ที่)?(?:ผม|ฉัน|หนู)?โทร(?:เข้า)?มา)"
+    r"(?:เคย)?คุยอะไรกัน(?:มา)?บ้าง|คุยอะไรกันต่อ|เราจะคุยอะไร|เบอร์(?:ที่)?(?:ผม|ฉัน|หนู)?โทร(?:เข้า)?มา|"
+    r"(?:ชื่อ(?:คุณ|น้อง|พี่|เอไอ|บอท)?อะไร|คุณชื่ออะไร|เรียกคุณว่าอะไร))"
 )
-_CLOSING_ONLY_RE = re.compile(r"(?:ไม่มีอะไรแล้ว|แค่นี้(?:แหละ|ก่อน)|ขอบคุณ(?:มาก)?(?:นะ)?(?:ครับ|ค่ะ|คะ).*ไม่มีอะไร)")
+_CLOSING_ONLY_RE = re.compile(
+    r"(?:ไม่มีอะไรแล้ว|แค่นี้(?:แหละ|ก่อน)|ขอบคุณ(?:มาก)?(?:นะ)?(?:ครับ|ค่ะ|คะ).*ไม่มีอะไร|"
+    r"(?:โอเค|ขอบคุณ|ได้(?:เลย)?).*(?:เดี๋ยว|จะ).*?(?:เข้า)?ไป(?:ลอง|ทดลอง|ดู))"
+)
 _BOILERPLATE_CTX_RE = re.compile(
     r"(?:เจาร์วิสครับ|เวอร์ชันล่าสุดคือบีซีเอไอแอคเคาท์|ผู้ช่วยเอไอของบีซีคอลเซ็นเตอร์|ยินดีที่ได้คุยกันอีกครั้ง|"
+    r"ยินดีที่ได้รู้จัก|ได้ยินชื่อคุณ|คุยได้ทุกภาษา|อยากให้ช่วยเรื่องอะไร|"
     r"ยังไม่มีข้อมูลยืนยัน|ไม่มีข้อมูลยืนยัน|สัญญาณไม่ค่อยชัด|ขอฟังอีกครั้ง|มีอะไรอยากรู้เพิ่ม|ขอบคุณที่โทรมานะครับ)"
 )
 
 
-def _extract_recent_topic(history: list[dict]) -> str:
+def _extract_recent_topic(history: list[dict], current_name: str = "") -> str:
     """Return the most recent substantive user topic snippet (preferring caller turns over verbose bot replies)."""
     recent = list(reversed((history or [])[-8:]))
+    meta_re = globals().get("_CALL_META_ASK_RE")
+    close_re = globals().get("_CLOSING_ONLY_RE")
+    strip_re = globals().get("_NON_SEARCH_STRIP_RE")
     for prefer_user in (True, False):
         for m in recent:
             if prefer_user and m.get("role") != "user":
@@ -2850,6 +2866,20 @@ def _extract_recent_topic(history: list[dict]) -> str:
                 continue
             if _BOILERPLATE_CTX_RE.search(c):
                 continue
+            if prefer_user:
+                if meta_re is not None and meta_re.search(c):
+                    continue
+                if close_re is not None and close_re.search(c):
+                    continue
+                if current_name and current_name in c and strip_re is not None:
+                    rem_n = re.sub(r"[\s.,!?…]+", "", strip_re.sub(" ", c.replace(current_name, " ")))
+                    if len(rem_n) < 4:
+                        continue
+                # Skip short bare-name / ack utterances (e.g. "นครครับ", "ครับ อ่าง") that carry no product topic
+                if re.fullmatch(r"(?:คุณ|พี่|น้อง|ลุง)?[ก-๙]{2,14}\s*(?:ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|ครั[พปฐ])[\s.,!?…]*", c):
+                    prod_re = globals().get("_REAL_Q_OR_PRODUCT_RE")
+                    if prod_re is None or not prod_re.search(c):
+                        continue
             if re.fullmatch(
                 r"(?:สวัสดี|ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|อืม|ใช่|ใช่ค่ะ|ใช่ครับ|ใช่ไหม|ใช่ไหมครับ|โอเค|คุยต่อ|อธิบายต่อเลย|"
                 r"ไม่เป็นอย่างงั้น|ไม่เป็นอย่างนั้น|เอาไม่ต้อง|ไม่ต้อง|ไม่เป็นไร|ไม่เอา|ไม่เอาครับ|มันทำงานยังไง|ทำยังไง|แล้วทำยังไง|"
@@ -2858,7 +2888,7 @@ def _extract_recent_topic(history: list[dict]) -> str:
             ):
                 continue
             if prefer_user and re.fullmatch(
-                r"(?:ไม่เป็น|อย่างงั้น|อย่างนั้น|คุยต่อ|อธิบายต่อ|ทำไม|สรุป|อ๋อ|เอา|ไม่|ต้อง|ครับ|ค่ะ|มัน|ทำงาน|ยังไง|เข้าใจ|ใช่ไหม|\s)+",
+                r"(?:ไม่เป็น|อย่างงั้น|อย่างนั้น|คุยต่อ|อธิบายต่อ|ทำไม|สรุป|อ๋อ|เอา|ไม่|ต้อง|ครับ|ค่ะ|คะ|อ่าง|เอ่อ|อืม|มัน|ทำงาน|ยังไง|เข้าใจ|ใช่ไหม|\s)+",
                 c,
             ):
                 continue
@@ -2866,8 +2896,14 @@ def _extract_recent_topic(history: list[dict]) -> str:
     return ""
 
 
-def _is_non_search_phone_turn(heard: str, detected_name: str, history: list[dict], name_corrected: bool = False) -> bool:
-    """True when phone turn is pure name intro/correction, callback confirm/request, caller-meta question, or closing."""
+def _is_non_search_phone_turn(
+    heard: str,
+    detected_name: str,
+    history: list[dict],
+    name_corrected: bool = False,
+    current_name: str = "",
+) -> bool:
+    """True when phone turn is pure name intro/repeat/correction, bare ack, callback confirm/request, caller-meta question, or closing."""
     s = (heard or "").strip()
     if not s:
         return False
@@ -2875,11 +2911,22 @@ def _is_non_search_phone_turn(heard: str, detected_name: str, history: list[dict
         return True
     if re.search(r"(?:จำผิด(?:เปล่า|แล้ว)?|เรียกผิด|ไม่ใช่.*ชื่อ|จำสลับชื่อ)", s) and not _REAL_Q_OR_PRODUCT_RE.search(s):
         return True
-    if detected_name:
-        rem = s.replace(detected_name, " ")
-        rem = _NON_SEARCH_STRIP_RE.sub(" ", rem)
-        rem = re.sub(r"[\s.,!?…]+", "", rem)
-        if len(rem) < 4:
+    for nm in (detected_name, current_name):
+        if nm:
+            rem = s.replace(nm, " ")
+            rem = _NON_SEARCH_STRIP_RE.sub(" ", rem)
+            rem = re.sub(r"[\s.,!?…]+", "", rem)
+            if len(rem) < 4:
+                return True
+    # Pure short acknowledgement / hesitation filler with no product question (e.g. "ครับ", "ครับ อ่าง", "อืม ครับ")
+    if not _REAL_Q_OR_PRODUCT_RE.search(s):
+        bare_ack = re.sub(
+            r"(?:สวัสดี|หวัดดี|ฮัลโหล|ขอบคุณ(?:มาก)?|ครับผม|นะครับ|นะคะ|ครับ|ค่ะ|คะ|คับ|ครั[พปฐ]|อืม|อ๋อ|อ้อ|เอ่อ|อ่า|อ่าง|โอเค|ใช่|ได้|ค่ะ|นะ|จ้า|จ๊ะ)",
+            " ",
+            s,
+        )
+        bare_ack = re.sub(r"[\s.,!?…]+", "", bare_ack)
+        if len(bare_ack) < 3:
             return True
     prev_bot = history[-1].get("content", "") if history and history[-1].get("role") == "assistant" else ""
     prev_asked_cb = bool(re.search(r"เบอร์นี้|เบอร์อื่น|ติดต่อกลับเรื่องอะไร", prev_bot))
@@ -2888,7 +2935,7 @@ def _is_non_search_phone_turn(heard: str, detected_name: str, history: list[dict
             return True
     if _CALL_META_ASK_RE.search(s) and not re.search(r"(?:ติดต่อ|บริษัท|ออฟฟิศ|ราคา|แพ็กเกจ|รุ่น|เวอร์ชัน|ทำได้ไหม|เมนูไหน|โปรแกรม|ระบบ|สต็อก|บัญชี|ภาษี|รายงาน|คลาวด์)", s):
         return True
-    if _CLOSING_ONLY_RE.search(s) and not _REAL_Q_OR_PRODUCT_RE.search(s):
+    if _CLOSING_ONLY_RE.search(s) and not _REAL_Q_OR_PRODUCT_RE.search(re.sub(r"เดี๋ยว\s*ยังไง", "", s)):
         return True
     if _CB_INTENT_ONLY_RE.search(s) and not _REAL_Q_OR_PRODUCT_RE.search(s):
         return True
@@ -2924,6 +2971,8 @@ def _record_brain_miss(
         return
     if re.search(r"(?:จำผิด(?:เปล่า|แล้ว)?|เรียกผิด|ไม่ใช่.*(?:จำผิด|แล้วมี))", q_clean) and not _REAL_Q_OR_PRODUCT_RE.search(q_clean):
         return
+    if (_CALL_META_ASK_RE.search(q_clean) or _CLOSING_ONLY_RE.search(q_clean)) and not _REAL_Q_OR_PRODUCT_RE.search(q_clean):
+        return
     if float(top_cosine or 0.0) <= 0.0 and not _REAL_Q_OR_PRODUCT_RE.search(q_clean):
         return
     ctx_clean = re.sub(r"\b0[689]\d[- ]?\d{3}[- ]?\d{4}\b", "[phone]", str(ctx_topic or "")).strip()[:80]
@@ -2950,6 +2999,8 @@ def _is_explicit_topic_switch(heard: str) -> bool:
     if not s:
         return False
     if _EXPLICIT_TOPIC_SWITCH_RE.search(s):
+        return True
+    if len(s) >= 8 and re.search(r"(?:กี่ระบบ|มีระบบอะไรบ้าง|กี่เมนู|กี่โมดูล)", s):
         return True
     return len(s) >= 14 and bool(_STANDALONE_TOPIC_RE.search(s))
 
@@ -3452,8 +3503,8 @@ def reply(audio, public=False, hello=False):  # hello: greet() already cleared t
             now += f"\n(ผลจาก web_search ตอนนี้: {(yield from dispatch([('web_search', {'query': heard})], said, turn, tools))[0]})"
         elif heard and (FAST_CHAT.match(heard.strip()) or MULTILANG_FAST_CHAT.match(heard.strip())):  # bare hello/thanks/hold: answer right away (~0.9 s faster, no wasted search)
             pass
-        elif heard and on_phone() and _is_non_search_phone_turn(heard, detected_name, history, name_corrected=name_corrected):
-            pass  # name intro, caller-meta question, closing, or pure callback confirm/request: 0ms wait filler / 0 MCP call
+        elif heard and on_phone() and _is_non_search_phone_turn(heard, detected_name, history, name_corrected=name_corrected, current_name=c_name):
+            pass  # name intro/repeat, bare ack, caller-meta question, closing, or pure callback confirm/request: 0ms wait filler / 0 MCP call
         elif heard and not on_phone() and not stay_topic and (wording := search_words(history, heard))[1] and not was:  # off the topic, maybe misheard: ask, search nothing
             topic, new = wording[1]
             log.info("topic jump? %s -> %s", topic, new)  # the log watcher learns from these

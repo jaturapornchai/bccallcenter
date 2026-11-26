@@ -133,6 +133,11 @@ _BENCHMARK_CASES: list[tuple[str, str, tuple[str, ...]]] = [
     # --- 2 Competitor Comparison Cases (2026-11-25 0gr19 — stay on POS/BC highlights, never jump to Excel) ---
     ("เทียบกับซอฟต์แวร์ของวงในของคุณดีกว่ายังไง POS", "hit_all", ("POS", "ออฟไลน์")),
     ("ดีกับของคนอื่นยังไงบ้างวงในระบบ POS", "hit_all", ("POS", "โปรโมชัน")),
+    # --- 4 Real-Call Cases (2026-11-26 2dg88 — competitor highlights, 15 systems count, 735 menus) ---
+    ("โปรแกรมคุณเก่งกว่าโประแกมป์อื่นยังไง", "hit_all", ("BC Ai Account", "15 ระบบ")),
+    ("คุณมีกี่ระบบ", "hit_all", ("15 ระบบ", "4 กลุ่ม")),
+    ("มีระบบอะไรบ้าง", "hit_all", ("15 ระบบ", "POS")),
+    ("แล้วระบบบัญชีของคุณมีกี่เมนู", "hit_all", ("735", "9 หมวด")),
     # --- 8 OOV / Abstain Traps — MUST abstain cleanly without fabricating facts ---
     ("เมนู 9999 ใช้ทำอะไรครับ", "abstain", ()),
     ("เมนู 8888 อยู่ตรงไหนครับ", "abstain", ()),
