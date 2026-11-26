@@ -1,10 +1,10 @@
-# Dev on the Fly — รีวิวสายใหม่ พัฒนา J.A.R.V.I.S และอัปเดตรายการขอข้อมูลเข้าสมอง (สั่งรันด้วยมือ)
+# Dev on the Fly — รีวิวสายใหม่ พัฒนา J.A.R.V.I.S และอัปเดตรายการขอข้อมูลเข้าสมอง (ทุก 4 ชม.)
 
 ## Objective
 
 ระบบนี้ทำงานด้วย **AI อัตโนมัติ 100% และพัฒนาตัวเองได้ (Self-Improving)** ขั้นตอนนี้ใช้ตรวจสายเข้าที่จบแล้วและยังไม่เคยรีวิว จากหลักฐาน 5 อย่าง คือ ไฟล์เสียง WAV สองช่อง, ข้อความที่ระบบได้ยินระหว่างสาย, ผลประเมิน QA หลังวางสาย, log ของ J.A.R.V.I.S และ `data/brain-miss-log.jsonl` แล้วสามารถแก้ไขปรับปรุงโปรแกรมได้ทุกส่วนภายในโปรเจกต์ `d:\yalecom` (โค้ด, Prompt, STT/TTS/VAD/Barge-in, พจนานุกรมตัดคำไทย, `pgvector`, โน้ต `bcbrain/vault/` ที่มีหลักฐานจริง และชุดทดสอบ) เพื่อให้ตอบคำถามลูกค้าได้ดีที่สุด **ภายใต้กฎเหล็ก: ห้ามเดา ห้ามมั่ว ห้ามแต่งเติมข้อเท็จจริงเองเด็ดขาด** (เรื่องที่ยังไม่มีข้อเท็จจริงยืนยันให้จดไว้ใน [docs/brain-wishlist.md](brain-wishlist.md)) จากนั้นทดสอบและ deploy ตามกฎ 4 ขั้นใน `AGENTS.md` เฉพาะตอนที่ไม่มีสายค้างอยู่
 
-**ไม่มีงานตั้งเวลา** — รอบรีวิวเกิดขึ้นเมื่อมีผู้สั่งรันด้วยมือตาม runbook นี้เท่านั้น และห้ามสร้างงานตั้งเวลาใหม่เว้นลุงจืดสั่ง
+รองรับทั้ง **รอบอัตโนมัติทุก 4 ชั่วโมง** (งานตั้งเวลา `yalecom-dev-on-the-fly` ในแอป Claude Desktop — cron `0 */4 * * *` ตามเวลาเครื่อง) และการสั่งรันด้วยมือตาม runbook นี้
 
 ## Workflow
 
@@ -72,7 +72,7 @@ node scripts/dev-on-the-fly-scan.mjs --jarvis-log <sessionId>
 
 1. `npm run typecheck` และถ้าแก้ไฟล์ Python ให้ `py_compile` ไฟล์นั้น ต้องผ่าน 0 error
 2. `node scripts/dev-on-the-fly-scan.mjs --check-idle` ต้องได้ `"idle": true` ก่อน build (build เขียนทับ `.next` ที่ server กำลังใช้) ถ้าไม่ว่างให้รอ 60 วินาทีแล้วเช็กใหม่ ไม่เกิน 10 ครั้ง
-3. ยังไม่ว่างหลังครบ 10 ครั้ง → `git stash push -u -m "dotf-pending <sessionIds>"` แล้ว `node scripts/dev-on-the-fly-scan.mjs --unlock` จบรอบ (ผู้รันรอบถัดไปต้อง pop มา deploy ต่อ ไม่มีรอบอัตโนมัติมาทำให้)
+3. ยังไม่ว่างหลังครบ 10 ครั้ง → `git stash push -u -m "dotf-pending <sessionIds>"` แล้ว `node scripts/dev-on-the-fly-scan.mjs --unlock` จบรอบ (รอบถัดไปที่มีสายใหม่จะ pop มา deploy ต่อตามขั้น 1)
 4. `npm run build` แล้วรีสตาร์ททันที: แก้ไฟล์ใน `jarvis/` ใช้ `-Target all` นอกนั้นใช้ `-Target server`
 
    ```bash
@@ -97,7 +97,7 @@ node scripts/dev-on-the-fly-scan.mjs --mark-done <id1,id2> --changed <true|false
 
 | รายการ | ค่า | ที่อยู่ |
 | --- | --- | --- |
-| งานตั้งเวลา | ไม่มี — สั่งรันด้วยมือตามขั้น 1–6 | — |
+| งานตั้งเวลา | ทุก 4 ชม. (cron `0 */4 * * *` ตามเวลาเครื่อง) — งาน `yalecom-dev-on-the-fly` โหมด Bypass permissions | แอป Claude Desktop หัวข้อ Scheduled (`~/.claude/scheduled-tasks/yalecom-dev-on-the-fly/SKILL.md`) |
 | รายการขอข้อมูลเข้าสมอง | เก็บช่องว่างความรู้จากสายจริงให้ลุงจืดเติมใน BC Brain | `docs/brain-wishlist.md` |
 | จำนวนสายต่อรอบ | `--limit 5` (สูงสุด 10) | `scripts/dev-on-the-fly-scan.mjs` |
 | อายุ lock | 100 นาที (`LOCK_STALE_MS`) | `scripts/dev-on-the-fly-scan.mjs` |
@@ -152,7 +152,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/restart-services.ps1
 
 ## Limitation
 
-- ไม่มีงานตั้งเวลา สายใหม่จะไม่ถูกรีวิวจนกว่าจะมีผู้สั่งรันตามขั้นตอนนี้ด้วยมือ
+- งานตั้งเวลา `yalecom-dev-on-the-fly` ทำงานเฉพาะตอนแอป Claude Desktop เปิดอยู่ ถ้าแอปปิดอยู่ตอนถึงเวลา รอบนั้นจะรันเมื่อเปิดแอปครั้งถัดไป และถ้าปิดงานนี้ในหัวข้อ Scheduled สายใหม่จะไม่ถูกรีวิวจนกว่าจะเปิดใหม่หรือสั่งรันตามขั้นตอนนี้ด้วยมือ
 - ไฟล์เสียงเป็นคุณภาพโทรศัพท์ 8 kHz ข้อความที่ Whisper ถอดซ้ำจึงเป็นความเห็นที่สอง ไม่ใช่คำตอบที่ถูกเสมอ โดยเฉพาะผู้โทรที่พูดเบาหรือประโยคสั้น
 - ความเร็วถอดเสียงขึ้นกับ VRAM ที่ว่างตอนนั้น: สาย 90 วินาทีใช้ราว 11 วินาทีบน GPU แต่ถ้า VRAM ว่างไม่ถึง 3,000 MB จะใช้ CPU ซึ่งใช้ราว 160 วินาที
 - log ของ J.A.R.V.I.S ไม่มีรหัสสายของฝั่ง Node จึงตัดตามช่วงเวลาของสาย ถ้ามีสองสายซ้อนเวลากัน บรรทัดจะปนกัน บรรทัดไล่ที่อยู่เครือข่ายของ WebRTC (ICE) ถูกตัดออก เหลือเฉพาะผลสรุป `ICE completed` หรือ `ICE failed`
