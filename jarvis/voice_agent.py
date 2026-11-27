@@ -1108,6 +1108,17 @@ def _say_numbers(text):
     return _NUMBER_RE.sub(_number_words, out)
 
 
+def _load_omnivoice():
+    """Load local OmniVoice Thai with the cloned reference voice (GPU when available)."""
+    kw = dict(device_map="cuda:0" if C.HAS_CUDA else "cpu", dtype=torch.float16 if C.HAS_CUDA else torch.float32)
+    try:
+        model = OmniVoice.from_pretrained(C.TTS_MODEL, local_files_only=True, **kw)  # no network at start once it is cached
+    except Exception:
+        model = OmniVoice.from_pretrained(C.TTS_MODEL, **kw)
+    assert model.sampling_rate == C.TTS_SAMPLE_RATE, model.sampling_rate
+    return model, model.create_voice_clone_prompt(ref_audio=C.REF_AUDIO_PATH, ref_text=C.REF_TEXT)
+
+
 def load_tts():
     """Prefer ElevenLabs Flash v2.5 Streaming TTS when configured (0 GPU VRAM, ~150ms TTFA);
     otherwise load local OmniVoice Thai on GPU."""
@@ -1126,16 +1137,31 @@ def load_tts():
             C.ELEVENLABS_MODEL_ID, C.ELEVENLABS_VOICE_ID, C.TTS_CACHE_DIR,
         )
         return ("elevenlabs", el)
-    kw = dict(device_map="cuda:0" if C.HAS_CUDA else "cpu", dtype=torch.float16 if C.HAS_CUDA else torch.float32)
-    try:
-        model = OmniVoice.from_pretrained(C.TTS_MODEL, local_files_only=True, **kw)  # no network at start once it is cached
-    except Exception:
-        model = OmniVoice.from_pretrained(C.TTS_MODEL, **kw)
-    assert model.sampling_rate == C.TTS_SAMPLE_RATE, model.sampling_rate
-    return model, model.create_voice_clone_prompt(ref_audio=C.REF_AUDIO_PATH, ref_text=C.REF_TEXT)
+    return _load_omnivoice()
 
 
 TTS_LOCK = threading.Lock()  # ponytail: one TTS phrase at a time for every caller; a second model if callers queue
+
+# Callers heard dead air on 2026-11-27 when ElevenLabs ran out of credits (HTTP 401 quota_exceeded): every uncached
+# sentence came back silent. The local voice now covers any cloud TTS failure. It loads on the first failure only
+# (measured 7 s to load, ~2 GB VRAM, 0.5-0.9 s per sentence), so normal operation still uses 0 GPU VRAM for TTS.
+_LOCAL_TTS = {"voice": None, "retry_at": 0.0}  # voice = (model, clone prompt) once loaded
+_LOCAL_TTS_LOCK = threading.Lock()
+_CLOUD_TTS_DOWN_CALLS = set()  # a call whose cloud TTS failed keeps the local voice to its end: one voice, no repeat failures
+
+
+def _local_tts_voice():
+    """Lazy-load the local fallback voice once; after a failed load wait 60 s before trying again."""
+    with _LOCAL_TTS_LOCK:
+        if _LOCAL_TTS["voice"] is None and time.monotonic() >= _LOCAL_TTS["retry_at"]:
+            t0 = time.monotonic()
+            try:
+                _LOCAL_TTS["voice"] = _load_omnivoice()
+                log.warning("TTS fallback: local OmniVoice loaded in %.1fs", time.monotonic() - t0)
+            except Exception:
+                _LOCAL_TTS["retry_at"] = time.monotonic() + 60.0
+                log.exception("TTS fallback: local OmniVoice failed to load")
+        return _LOCAL_TTS["voice"]
 
 
 _TTS_BP_SOS = butter(4, [110.0, 3500.0], btype="bandpass", fs=C.TTS_SAMPLE_RATE, output="sos")
@@ -1209,22 +1235,12 @@ def _detect_reply_emotion(heard: str, text: str) -> str:
     return "friendly"
 
 
-def speak(text, lang_override=None, emotion="friendly"):
-    cid = call_id() if "call_id" in globals() else ""
-    lang = lang_override or CALL_LANG.get(cid) or "th"
-    norm = _prepare_tts_text(text, lang)
-    if not norm:
-        return np.zeros((1, C.TTS_SAMPLE_RATE // 10), np.float32)
-    if isinstance(tts, tuple) and tts[0] == "elevenlabs":
-        el: ElevenLabsTTS = tts[1]
-        try:
-            arr = el.synthesize_pcm24k(norm, lang=lang, emotion=emotion).reshape(-1)
-            if arr.size:
-                return level(arr).reshape(1, -1)
-        except Exception:
-            log.exception("ElevenLabs synthesize failed")
-        return np.zeros((1, C.TTS_SAMPLE_RATE // 10), np.float32)
-    model, voice = tts
+def _tts_silence():
+    return np.zeros((1, C.TTS_SAMPLE_RATE // 10), np.float32)
+
+
+def _omnivoice_speak(model, voice, norm, lang):
+    """One phrase from local OmniVoice, trimmed to its speech and levelled; None when it produced no audio."""
     # Balanced diffusion steps on phone (14 steps: crisp Thai articulation).
     steps = C.SIP_TTS_STEP if ("on_phone" in globals() and on_phone()) else C.TTS_STEP
     for _ in range(3):
@@ -1239,7 +1255,32 @@ def speak(text, lang_override=None, emotion="friendly"):
                 arr = arr[max(0, int(idx[0]) - pad_pre):min(arr.size, int(idx[1]) + pad_post)]
             if arr.size:
                 return level(arr).reshape(1, -1)
-    return np.zeros((1, C.TTS_SAMPLE_RATE // 10), np.float32)
+    return None
+
+
+def speak(text, lang_override=None, emotion="friendly"):
+    cid = call_id() if "call_id" in globals() else ""
+    lang = lang_override or CALL_LANG.get(cid) or "th"
+    norm = _prepare_tts_text(text, lang)
+    if not norm:
+        return _tts_silence()
+    if not (isinstance(tts, tuple) and tts[0] == "elevenlabs"):
+        out = _omnivoice_speak(*tts, norm, lang)
+        return out if out is not None else _tts_silence()
+    if cid not in _CLOUD_TTS_DOWN_CALLS:
+        el: ElevenLabsTTS = tts[1]
+        try:
+            arr = el.synthesize_pcm24k(norm, lang=lang, emotion=emotion).reshape(-1)
+            return level(arr).reshape(1, -1) if arr.size else _tts_silence()
+        except Exception:
+            log.exception("ElevenLabs synthesize failed; falling back to the local voice")
+            if cid:
+                if len(_CLOUD_TTS_DOWN_CALLS) > 256:  # ids of finished calls are never removed one by one
+                    _CLOUD_TTS_DOWN_CALLS.clear()
+                _CLOUD_TTS_DOWN_CALLS.add(cid)
+    local = _local_tts_voice()
+    out = _omnivoice_speak(*local, norm, lang) if local else None
+    return out if out is not None else _tts_silence()
 
 
 def stream_bot_out(text, lang_override=None, lead=0.0, emotion="friendly"):

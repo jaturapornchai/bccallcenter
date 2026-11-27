@@ -1392,6 +1392,92 @@ def test_2dg88_wghhy_k7lyn_log_improvements():
             assert kw.lower() in ans.lower(), f"missing {kw!r} in {q!r}: {ans[:320]}"
 
 
+def test_cloud_tts_failure_falls_back_to_local_voice():
+    """Regression from the 2026-11-27 live call that had dead air: ElevenLabs answered HTTP 401 quota_exceeded
+    and speak() returned silence for every uncached sentence.
+    - a cloud TTS failure is spoken by the local voice, loaded once and only when first needed
+    - the rest of that call stays on the local voice (no repeated failing requests); a new call tries the cloud again
+    - a failed local load returns silence and is not retried on every sentence
+    - local-only mode never touches the cloud path."""
+    import contextlib
+
+    cloud_pcm = np.full(7200, 0.2, np.float32)
+    local_pcm = np.full(4800, 0.1, np.float32)
+    state = {"cid": "", "cloud_down": False, "cloud_calls": 0, "loads": 0, "load_fails": False, "local_calls": 0}
+
+    class FakeCloud:
+        def synthesize_pcm24k(self, norm, lang="th", emotion="friendly"):
+            state["cloud_calls"] += 1
+            if state["cloud_down"]:
+                raise RuntimeError("ElevenLabs HTTP 401: quota_exceeded")
+            return cloud_pcm
+
+    class FakeModel:
+        def generate(self, **kw):
+            state["local_calls"] += 1
+            return [local_pcm]
+
+    def fake_load():
+        state["loads"] += 1
+        if state["load_fails"]:
+            raise RuntimeError("CUDA out of memory")
+        return FakeModel(), "voice"
+
+    scope = load_symbols({
+        "TTS_LOCK", "_LOCAL_TTS", "_LOCAL_TTS_LOCK", "_CLOUD_TTS_DOWN_CALLS",
+        "_local_tts_voice", "_tts_silence", "_omnivoice_speak", "speak",
+    }, extra_scope={
+        "tts": ("elevenlabs", FakeCloud()),
+        "_load_omnivoice": fake_load,
+        "torch": types.SimpleNamespace(inference_mode=contextlib.nullcontext),
+        "OmniVoiceGenerationConfig": lambda **kw: kw,
+        "librosa": types.SimpleNamespace(effects=types.SimpleNamespace(trim=lambda arr, top_db: (arr, (0, arr.size)))),
+        "level": lambda arr: arr,
+        "_prepare_tts_text": lambda text, lang: text.strip(),
+        "CALL_LANG": {},
+        "call_id": lambda: state["cid"],
+        "on_phone": lambda: True,
+    })
+    speak = scope["speak"]
+    silence_len = C.TTS_SAMPLE_RATE // 10
+
+    # 1. Healthy cloud: cloud audio, the local model is never loaded
+    state["cid"] = "call-a"
+    assert speak("สวัสดีครับ").shape == (1, cloud_pcm.size)
+    assert state["loads"] == 0 and state["local_calls"] == 0
+
+    # 2. Cloud fails mid-call: the caller still hears speech from the local voice
+    state["cloud_down"] = True
+    out = speak("ประโยคที่ไม่มีในแคช")
+    assert out.shape == (1, local_pcm.size) and out.any(), "cloud TTS failure must not be dead air"
+    assert state["loads"] == 1 and state["cloud_calls"] == 2
+
+    # 3. Same call: no more failing cloud requests, no second model load
+    assert speak("ประโยคถัดไป").shape == (1, local_pcm.size)
+    assert state["cloud_calls"] == 2 and state["loads"] == 1
+
+    # 4. Cloud recovers: the same call keeps one voice, a new call goes back to the cloud
+    state["cloud_down"] = False
+    assert speak("ยังสายเดิม").shape == (1, local_pcm.size)
+    state["cid"] = "call-b"
+    assert speak("สายใหม่").shape == (1, cloud_pcm.size)
+    assert state["cloud_calls"] == 3 and state["loads"] == 1
+
+    # 5. Local voice cannot load: silence, and the load is not retried on every sentence
+    scope["_LOCAL_TTS"].update(voice=None, retry_at=0.0)
+    state.update(cid="call-c", cloud_down=True, load_fails=True, loads=0)
+    for text in ("หนึ่ง", "สอง"):
+        out = speak(text)
+        assert out.shape == (1, silence_len) and not out.any()
+    assert state["loads"] == 1, "a failed local load must wait before the next attempt"
+
+    # 6. Local-only mode: the local voice speaks, the cloud is never called
+    state.update(cid="call-d", cloud_calls=0, local_calls=0)
+    scope["tts"] = (FakeModel(), "voice")
+    assert speak("โหมดเสียงในเครื่อง").shape == (1, local_pcm.size)
+    assert state["cloud_calls"] == 0 and state["local_calls"] == 1
+
+
 TESTS = [
     test_caller_name_rejects_connectors_and_accepts_real_names,
     test_stt_stutter_detector_and_ear2_fallback,
@@ -1417,6 +1503,7 @@ TESTS = [
     test_target_precision_and_t8o1y_fixes,
     test_0gr19_name_correction_barge_floor_and_keepalive,
     test_2dg88_wghhy_k7lyn_log_improvements,
+    test_cloud_tts_failure_falls_back_to_local_voice,
 ]
 
 
